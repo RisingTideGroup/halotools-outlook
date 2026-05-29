@@ -28,6 +28,9 @@ import {
   ticketTypesForAgentCreate,
   ticketDeepLink,
   searchTickets,
+  stripAgentSignature,
+  getCachedClientCache,
+  getCachedSalesMailboxId,
 } from "@iusehalo/halo-api";
 import {
   getBody,
@@ -36,6 +39,7 @@ import {
   type EmailContext,
   type FetchedAttachment,
 } from "../lib/office";
+import { htmlToText } from "../lib/html";
 import type {
   HaloTicket,
   HaloUser,
@@ -252,21 +256,32 @@ function AppendDialog({
       // attributes them as agent-to-customer; inbox messages stay
       // "Email Received". Both are tenant-configurable; the defaults below
       // match Halo's standard outcome names.
-      const defaultOutcome =
-        email.direction === "outgoing"
-          ? getDefaults().defaultOutgoingOutcome ?? "Outgoing Email"
-          : getDefaults().defaultAppendOutcome ?? "Email Received";
+      const isOutgoing = email.direction === "outgoing";
+      const defaultOutcome = isOutgoing
+        ? getDefaults().defaultOutgoingOutcome ?? "Outgoing Email"
+        : getDefaults().defaultAppendOutcome ?? "Email Received";
+
+      // For outbound mail, strip the agent's configured Halo signature from
+      // note_html so the short-form note isn't dominated by the sig block.
+      // emailbody_html below keeps the full original body — Halo's native
+      // intake convention is "full thread in emailbody, just-the-content in
+      // note". Falls through to the unmodified body when the signature
+      // isn't configured or doesn't match exactly.
+      const noteHtml = isOutgoing ? stripAgentSignature(html) : html;
+      const agent = getCachedClientCache()?.agent;
 
       const action = await appendAction({
         ticket_id: selectedId,
         outcome: defaultOutcome,
-        note: html,
+        note: noteHtml,
         hiddenfromuser: internalNote,
         // RFC sender — for outgoing this is the agent, for incoming the customer.
         // Halo logs this verbatim as the From: header of the recorded action.
-        emailfrom: email.senderEmail,
+        emailfrom: email.senderName || email.senderEmail,
         emailfromname: email.senderName,
+        emailfromaddress: email.senderEmail,
         emailsubject: email.subject,
+        emailto: isOutgoing ? email.customerEmail : email.senderEmail,
         attachments: attachments.length ? attachments : undefined,
         // user_id is always the customer regardless of direction so the
         // action is linked to the right person in Halo. The Dashboard's
@@ -274,11 +289,32 @@ function AppendDialog({
         // is the customer for both sent and received mail.
         user_id: contact?.id,
         actionby_user_id: contact?.id,
+        // Agent attribution on outbound mail. For inbound we leave agent_id
+        // unset so Halo treats it as customer-originated.
+        agent_id: isOutgoing ? agent?.id : undefined,
         internetmessageid: email.internetMessageId,
         inreplyto: email.inReplyTo,
         references: email.references.length ? email.references.join(" ") : undefined,
         // EWS ItemId from Office.js — matches Halo's native email-intake field.
         mailentryid: email.itemId,
+        // Direction + delivered-status guard. email_status: 2 stops Halo from
+        // queuing this for actual send — we're recording an email that already
+        // happened.
+        emaildirection: isOutgoing ? "O" : "I",
+        email_status: 2,
+        // Full original body (both formats) so the action has the same
+        // emailbody/emailbody_html parity as Halo's native intake records.
+        emailbody_html: html,
+        emailbody: htmlToText(html),
+        // For outbound mail: stamp from_address_override so Halo records
+        // the agent's actual From address. from_mailbox_id: -2 signals
+        // "overridden from address" — matches the sales mailbox flow.
+        // sales_mailbox_override_id is resolved at app load via
+        // /api/SalesMailbox; undefined when the agent has no sales mailbox
+        // configured (Halo falls back to tenant defaults).
+        from_address_override: isOutgoing ? email.senderEmail : undefined,
+        from_mailbox_id: isOutgoing ? -2 : undefined,
+        sales_mailbox_override_id: isOutgoing ? getCachedSalesMailboxId() : undefined,
       });
 
       if (attachWarning) {
@@ -467,16 +503,20 @@ function CreateDialog({
         }
       }
 
+      const isOutgoing = email.direction === "outgoing";
+      const detailsHtml = isOutgoing ? stripAgentSignature(html) : html;
       const ticket = await createTicket({
         summary,
-        details: html,
+        details: detailsHtml,
         client_id: client?.id,
         user_id: contact?.id,
         tickettype_id: ticketTypeId,
         attachments: attachments.length ? attachments : undefined,
-        emailfrom: email.senderEmail,
+        emailfrom: email.senderName || email.senderEmail,
         emailfromname: email.senderName,
+        emailfromaddress: email.senderEmail,
         emailsubject: email.subject,
+        emailto: isOutgoing ? email.customerEmail : email.senderEmail,
         internetmessageid: email.internetMessageId,
         inreplyto: email.inReplyTo,
         references: email.references.length ? email.references.join(" ") : undefined,
@@ -484,6 +524,14 @@ function CreateDialog({
         // so the ticket's initial action carries a back-reference to the
         // source message in the user's mailbox.
         mailentryid: email.itemId,
+        // Direction + delivered-status guard — see CreateActionPayload.email_status.
+        emaildirection: isOutgoing ? "O" : "I",
+        email_status: 2,
+        emailbody_html: html,
+        emailbody: htmlToText(html),
+        from_address_override: isOutgoing ? email.senderEmail : undefined,
+        from_mailbox_id: isOutgoing ? -2 : undefined,
+        sales_mailbox_override_id: isOutgoing ? getCachedSalesMailboxId() : undefined,
       });
 
       // Remember selected ticket type as the new default

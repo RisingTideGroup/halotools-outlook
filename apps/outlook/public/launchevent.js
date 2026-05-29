@@ -210,9 +210,54 @@
     });
   }
 
+  // Read the agent snapshot the task pane wrote after its ClientCache load.
+  // Synchronous, never throws — falls through to {} when the task pane has
+  // never opened or ClientCache hasn't resolved yet. Used for agent_id
+  // attribution and signature stripping on outbound mail.
+  function getAgentSnapshot() {
+    try {
+      var raw = window.localStorage.getItem("halo.agentSnapshot.v1");
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  // Strip a known signature from an HTML body via exact substring match.
+  // Falls through to the original body when sig is empty or not present
+  // verbatim — false-positive stripping is worse than leaving the sig in.
+  function stripSignature(html, sig) {
+    if (!sig || !html) return html;
+    var i = html.indexOf(sig);
+    if (i === -1) return html;
+    return html.slice(0, i) + html.slice(i + sig.length);
+  }
+
+  // Minimal HTML → plain text for emailbody field. Same approach as the
+  // task pane's htmlToText helper but inline in ES5 for the launchevent
+  // runtime.
+  function htmlToText(html) {
+    if (!html) return "";
+    return html
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/p>\s*<p[^>]*>/gi, "\n\n")
+      .replace(/<[^>]+>/g, "")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
   function appendToHalo(ticketId, data) {
     return getAccessToken().then(function (token) {
       var cfg = getConfig();
+      var agent = getAgentSnapshot();
       var senderEmail = "";
       var senderName = "";
       var mailentryid = "";
@@ -232,17 +277,43 @@
       } catch (e) {
         /* swallow */
       }
+      // On-send is always outbound by construction. Strip the agent's
+      // configured Halo signature from note_html so the action's short-form
+      // note isn't dominated by the sig block; keep the full body in
+      // emailbody_html for parity with native intake.
+      var noteHtml = stripSignature(data.body || "", agent.signature);
       var payload = [{
         ticket_id: Number(ticketId),
         outcome: "Outgoing Email",
-        note: data.body,
-        emailfrom: senderEmail,
+        note: noteHtml,
+        emailfrom: senderName || senderEmail,
         emailfromname: senderName,
+        emailfromaddress: senderEmail,
         emailto: (data.to || []).join("; "),
         emailcc: (data.cc || []).join("; "),
         emailsubject: data.subject,
-        agent_id: 0,
+        // Agent attribution — use the cached Halo agent id when available,
+        // 0 as a marker for "Halo, attribute to API caller" otherwise.
+        agent_id: agent.id || 0,
         mailentryid: mailentryid || undefined,
+        // Direction + delivered-status guard matches Halo's native intake.
+        emaildirection: "O",
+        email_status: 2,
+        // Full original body in both formats so the action mirrors what
+        // native intake produces.
+        emailbody_html: data.body || "",
+        emailbody: htmlToText(data.body || ""),
+        // For outbound mail: stamp from_address_override with the agent's
+        // actual send-from address. from_mailbox_id: -2 signals "use
+        // overridden from address" — sales_mailbox_override_id omitted
+        // until we know the right endpoint to resolve it.
+        from_address_override: senderEmail,
+        from_mailbox_id: -2,
+        // Per-agent sales mailbox setup id, resolved by the task pane at app
+        // load via /api/SalesMailbox and stamped into the snapshot. Undefined
+        // when the agent has no sales mailbox configured — Halo falls back
+        // to tenant defaults.
+        sales_mailbox_override_id: agent.salesMailboxId || undefined,
       }];
       logEvent("info", "POST /api/Actions", {
         ticketId: ticketId,

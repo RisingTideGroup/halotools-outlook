@@ -34,7 +34,7 @@ import {
   findTicketsForEmail,
 } from "@iusehalo/halo-api";
 import { signOut } from "@iusehalo/halo-api";
-import { clearConfig, getConfig } from "@iusehalo/halo-api";
+import { clearConfig, getConfig, getCachedClientCache } from "@iusehalo/halo-api";
 import { domainOf, openExternalUrl, type EmailContext } from "../lib/office";
 import type { HaloUser, HaloClient, HaloTicket } from "@iusehalo/halo-api";
 
@@ -75,6 +75,18 @@ const useStyles = makeStyles({
   brand: {
     fontWeight: tokens.fontWeightSemibold,
     fontSize: tokens.fontSizeBase300,
+  },
+  brandColumn: {
+    display: "flex",
+    flexDirection: "column",
+    minWidth: 0,
+  },
+  agentLine: {
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorNeutralForeground3,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
   },
 });
 
@@ -216,7 +228,17 @@ export function Dashboard({ email, onSignedOut }: Props) {
     <div className={styles.root}>
       <UpdateBanner />
       <div className={styles.header}>
-        <Text className={styles.brand}>HaloPSA</Text>
+        <div className={styles.brandColumn}>
+          <Text className={styles.brand}>
+            {getCachedClientCache()?.control?.license_name ?? "HaloPSA"}
+          </Text>
+          {(() => {
+            const a = getCachedClientCache()?.agent;
+            if (!a) return null;
+            const subtitle = a.jobtitle ? `${a.name} · ${a.jobtitle}` : a.name;
+            return <Text className={styles.agentLine}>{subtitle}</Text>;
+          })()}
+        </div>
         <div style={{ display: "flex", gap: 4 }}>
           <Button
             appearance="subtle"

@@ -9,6 +9,7 @@ import {
 } from "@fluentui/react-components";
 import type { HaloUser, HaloClient, HaloFeedItem } from "@iusehalo/halo-api";
 import { listFeed } from "@iusehalo/halo-api";
+import { htmlToText } from "../lib/html";
 
 interface Props {
   contact?: HaloUser;
@@ -159,7 +160,7 @@ function FeedRow({ item }: { item: HaloFeedItem }) {
   const when = relativeTime(item.datetime);
   const actor = item.who_name?.trim() || "System";
   // Strip HTML if Halo gave us a rich note; the feed primarily renders text.
-  const note = stripHtml(item.note || "");
+  const note = htmlToText(item.note || "");
 
   return (
     <div className={styles.row}>
@@ -189,23 +190,6 @@ function FeedRow({ item }: { item: HaloFeedItem }) {
       </div>
     </div>
   );
-}
-
-function stripHtml(s: string): string {
-  return s
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>\s*<p[^>]*>/gi, "\n\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
 }
 
 function relativeTime(iso: string): string {
