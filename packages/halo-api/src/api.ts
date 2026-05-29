@@ -293,27 +293,38 @@ let _prioritiesCache: HaloPriority[] | undefined;
 
 export async function listTicketTypes(force = false): Promise<HaloTicketType[]> {
   if (_ticketTypesCache && !force) return _ticketTypesCache;
+  // Prefer the list ClientCache already loaded — it's the same set Halo's own
+  // UI uses, and we've already paid the round-trip on app bootstrap. Falls
+  // through to /api/TicketType with the same flags Halo's UI sends when
+  // ClientCache isn't loaded yet (older tenants, refresh path).
+  const cached = getCachedClientCache();
+  if (cached?.tickettypes && Array.isArray(cached.tickettypes)) {
+    _ticketTypesCache = cached.tickettypes.filter((t) => !t.inactive);
+    return _ticketTypesCache;
+  }
   const res = await call<{ tickettypes: HaloTicketType[] } | HaloTicketType[]>(
-    "/TicketType?includeinactive=false",
+    "/TicketType?showall=true&showinactive=false&include_defaults=true",
   );
   _ticketTypesCache = (Array.isArray(res) ? res : res.tickettypes).filter((t) => !t.inactive);
   return _ticketTypesCache;
 }
 
 /**
- * Subset of ticket types an agent can actually pick when creating a normal ticket.
- * - use === "tickets" drops opportunities ("opps") and project types ("projects").
+ * Subset of ticket types an agent can actually pick when creating from an email.
  * - agentscanselect === false drops types that exist only for auto-creation
  *   (e.g. "AI Parse Halo Email", "Triage") or end-user surfaces.
  * - visible === false drops types Halo has hidden everywhere.
- * Halo's /TicketType endpoint returns everything indiscriminately, so we filter here.
+ *
+ * Does NOT filter on `use`: opportunities ("opps") and projects ("projects")
+ * are valid log targets for emails (a sales email logged to an opportunity,
+ * a project status email logged to a project) and were previously excluded
+ * by an over-aggressive filter that's been removed.
  */
 export function ticketTypesForAgentCreate(all: HaloTicketType[]): HaloTicketType[] {
   return all.filter((t) => {
     if (t.inactive) return false;
     if (t.visible === false) return false;
     if (t.agentscanselect === false) return false;
-    if (t.use && t.use !== "tickets") return false;
     return true;
   });
 }

@@ -90,9 +90,12 @@ export interface HaloClientCache {
   /** All agents in the tenant. Replaces listAgents() for pickers / Assign to. */
   agents: HaloAgent[];
   /** Inbound/outbound email integrations. NOTE: these are NOT the same as
-   *  Halo's "sales mailboxes" — that's a separate concept with its own
-   *  endpoint we haven't located yet. Useful for display only. */
+   *  Halo's "sales mailboxes" — that's a separate concept exposed via
+   *  /api/SalesMailbox. Useful for display only. */
   mailboxes: HaloMailbox[];
+  /** All ticket types — same shape as /api/TicketType. Includes tickets,
+   *  opportunities, and projects (filter via ticketTypesForAgentCreate). */
+  tickettypes: HaloTicketType[];
   /** Tenant-wide config flags. Subset typed here; access via getControl(). */
   control: HaloControlFlags;
 }
@@ -314,6 +317,15 @@ export interface CreateTicketPayload {
   from_address_override?: string;
   from_mailbox_id?: number;
   sales_mailbox_override_id?: number;
+  /** Halo control flags to bypass server-side validation prompts.
+   *  _novalidate skips required-custom-field enforcement (so the add-in
+   *  can create from email without forcing the agent to fill in fields
+   *  configured as required on the chosen ticket type); _forcereassign
+   *  suppresses the "are you sure?" dialog when Halo would normally
+   *  prompt about reassignment. Together they mirror what Halo's own
+   *  email intake does — silent create, no popups. */
+  _novalidate?: boolean;
+  _forcereassign?: boolean;
 }
 
 /** Partial update payload for an existing ticket. Halo accepts mutated fields only. */

@@ -532,6 +532,11 @@ function CreateDialog({
         from_address_override: isOutgoing ? email.senderEmail : undefined,
         from_mailbox_id: isOutgoing ? -2 : undefined,
         sales_mailbox_override_id: isOutgoing ? getCachedSalesMailboxId() : undefined,
+        // Bypass server-side validation prompts so create-from-email succeeds
+        // silently even when the chosen ticket type has required custom
+        // fields the agent didn't fill in. Matches Halo's native intake.
+        _novalidate: true,
+        _forcereassign: true,
       });
 
       // Remember selected ticket type as the new default
