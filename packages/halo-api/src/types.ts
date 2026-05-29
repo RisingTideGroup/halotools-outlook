@@ -62,6 +62,17 @@ export interface HaloStatus {
   inactive?: boolean;
 }
 
+/** Charge rate code — what Halo applies as the billing rate for time on an
+ *  action. Pulled from ClientCache.lookups where lookupid === 17. id 0 is
+ *  the conventional "No Charge" entry. */
+export interface HaloChargeRate {
+  /** Used as chargerate_id on action/ticket payloads. 0 == No Charge. */
+  id: number;
+  name: string;
+  /** Hex display color from Halo's lookup config. */
+  colour?: string;
+}
+
 export interface HaloAgent {
   id: number;
   name: string;
@@ -96,6 +107,10 @@ export interface HaloClientCache {
   /** All ticket types — same shape as /api/TicketType. Includes tickets,
    *  opportunities, and projects (filter via ticketTypesForAgentCreate). */
   tickettypes: HaloTicketType[];
+  /** Halo's lookup tables. Big mixed list (thousands of entries). Filter
+   *  by `lookupid` to find a specific category, e.g. 17 == Charge Rates.
+   *  Use getChargeRates() rather than indexing directly. */
+  lookups: HaloLookup[];
   /** Tenant-wide config flags. Subset typed here; access via getControl(). */
   control: HaloControlFlags;
 }
@@ -107,6 +122,18 @@ export interface HaloMailbox {
   azureemail?: string;
   display_address?: string;
   enabled?: boolean;
+}
+
+/** A row from ClientCache.lookups. lookupid groups rows into categories
+ *  (17 == Charge Rate Names, see ClientCache content). custom2 commonly
+ *  holds a hex color, but the field's meaning varies by category. */
+export interface HaloLookup {
+  lookupid: number;
+  id: number;
+  name: string;
+  custom1?: string;
+  custom2?: string;
+  [k: string]: unknown;
 }
 
 /** A "Sales Mailbox" group from /api/SalesMailbox/:id?includedetails=true.
@@ -229,6 +256,8 @@ export interface CreateActionPayload {
   emailsubject?: string;
   /** Decimal hours spent on this action (e.g., 0.25 for 15 minutes). */
   time_taken?: number;
+  /** Charge rate id from ClientCache.lookups (lookupid 17). 0 == No Charge. */
+  chargerate_id?: number;
   /** RFC 5322 Message-ID of the source email — Halo threads on this natively. */
   internetmessageid?: string;
   /** Parent's Message-ID from the In-Reply-To header. */

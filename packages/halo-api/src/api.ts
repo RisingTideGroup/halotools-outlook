@@ -10,6 +10,7 @@ import type {
   HaloStatus,
   HaloAgent,
   HaloClientCache,
+  HaloChargeRate,
   HaloSalesMailboxGroup,
   HaloKbArticle,
   HaloCannedText,
@@ -571,6 +572,34 @@ export async function findSalesMailboxIdForAgent(
 export function getCachedSalesMailboxId(): number | undefined {
   const id = storage().get<number>(SALES_MAILBOX_ID_KEY);
   return typeof id === "number" && id > 0 ? id : undefined;
+}
+
+// ---------- Charge rates ----------
+
+/** Halo lookup category that holds charge rates. */
+const CHARGE_RATE_LOOKUP_ID = 17;
+
+/** Read the charge-rate list out of ClientCache.lookups (lookupid 17).
+ *  Returns "No Charge" (id 0) as a leading entry even when the tenant
+ *  hasn't explicitly configured one — the compose timer defaults to
+ *  no-charge and we want a stable picker option. */
+export function getChargeRates(): HaloChargeRate[] {
+  const cc = getCachedClientCache();
+  const rows = (cc?.lookups ?? []).filter(
+    (l) => l.lookupid === CHARGE_RATE_LOOKUP_ID,
+  );
+  const mapped: HaloChargeRate[] = rows.map((l) => ({
+    id: l.id,
+    name: l.name,
+    colour: typeof l.custom2 === "string" ? l.custom2 : undefined,
+  }));
+  // Guarantee a No Charge option (id 0) at the top, even if Halo's tenant
+  // config doesn't include one. The on-send payload omits chargerate_id
+  // when 0 is selected, so this is purely a display affordance.
+  if (!mapped.some((r) => r.id === 0)) {
+    mapped.unshift({ id: 0, name: "No Charge" });
+  }
+  return mapped;
 }
 
 /**

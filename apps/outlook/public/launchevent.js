@@ -23,6 +23,13 @@
   var TOKENS_KEY = "halo.tokens.v1";
   var CONFIG_KEY = "halo.tenantConfig.v1";
   var TICKET_PROP = "haloLogTicketId";
+  // Stage props written by the compose pane. PENDING_CREATE_PROP is JSON
+  // {summary, ticketTypeId} — when present, we POST /api/Ticket first,
+  // then append the action to the new ticket. TIMER + CHARGE_RATE feed
+  // time_taken (decimal hours) and chargerate_id on the action.
+  var PENDING_CREATE_PROP = "haloLogPendingCreate";
+  var TIMER_TIME_PROP = "haloComposeTimeSeconds";
+  var CHARGE_RATE_PROP = "haloComposeChargeRateId";
   var DIAG_LOG_KEY = "halo.diagLog.v1";
   var MAX_ENTRIES = 200;
   var MAX_MESSAGE_LEN = 500;
@@ -254,6 +261,84 @@
       .trim();
   }
 
+  /**
+   * Create a ticket from the compose draft + email metadata, return its id.
+   * Used by the on-send create-then-append path when the compose pane
+   * staged a haloLogPendingCreate payload instead of a ticket id.
+   *
+   * Stamps the same email metadata as native intake (emaildirection: "O",
+   * email_status: 2, emailbody_html, mailentryid, etc.) so the resulting
+   * ticket looks identical to one Halo's own intake would have created.
+   * Validation flags (_novalidate, _forcereassign) bypass required-custom-
+   * field prompts.
+   */
+  function createTicketFromPending(pending, data) {
+    return getAccessToken().then(function (token) {
+      var cfg = getConfig();
+      var agent = getAgentSnapshot();
+      var senderEmail = "";
+      var senderName = "";
+      var mailentryid = "";
+      try {
+        senderEmail = Office.context.mailbox.userProfile.emailAddress || "";
+        senderName = Office.context.mailbox.userProfile.displayName || "";
+      } catch (e) { /* swallow */ }
+      try { mailentryid = Office.context.mailbox.item.itemId || ""; } catch (e) { /* swallow */ }
+
+      var payload = [{
+        summary: pending.summary,
+        details: data.body || "",
+        tickettype_id: pending.ticketTypeId,
+        emailfrom: senderName || senderEmail,
+        emailfromname: senderName,
+        emailfromaddress: senderEmail,
+        emailto: (data.to || []).join("; "),
+        emailcc: (data.cc || []).join("; "),
+        emailsubject: data.subject,
+        mailentryid: mailentryid || undefined,
+        emaildirection: "O",
+        email_status: 2,
+        emailbody_html: data.body || "",
+        emailbody: htmlToText(data.body || ""),
+        from_address_override: senderEmail,
+        from_mailbox_id: -2,
+        sales_mailbox_override_id: agent.salesMailboxId || undefined,
+        agent_id: agent.id || undefined,
+        _novalidate: true,
+        _forcereassign: true,
+      }];
+      logEvent("info", "POST /api/Ticket", {
+        summary: pending.summary,
+        ticketTypeId: pending.ticketTypeId || null,
+      });
+      return fetchWithTimeout(cfg.haloBaseUrl + "/api/Ticket", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + token,
+        },
+        body: JSON.stringify(payload),
+      }, FETCH_TIMEOUT_MS).then(function (r) {
+        if (!r.ok) {
+          return r.text().then(function (t) {
+            throw new Error("Halo /Ticket " + r.status + ": " + t.slice(0, 200));
+          });
+        }
+        return r.json();
+      }).then(function (json) {
+        // Halo's create response shape varies: single object, array of one,
+        // or { tickets: [...] }. Pull the id from whichever form arrives.
+        var entity = Array.isArray(json) ? json[0]
+          : (json && json.tickets && json.tickets[0]) ? json.tickets[0]
+          : json;
+        if (!entity || typeof entity.id !== "number") {
+          throw new Error("Halo /Ticket created OK but response had no id");
+        }
+        return entity.id;
+      });
+    });
+  }
+
   function appendToHalo(ticketId, data) {
     return getAccessToken().then(function (token) {
       var cfg = getConfig();
@@ -313,10 +398,18 @@
         // when the agent has no sales mailbox configured — Halo falls back
         // to tenant defaults.
         sales_mailbox_override_id: agent.salesMailboxId || undefined,
+        // Time tracking from the compose timer. data.timeSeconds is the
+        // raw second count (capped at 30 min by the UI); Halo expects
+        // decimal hours on time_taken. Omit both fields when 0 so we
+        // don't pollute Halo's time reports with empty entries.
+        time_taken: data.timeSeconds > 0 ? data.timeSeconds / 3600 : undefined,
+        chargerate_id: data.chargeRateId > 0 ? data.chargeRateId : undefined,
       }];
       logEvent("info", "POST /api/Actions", {
         ticketId: ticketId,
         bodyLen: (data.body || "").length,
+        timeSeconds: data.timeSeconds || 0,
+        chargeRateId: data.chargeRateId || 0,
         toCount: (data.to || []).length,
       });
       return fetchWithTimeout(cfg.haloBaseUrl + "/api/Actions", {
@@ -374,13 +467,35 @@
     stage = "loadCustomProps";
     logEvent("info", "stage → loadCustomProps");
     loadCustomProps().then(function (cp) {
-      var ticketId = cp.get(TICKET_PROP);
-      logEvent("info", "ticketId resolved", { ticketId: ticketId || null });
-      if (!ticketId) {
+      var ticketIdRaw = cp.get(TICKET_PROP);
+      var pendingRaw = cp.get(PENDING_CREATE_PROP);
+      var timeSecondsRaw = cp.get(TIMER_TIME_PROP);
+      var chargeRateRaw = cp.get(CHARGE_RATE_PROP);
+
+      var pending;
+      if (pendingRaw) {
+        try { pending = JSON.parse(pendingRaw); }
+        catch (e) { pending = undefined; }
+      }
+      var stagedTicketId = ticketIdRaw ? Number(ticketIdRaw) : undefined;
+      var timeSeconds = Number(timeSecondsRaw || 0);
+      if (!isFinite(timeSeconds) || timeSeconds < 0) timeSeconds = 0;
+      var chargeRateId = Number(chargeRateRaw || 0);
+      if (!isFinite(chargeRateId)) chargeRateId = 0;
+
+      logEvent("info", "stage targets resolved", {
+        ticketId: stagedTicketId || null,
+        pending: pending ? pending.summary : null,
+        timeSeconds: timeSeconds,
+        chargeRateId: chargeRateId,
+      });
+
+      if (!stagedTicketId && !pending) {
         clearTimeout(safety);
         finish();
         return;
       }
+
       stage = "readItem";
       logEvent("info", "stage → readItem");
       return Promise.all([
@@ -389,19 +504,39 @@
         readRecipientsField(Office.context.mailbox.item.to),
         readRecipientsField(Office.context.mailbox.item.cc),
       ]).then(function (parts) {
-        stage = "appendToHalo";
-        logEvent("info", "stage → appendToHalo");
-        return appendToHalo(ticketId, {
+        var data = {
           body: parts[0],
           subject: parts[1],
           to: parts[2],
           cc: parts[3],
-        });
+          timeSeconds: timeSeconds,
+          chargeRateId: chargeRateId,
+        };
+        // Create-then-append path: pending payload wins over a staged
+        // ticketId (the more recent intent). Post the ticket first, then
+        // append the action to the new ticket id.
+        if (pending) {
+          stage = "createTicket";
+          logEvent("info", "stage → createTicket", { summary: pending.summary });
+          return createTicketFromPending(pending, data).then(function (newId) {
+            stage = "appendToHalo";
+            logEvent("info", "stage → appendToHalo (newly created)", { ticketId: newId });
+            return appendToHalo(newId, data);
+          });
+        }
+        stage = "appendToHalo";
+        logEvent("info", "stage → appendToHalo");
+        return appendToHalo(stagedTicketId, data);
       }).then(function () {
         stage = "clearMarker";
         logEvent("info", "stage → clearMarker");
-        // Clear the marker so re-sending the same draft doesn't double-log.
+        // Clear every staged prop so re-sending the same draft doesn't
+        // double-log. Includes timer + charge rate so a fresh draft
+        // (next reply from this thread) starts from zero.
         cp.set(TICKET_PROP, null);
+        cp.set(PENDING_CREATE_PROP, null);
+        cp.set(TIMER_TIME_PROP, null);
+        cp.set(CHARGE_RATE_PROP, null);
         cp.saveAsync(function () {
           clearTimeout(safety);
           finish();
