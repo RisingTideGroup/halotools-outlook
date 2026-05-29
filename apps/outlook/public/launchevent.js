@@ -215,11 +215,22 @@
       var cfg = getConfig();
       var senderEmail = "";
       var senderName = "";
+      var mailentryid = "";
       try {
         senderEmail = Office.context.mailbox.userProfile.emailAddress || "";
         senderName = Office.context.mailbox.userProfile.displayName || "";
       } catch (e) {
         // fall through with blanks
+      }
+      try {
+        // On compose, item.itemId is populated once the draft has been saved
+        // server-side. For sends Outlook saves the item before firing the
+        // messageSending event, so itemId should be available here. If it's
+        // not (older Outlook builds, race), the payload omits the field and
+        // Halo treats it the same as native intake without an EntryId.
+        mailentryid = Office.context.mailbox.item.itemId || "";
+      } catch (e) {
+        /* swallow */
       }
       var payload = [{
         ticket_id: Number(ticketId),
@@ -231,6 +242,7 @@
         emailcc: (data.cc || []).join("; "),
         emailsubject: data.subject,
         agent_id: 0,
+        mailentryid: mailentryid || undefined,
       }];
       logEvent("info", "POST /api/Actions", {
         ticketId: ticketId,

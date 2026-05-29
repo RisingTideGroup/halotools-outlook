@@ -151,6 +151,13 @@ export interface CreateActionPayload {
   inreplyto?: string;
   /** Space-separated ancestor Message-IDs from the References header. */
   references?: string;
+  /** Exchange EWS ItemId of the source email (Office.context.mailbox.item.itemId).
+   *  Halo's native email intake stamps this on every action it ingests so the
+   *  action has a back-reference to the original message in the mailbox. Setting
+   *  it from the add-in matches that behavior: "Open in Outlook" links work,
+   *  Halo dedupes against re-logged emails, and reply-from-Halo flows can
+   *  thread back to the source message. */
+  mailentryid?: string;
   /** Halo customer ("user") this action is on — sets the action to be from-customer. */
   user_id?: number;
   /** Some Halo versions require this explicit field instead of (or alongside) user_id. */
@@ -177,6 +184,10 @@ export interface CreateTicketPayload {
   internetmessageid?: string;
   inreplyto?: string;
   references?: string;
+  /** Exchange EWS ItemId of the source email (Office.context.mailbox.item.itemId).
+   *  Stamped on the initial action so the ticket-from-email path matches Halo's
+   *  native intake behavior. See CreateActionPayload.mailentryid for details. */
+  mailentryid?: string;
 }
 
 /** Partial update payload for an existing ticket. Halo accepts mutated fields only. */

@@ -277,6 +277,8 @@ function AppendDialog({
         internetmessageid: email.internetMessageId,
         inreplyto: email.inReplyTo,
         references: email.references.length ? email.references.join(" ") : undefined,
+        // EWS ItemId from Office.js — matches Halo's native email-intake field.
+        mailentryid: email.itemId,
       });
 
       if (attachWarning) {
@@ -478,6 +480,10 @@ function CreateDialog({
         internetmessageid: email.internetMessageId,
         inreplyto: email.inReplyTo,
         references: email.references.length ? email.references.join(" ") : undefined,
+        // EWS ItemId from Office.js — matches Halo's native email-intake field
+        // so the ticket's initial action carries a back-reference to the
+        // source message in the user's mailbox.
+        mailentryid: email.itemId,
       });
 
       // Remember selected ticket type as the new default
