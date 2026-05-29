@@ -149,9 +149,11 @@ export function ContactCard({
   onClientChange,
 }: Props) {
   const styles = useStyles();
-  const displayName = contact?.name || email.senderName || email.senderEmail;
-  const domain = domainOf(email.senderEmail);
-  const contactEmail = contact?.emailaddress || email.senderEmail;
+  // Direction-aware: for sent items, the "customer" represented in this card
+  // is the recipient, not the agent. customerEmail/Name flip automatically.
+  const displayName = contact?.name || email.customerName || email.customerEmail;
+  const domain = domainOf(email.customerEmail);
+  const contactEmail = contact?.emailaddress || email.customerEmail;
   const phone = contact?.phonenumber || contact?.mobile_number;
   const siteName = contact?.site_name;
   const tags = contact?.tags?.filter((t) => t.value) ?? [];
@@ -230,6 +232,15 @@ export function ContactCard({
                 Contact matched
               </Badge>
             )}
+            {/* Direction badge: makes clear when viewing a sent item that
+                the card is showing the recipient, not the agent. */}
+            <Badge
+              appearance="outline"
+              color={email.direction === "outgoing" ? "informative" : "subtle"}
+              size="small"
+            >
+              {email.direction === "outgoing" ? "Sent to" : "From"}
+            </Badge>
           </div>
           {contact?.jobtitle && (
             <Text className={styles.jobTitle}>{contact.jobtitle}</Text>
@@ -279,7 +290,7 @@ export function ContactCard({
         <MessageBar intent="warning">
           <MessageBarBody>
             <MessageBarTitle>No matching contact in HaloPSA</MessageBarTitle>{" "}
-            {email.senderEmail} isn't linked to a contact yet.
+            {email.customerEmail} isn't linked to a contact yet.
           </MessageBarBody>
         </MessageBar>
       )}
@@ -289,7 +300,7 @@ export function ContactCard({
             triggerLabel="Find contact"
             triggerAppearance="primary"
             title="Find contact in HaloPSA"
-            initialQuery={email.senderEmail}
+            initialQuery={email.customerEmail}
             onSearch={async (q) => {
               const users = await searchUsers(q);
               return users.map<PickerItem<HaloUser>>((u) => ({
@@ -352,7 +363,7 @@ export function ContactCard({
             triggerLabel="Change contact"
             triggerAppearance="subtle"
             title="Find contact in HaloPSA"
-            initialQuery={email.senderEmail}
+            initialQuery={email.customerEmail}
             onSearch={async (q) => {
               const users = await searchUsers(q);
               return users.map<PickerItem<HaloUser>>((u) => ({
@@ -428,15 +439,15 @@ function CreateContactDialog({
   // Reset & prefill on open
   useEffect(() => {
     if (!open) return;
-    setName(email.senderName || "");
-    setEmailAddr(email.senderEmail || "");
+    setName(email.customerName || "");
+    setEmailAddr(email.customerEmail || "");
     setPhone("");
     setSelectedClient(prefilledClient);
     setClientQuery(prefilledClient?.name ?? "");
     setClientOptions(prefilledClient ? [prefilledClient] : []);
     setError(undefined);
     setSubmitting(false);
-  }, [open, email.senderEmail, email.senderName, prefilledClient?.id]);
+  }, [open, email.customerEmail, email.customerName, prefilledClient?.id]);
 
   // Debounced client search
   useEffect(() => {

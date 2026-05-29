@@ -8,8 +8,10 @@ const KEY = "halo.defaults.v1";
 export interface UserDefaults {
   /** Default ticket type ID to use on Create */
   defaultTicketTypeId?: number;
-  /** Default outcome string for Append actions; defaults to "Email Received" when undefined */
+  /** Default outcome string for Append actions on INCOMING email; defaults to "Email Received" */
   defaultAppendOutcome?: string;
+  /** Default outcome string for Append actions on OUTGOING email (sent items); defaults to "Outgoing Email" */
+  defaultOutgoingOutcome?: string;
   /** Whether attachments toggle defaults to on */
   includeAttachmentsByDefault?: boolean;
 }

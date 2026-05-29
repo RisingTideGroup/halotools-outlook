@@ -104,7 +104,10 @@ export function Dashboard({ email, onSignedOut }: Props) {
 
     (async () => {
       try {
-        const matchedContact = await findUserByEmail(email.senderEmail);
+        // For sent items / drafts, customerEmail is the recipient (the other
+        // party); for inbox messages it's the sender. Looking up the agent's
+        // own address against findUserByEmail would return nothing.
+        const matchedContact = await findUserByEmail(email.customerEmail);
         if (cancelled) return;
 
         let matchedClient: HaloClient | undefined;
@@ -114,7 +117,9 @@ export function Dashboard({ email, onSignedOut }: Props) {
             name: matchedContact.client_name ?? "",
           };
         } else {
-          const domain = domainOf(email.senderEmail);
+          // Domain comes from the customer's email — for outgoing this is
+          // the recipient's domain, not the agent's tenant domain.
+          const domain = domainOf(email.customerEmail);
           if (domain) matchedClient = await findClientByDomain(domain);
         }
         if (cancelled) return;
@@ -144,7 +149,7 @@ export function Dashboard({ email, onSignedOut }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [email.senderEmail, email.internetMessageId, refreshTick]);
+  }, [email.customerEmail, email.internetMessageId, refreshTick]);
 
   // Refetch open tickets whenever the active client changes (auto or override)
   useEffect(() => {
@@ -244,7 +249,7 @@ export function Dashboard({ email, onSignedOut }: Props) {
       {loadingResolve && (
         <div className={styles.loading}>
           <Spinner size="small" />
-          <Text size={200}>Looking up {email.senderEmail}…</Text>
+          <Text size={200}>Looking up {email.customerEmail}…</Text>
         </div>
       )}
 

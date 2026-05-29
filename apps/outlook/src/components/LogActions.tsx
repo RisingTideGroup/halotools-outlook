@@ -248,20 +248,30 @@ function AppendDialog({
         }
       }
 
+      // Direction-aware outcome. Sent items get "Outgoing Email" so Halo
+      // attributes them as agent-to-customer; inbox messages stay
+      // "Email Received". Both are tenant-configurable; the defaults below
+      // match Halo's standard outcome names.
+      const defaultOutcome =
+        email.direction === "outgoing"
+          ? getDefaults().defaultOutgoingOutcome ?? "Outgoing Email"
+          : getDefaults().defaultAppendOutcome ?? "Email Received";
+
       const action = await appendAction({
         ticket_id: selectedId,
-        // "Email Received" is Halo's canonical inbound-from-customer outcome — drives
-        // the action to be recorded as from the user and (via Halo's outcome rules)
-        // typically flips status to a "needs response" state.
-        outcome: getDefaults().defaultAppendOutcome ?? "Email Received",
+        outcome: defaultOutcome,
         note: html,
         hiddenfromuser: internalNote,
+        // RFC sender — for outgoing this is the agent, for incoming the customer.
+        // Halo logs this verbatim as the From: header of the recorded action.
         emailfrom: email.senderEmail,
         emailfromname: email.senderName,
         emailsubject: email.subject,
         attachments: attachments.length ? attachments : undefined,
-        // Explicit linkage so Halo attributes the action to the customer, not the
-        // agent who clicked Append. Without user_id Halo defaults to the API caller.
+        // user_id is always the customer regardless of direction so the
+        // action is linked to the right person in Halo. The Dashboard's
+        // contact resolution already uses customerEmail, so `contact` here
+        // is the customer for both sent and received mail.
         user_id: contact?.id,
         actionby_user_id: contact?.id,
         internetmessageid: email.internetMessageId,

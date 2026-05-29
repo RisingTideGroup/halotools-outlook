@@ -32,8 +32,18 @@ export function installStorageAdapter(): void {
 }
 
 export interface EmailContext {
+  /** Direction relative to the signed-in user. "outgoing" means we sent it
+   * (viewing a Sent Items message); "incoming" means we received it. */
+  direction: "incoming" | "outgoing";
+  /** The literal sender of the message per RFC 5322 — what goes into
+   * Halo Action `emailfrom`. For outgoing this is the agent. */
   senderEmail: string;
   senderName: string;
+  /** The other party in the conversation — used for contact / company /
+   * ticket lookups. For incoming this is the same as senderEmail; for
+   * outgoing this is the first non-self recipient. */
+  customerEmail: string;
+  customerName: string;
   subject: string;
   conversationId: string;
   /** RFC 5322 Message-ID of the current message, with angle brackets stripped. */
@@ -66,7 +76,13 @@ export function awaitOffice(): Promise<void> {
   });
 }
 
-/** Pull metadata from the currently selected message in the read pane. */
+/** Pull metadata from the currently selected message in the read pane.
+ *
+ * Direction-aware: compares the sender against the signed-in mailbox so that
+ * Sent Items / Drafts surface the recipient as the "customer" for lookups,
+ * while inbox messages surface the sender. Without this, viewing a Sent
+ * Items message would resolve the agent's own email against findUserByEmail
+ * and show an empty contact card with no related tickets. */
 export async function getCurrentEmailContext(): Promise<EmailContext | undefined> {
   const item = Office.context.mailbox.item;
   if (!item || item.itemType !== Office.MailboxEnums.ItemType.Message) return undefined;
@@ -77,9 +93,32 @@ export async function getCurrentEmailContext(): Promise<EmailContext | undefined
 
   const headers = await getInReplyToAndReferences(msg);
 
+  const selfEmail = (Office.context.mailbox.userProfile?.emailAddress ?? "").toLowerCase();
+  const senderEmail = from.emailAddress ?? "";
+  const isOutgoing = !!selfEmail && senderEmail.toLowerCase() === selfEmail;
+
+  // Counterparty: who we want to look up as the "customer". For outgoing
+  // mail, the first non-self recipient in To: — falls through to CC: if To:
+  // is empty or only contains the user themselves. For incoming, the sender.
+  let customerEmail = senderEmail;
+  let customerName = from.displayName ?? "";
+  if (isOutgoing) {
+    const recipients = [...(msg.to ?? []), ...(msg.cc ?? [])];
+    const counterparty = recipients.find(
+      (r) => r.emailAddress && r.emailAddress.toLowerCase() !== selfEmail,
+    );
+    if (counterparty) {
+      customerEmail = counterparty.emailAddress;
+      customerName = counterparty.displayName || counterparty.emailAddress;
+    }
+  }
+
   return {
-    senderEmail: from.emailAddress,
-    senderName: from.displayName,
+    direction: isOutgoing ? "outgoing" : "incoming",
+    senderEmail,
+    senderName: from.displayName ?? "",
+    customerEmail,
+    customerName,
     subject: item.subject ?? "",
     conversationId: msg.conversationId,
     internetMessageId: stripAngleBrackets(msg.internetMessageId),
