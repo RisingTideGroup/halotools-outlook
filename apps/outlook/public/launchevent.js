@@ -305,8 +305,7 @@
         emailbody: htmlToText(data.body || ""),
         // For outbound mail: stamp from_address_override with the agent's
         // actual send-from address. from_mailbox_id: -2 signals "use
-        // overridden from address" — sales_mailbox_override_id omitted
-        // until we know the right endpoint to resolve it.
+        // overridden from address".
         from_address_override: senderEmail,
         from_mailbox_id: -2,
         // Per-agent sales mailbox setup id, resolved by the task pane at app
