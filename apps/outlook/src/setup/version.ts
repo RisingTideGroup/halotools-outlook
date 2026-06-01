@@ -11,4 +11,4 @@
  * flow. The revision is invisible to the upgrade banner; only the first
  * three segments below are compared.
  */
-export const MANIFEST_VERSION = "1.0.2";
+export const MANIFEST_VERSION = "1.0.3";

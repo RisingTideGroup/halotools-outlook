@@ -36,7 +36,11 @@
     }
   },
   "validDomains": [
-    "tools.iusehalo.com"
+    "tools.iusehalo.com",
+    "login.microsoftonline.com",
+    "login.windows.net",
+    "login.live.com",
+    "accounts.google.com"
   ],
   "extensions": [
     {
