@@ -56,6 +56,35 @@ export async function setTokens(t: StoredTokens): Promise<void> {
 
 export async function clearTokens(): Promise<void> {
   await storage().remove(TOKENS_KEY);
+  notifyAuthCleared();
+}
+
+// ---- Auth-cleared event ----
+//
+// Fires whenever tokens are wiped — explicit sign-out, refresh failure, or
+// the API layer detecting a server-side auth failure (401/403 etc.). The
+// task pane subscribes so it can flip back to the AuthScreen instead of
+// showing a raw 4xx error in the middle of the UI.
+
+type AuthClearedListener = () => void;
+const authClearedListeners = new Set<AuthClearedListener>();
+
+/** Subscribe to "tokens were cleared" events. Returns an unsubscribe fn. */
+export function onAuthCleared(listener: AuthClearedListener): () => void {
+  authClearedListeners.add(listener);
+  return () => {
+    authClearedListeners.delete(listener);
+  };
+}
+
+function notifyAuthCleared(): void {
+  for (const l of authClearedListeners) {
+    try {
+      l();
+    } catch {
+      /* one listener throwing must not break others */
+    }
+  }
 }
 
 // First-run bootstrap from URL params written by the Setup wizard.

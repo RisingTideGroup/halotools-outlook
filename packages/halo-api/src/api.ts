@@ -1,5 +1,5 @@
 import { getAccessToken, refresh, NotAuthenticatedError } from "./auth";
-import { getConfig, getTokens } from "./config";
+import { getConfig, getTokens, clearTokens } from "./config";
 import { storage } from "./storage";
 import type {
   HaloClient,
@@ -59,17 +59,39 @@ async function call<T>(path: string, init: RequestInit = {}, retried = false): P
     );
   }
 
-  // 401 → one retry after forced refresh.
+  // 401 → one retry after forced refresh. If refresh fails it already wipes
+  // tokens (auth.ts), so we fall through to the auth-failure handling below.
   if (res.status === 401 && !retried) {
     const tokens = getTokens();
     if (tokens) {
-      await refresh(tokens.refreshToken);
-      return call<T>(path, init, true);
+      try {
+        await refresh(tokens.refreshToken);
+        return call<T>(path, init, true);
+      } catch {
+        // refresh() already cleared tokens; let the !res.ok block below
+        // surface a NotAuthenticatedError so the UI flips to AuthScreen.
+      }
     }
   }
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
+    // Classify auth failures vs every-other-thing-can-go-wrong:
+    //   - 401 (and we already tried refresh) → token rejected
+    //   - 403 → scope / permission revoked, treat as needing re-auth
+    //   - 400 with OAuth error-code body markers → expired token surfaced
+    //     as a 400 by some Halo endpoints
+    // 5xx and other 4xx (404 not-found, 422 validation, etc.) stay as
+    // HaloApiError so callers can show specific messages without booting
+    // the user back to sign-in.
+    const isAuthFailure =
+      res.status === 401 ||
+      res.status === 403 ||
+      (res.status === 400 && /invalid_?token|expired_?token|invalid_?grant|unauthorized/i.test(body));
+    if (isAuthFailure) {
+      await clearTokens();
+      throw new NotAuthenticatedError("Session expired — please sign in again");
+    }
     throw new HaloApiError(res.status, body);
   }
 

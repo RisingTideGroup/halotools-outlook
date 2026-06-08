@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, lazy, Suspense } from "react";
 import { makeStyles, tokens, Spinner, Text } from "@fluentui/react-components";
 import { ConfigScreen } from "./components/ConfigScreen";
 import { AuthScreen } from "./components/AuthScreen";
-import { getConfig, getClientCache } from "@iusehalo/halo-api";
+import { getConfig, getClientCache, onAuthCleared } from "@iusehalo/halo-api";
 import { isAuthenticated } from "@iusehalo/halo-api";
 import { getCurrentEmailContext, type EmailContext } from "./lib/office";
 
@@ -93,6 +93,13 @@ export function App() {
       }
     };
   }, [refreshPhase, refreshEmail]);
+
+  // Flip back to AuthScreen the moment the API layer detects a server-side
+  // auth failure and wipes tokens (401 after retry, 403, or a 400 body
+  // containing an OAuth invalid/expired-token error). Without this the
+  // component that fired the failed call would just render its own
+  // MessageBar showing the raw 4xx and the user would be stuck.
+  useEffect(() => onAuthCleared(refreshPhase), [refreshPhase]);
 
   if (phase === "loading") {
     return (
