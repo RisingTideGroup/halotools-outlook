@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import {
   Text,
   Spinner,
@@ -1036,6 +1036,7 @@ function LogStagingSection() {
   const [rehydrated, setRehydrated] = useState(false);
   const [autoMatchedTickets, setAutoMatchedTickets] = useState<HaloTicket[]>([]);
   const [autoMatchLoading, setAutoMatchLoading] = useState(false);
+  const autoMatchRan = useRef(false);
 
   // Rehydrate on mount so the user sees what's currently staged on this draft.
   useEffect(() => {
@@ -1064,7 +1065,8 @@ function LogStagingSection() {
   // open tickets for the compose recipients. Auto-stage when exactly one is found;
   // store candidates for the Append picker when multiple are found.
   useEffect(() => {
-    if (!rehydrated) return;
+    if (!rehydrated || autoMatchRan.current) return;
+    autoMatchRan.current = true;
     if (!getDefaults().autoLogRepliesToTickets) return;
 
     let cancelled = false;
@@ -1112,15 +1114,17 @@ function LogStagingSection() {
         setAutoMatchedTickets(tickets);
 
         // Auto-stage only when exactly one ticket found and nothing already staged.
-        if (tickets.length === 1) {
-          setStagedTicketId((prev) => {
-            if (prev !== undefined) return prev;
-            const t = tickets[0];
-            setStagedTicketSummary(t.summary);
-            writeLogProps({ ticketId: t.id });
-            return t.id;
-          });
+        // Read staged state directly — this effect runs after rehydration so the
+        // closure captures the final rehydrated values.
+        if (tickets.length === 1 && stagedTicketId === undefined && stagedCreate === undefined) {
+          const t = tickets[0];
+          setStagedTicketId(t.id);
+          setStagedTicketSummary(t.summary);
+          writeLogProps({ ticketId: t.id });
         }
+      } catch {
+        // Non-fatal — failures here (e.g. no recipients yet, Halo unavailable)
+        // should not surface as an error to the user.
       } finally {
         if (!cancelled) setAutoMatchLoading(false);
       }
