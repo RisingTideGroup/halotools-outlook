@@ -12,7 +12,18 @@ export function createHaloMcpServer(): McpServer {
         tools: {},
       },
       instructions:
-        "HaloPSA tools for an MSP. Use findContact when an email is mentioned to anchor context to a Halo client/user. Use searchTickets for free-text lookup, listOpenTickets for a known client/user, appendActionToTicket to log work on an existing ticket, createTicket to open a new one, logNote for non-ticket CRM activity. searchCannedText returns saved snippets the agent can paste; getActivityFeed gives a merged timeline of an account.",
+        "HaloPSA tools for an MSP, with two distinct layers.\n\n" +
+        "OPERATIONAL (per-contact / per-ticket work):\n" +
+        "- findContact when an email is mentioned to anchor context to a Halo client/user.\n" +
+        "- searchTickets for free-text lookup, listOpenTickets for a known client/user.\n" +
+        "- appendActionToTicket to log work on an existing ticket; createTicket to open a new one.\n" +
+        "- logNote for non-ticket CRM activity; searchCannedText returns saved snippets.\n" +
+        "- getActivityFeed gives a merged timeline of an account.\n\n" +
+        "ANALYTICS (business-level KPIs and exploration):\n" +
+        "- For a single number, prefer the composite tools: getMrrSnapshot, getTechnicianUtilizationSnapshot, getRevenuePerTechSnapshot, getMrrPerSeatSnapshot.\n" +
+        "- getMspKpis returns the whole dashboard in one call — use when the user asks broad health questions.\n" +
+        "- Foundation reads (listRecurringInvoices, listTimesheets, listContracts, listOpportunities) when the composite isn't quite what's wanted.\n" +
+        "- haloApiRaw is the escape hatch: any endpoint, any method. Use it only when no typed tool covers the need, and tell the user you're exploring.",
     },
   );
 
