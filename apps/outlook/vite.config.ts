@@ -1,6 +1,8 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { MANIFEST_VERSION } from "./src/setup/version";
 
 // Deployed at https://tools.iusehalo.com/outlook/ — base path matches.
@@ -52,8 +54,18 @@ export default defineConfig({
   },
   server: {
     port: 3000,
+    host: true,
     // Outlook sideload requires HTTPS — use office-addin-dev-certs locally,
     // or tunnel via ngrok / Cloudflare. Production hosts handle TLS.
+    https: (() => {
+      const certsDir = `${homedir()}/.office-addin-dev-certs`;
+      const key = `${certsDir}/localhost.key`;
+      const cert = `${certsDir}/localhost.crt`;
+      if (existsSync(key) && existsSync(cert)) {
+        return { key: readFileSync(key), cert: readFileSync(cert) };
+      }
+      return undefined;
+    })(),
     headers: {
       // Loosen for local dev only; production CORS is owned by Halo per-tenant.
       "Access-Control-Allow-Origin": "*",
