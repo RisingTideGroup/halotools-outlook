@@ -22,7 +22,7 @@ import {
 } from "@fluentui/react-icons";
 import { ContactCard } from "./ContactCard";
 import { TicketList } from "./TicketList";
-import { LogActions } from "./LogActions";
+import { LogActions, QuickImportBanner } from "./LogActions";
 import { SettingsScreen } from "./SettingsScreen";
 import { ActivityFeed } from "./ActivityFeed";
 import { LogNoteDialog } from "./LogNoteDialog";
@@ -104,6 +104,7 @@ export function Dashboard({ email, onSignedOut }: Props) {
   // Auto-resolve sender → contact + client whenever the open email changes.
   // Refresh button bumps `refreshTick` to trigger a re-run.
   const [refreshTick, setRefreshTick] = useState(0);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -113,6 +114,7 @@ export function Dashboard({ email, onSignedOut }: Props) {
     setClient(undefined);
     setOpenTickets([]);
     setThreadTickets([]);
+    setBannerDismissed(false);
 
     (async () => {
       try {
@@ -294,6 +296,19 @@ export function Dashboard({ email, onSignedOut }: Props) {
           />
 
           <Divider />
+
+          {/* 1-click import banner: show when exactly one thread-matched ticket
+              is found on an incoming email so the agent can log it in one tap. */}
+          {email.direction !== "outgoing" &&
+            threadTickets.length === 1 &&
+            !bannerDismissed && (
+              <QuickImportBanner
+                email={email}
+                contact={contact}
+                ticket={threadTickets[0]}
+                onDismissed={() => setBannerDismissed(true)}
+              />
+            )}
 
           {/* Primary actions sit above the ticket lists so they're always
               visible without scrolling, regardless of how many tickets a

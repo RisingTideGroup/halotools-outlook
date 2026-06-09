@@ -16,11 +16,12 @@ import {
   Spinner,
   MessageBar,
   MessageBarBody,
+  MessageBarActions,
   Text,
   Switch,
   Input,
 } from "@fluentui/react-components";
-import { Add24Regular, Attach24Regular } from "@fluentui/react-icons";
+import { Add24Regular, Attach24Regular, Dismiss24Regular } from "@fluentui/react-icons";
 import {
   appendAction,
   createTicket,
@@ -150,6 +151,131 @@ export function LogActions({
         </MessageBar>
       )}
     </div>
+  );
+}
+
+// ---------- Quick import banner ----------
+
+export function QuickImportBanner({
+  email,
+  contact,
+  ticket,
+  onDismissed,
+}: {
+  email: EmailContext;
+  contact?: HaloUser;
+  ticket: HaloTicket;
+  onDismissed: () => void;
+}) {
+  const [status, setStatus] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const [errorMsg, setErrorMsg] = useState<string | undefined>();
+  const [actionUrl, setActionUrl] = useState<string | undefined>();
+
+  const handleImport = async () => {
+    setStatus("busy");
+    setErrorMsg(undefined);
+    try {
+      const html = await getBody("html");
+      const defaults = getDefaults();
+      let attachments: HaloAttachmentInline[] = [];
+      const rawAttachments = listAttachments().filter((a) => !a.isInline);
+      if ((defaults.includeAttachmentsByDefault ?? true) && rawAttachments.length > 0) {
+        const fetched = await fetchAllAttachments();
+        attachments = fetched.attachments.map(toHaloAttachment);
+      }
+
+      const action = await appendAction({
+        ticket_id: ticket.id,
+        outcome: defaults.defaultAppendOutcome ?? "Email Received",
+        note: html,
+        hiddenfromuser: false,
+        emailfrom: email.senderName || email.senderEmail,
+        emailfromname: email.senderName,
+        emailfromaddress: email.senderEmail,
+        emailsubject: email.subject,
+        emailto: email.senderEmail,
+        attachments: attachments.length ? attachments : undefined,
+        user_id: contact?.id,
+        actionby_user_id: contact?.id,
+        agent_id: undefined,
+        internetmessageid: email.internetMessageId,
+        inreplyto: email.inReplyTo,
+        references: email.references.length ? email.references.join(" ") : undefined,
+        mailentryid: email.itemId,
+        emaildirection: "I",
+        email_status: 2,
+        emailbody_html: html,
+        emailbody: htmlToText(html),
+      });
+
+      setActionUrl(ticketDeepLink(action.ticket_id, action.id));
+      setStatus("done");
+      setTimeout(onDismissed, 5000);
+    } catch (e) {
+      setErrorMsg((e as Error).message);
+      setStatus("error");
+    }
+  };
+
+  if (status === "done") {
+    return (
+      <MessageBar intent="success">
+        <MessageBarBody>
+          Imported to #{ticket.id}
+          {actionUrl && (
+            <>
+              {" — "}
+              <a href={actionUrl} target="_blank" rel="noopener noreferrer">
+                Open in Halo
+              </a>
+            </>
+          )}
+        </MessageBarBody>
+        <MessageBarActions
+          containerAction={
+            <Button
+              appearance="transparent"
+              size="small"
+              icon={<Dismiss24Regular />}
+              onClick={onDismissed}
+              aria-label="Dismiss"
+            />
+          }
+        />
+      </MessageBar>
+    );
+  }
+
+  return (
+    <MessageBar intent={status === "error" ? "error" : "info"}>
+      <MessageBarBody>
+        {status === "error"
+          ? errorMsg
+          : `#${ticket.id} · ${ticket.summary ?? "open ticket"} — import this reply?`}
+      </MessageBarBody>
+      <MessageBarActions
+        containerAction={
+          <Button
+            appearance="transparent"
+            size="small"
+            icon={<Dismiss24Regular />}
+            onClick={onDismissed}
+            aria-label="Dismiss"
+            disabled={status === "busy"}
+          />
+        }
+      >
+        <Button
+          appearance="primary"
+          size="small"
+          onClick={handleImport}
+          disabled={status === "busy"}
+          icon={status === "busy" ? <Spinner size="tiny" /> : undefined}
+        >
+          {status === "busy" ? "Importing…" : status === "error" ? "Retry" : "Import"}
+        </Button>
+      </MessageBarActions>
+    </MessageBar>
   );
 }
 
