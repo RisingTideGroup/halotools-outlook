@@ -417,14 +417,21 @@
         </div>
         <div class="card">
           <span class="tag">What's exposed today</span>
-          <h3>Eight read + write tools</h3>
+          <h3>Operational + analytics tools</h3>
           <p>
-            <code>findContact</code>, <code>searchTickets</code>,
-            <code>listOpenTickets</code>, <code>getActivityFeed</code>,
-            <code>searchCannedText</code>, <code>createTicket</code>,
-            <code>appendActionToTicket</code>, <code>logNote</code>.
-            Coming next: time entries, invoices, contracts, and composite
-            MSP KPIs (MRR, utilization, revenue per tech).
+            <strong>Per-ticket:</strong> <code>findContact</code>,
+            <code>searchTickets</code>, <code>listOpenTickets</code>,
+            <code>getActivityFeed</code>, <code>searchCannedText</code>,
+            <code>createTicket</code>, <code>appendActionToTicket</code>,
+            <code>logNote</code>.<br/>
+            <strong>Analytics:</strong> <code>getMrrSnapshot</code>,
+            <code>getTechnicianUtilizationSnapshot</code>,
+            <code>getRevenuePerTechSnapshot</code>,
+            <code>getMrrPerSeatSnapshot</code>,
+            <code>getMspKpis</code> (whole dashboard in one call),
+            plus foundation reads for invoices, timesheets,
+            contracts, opportunities, and a generic
+            <code>haloApiRaw</code> escape hatch.
           </p>
         </div>
       </div>

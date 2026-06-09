@@ -25,6 +25,13 @@ import type {
   CreateCannedTextPayload,
   CreateCRMNotePayload,
   UpdateTicketPayload,
+  HaloRecurringInvoice,
+  HaloTimesheet,
+  HaloContract,
+  HaloOpportunity,
+  MrrSnapshot,
+  UtilizationSnapshot,
+  MspKpis,
 } from "./types.js";
 
 class HaloApiError extends Error {
@@ -879,6 +886,305 @@ export async function listFeed(scope: CRMScope, count = 20): Promise<HaloFeedIte
   const res = await call<HaloFeedResponse | HaloFeedItem[]>(`/Feed?${q}`);
   if (Array.isArray(res)) return res;
   return res.feed ?? [];
+}
+
+// ---------- Generic API escape hatch ----------
+
+export interface HaloRawCallOptions {
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  /** Sent as a JSON body. Already-serialized strings are passed through. */
+  body?: unknown;
+  /** Appended as a URL-encoded query string. */
+  query?: Record<string, string | number | boolean | undefined | null>;
+}
+
+/**
+ * Direct passthrough to a Halo REST endpoint, sharing the same auth + 401
+ * retry + error normalisation as every other call here.
+ *
+ * Use for endpoints we haven't written a typed wrapper for yet — handy for
+ * MCP exploration where the agent needs to poke at an unwrapped surface, or
+ * for one-off scripts. Prefer the typed functions where one exists.
+ *
+ * `path` must start with "/" and is appended to `<haloBaseUrl>/api`.
+ */
+export async function haloApiRaw<T = unknown>(
+  path: string,
+  opts: HaloRawCallOptions = {},
+): Promise<T> {
+  const { method = "GET", body, query } = opts;
+  let fullPath = path;
+  if (query) {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined && v !== null) params.set(k, String(v));
+    }
+    const qs = params.toString();
+    if (qs) fullPath += (fullPath.includes("?") ? "&" : "?") + qs;
+  }
+  const init: RequestInit = { method };
+  if (body !== undefined && body !== null) {
+    init.body = typeof body === "string" ? body : JSON.stringify(body);
+  }
+  return call<T>(fullPath, init);
+}
+
+// ---------- Analytics: recurring invoices (MRR source) ----------
+
+/**
+ * Period enum → monthly-revenue multiplier. Values confirmed against a
+ * Halo demo instance (3=monthly, 5=semi-annual, 6=annual). 4=quarterly is
+ * inferred — flag if your tenant's data doesn't match.
+ */
+export function periodToMonthlyFactor(period: number | undefined): number {
+  switch (period) {
+    case 3: return 1;
+    case 4: return 1 / 3;
+    case 5: return 1 / 6;
+    case 6: return 1 / 12;
+    default: return 1;
+  }
+}
+
+const PERIOD_LABELS: Record<number, string> = {
+  3: "monthly",
+  4: "quarterly",
+  5: "semi-annual",
+  6: "annual",
+};
+
+export async function listRecurringInvoices(): Promise<HaloRecurringInvoice[]> {
+  // /RecurringInvoice has no working date filter — fetch all, filter client-side.
+  const res = await call<
+    { invoices: HaloRecurringInvoice[] } | HaloRecurringInvoice[]
+  >("/RecurringInvoice?pageinate=false&showcounts=true");
+  return Array.isArray(res) ? res : res.invoices ?? [];
+}
+
+/**
+ * Net MRR across all active recurring invoices, with a per-period breakdown.
+ * Uses `revenue` (net) not `total` (gross). Excludes `disabled: true`.
+ */
+export async function getMrrSnapshot(): Promise<MrrSnapshot> {
+  const invoices = await listRecurringInvoices();
+  const active = invoices.filter((i) => i.disabled !== true);
+  let mrr = 0;
+  const grouped = new Map<number, { contracts: number; monthlyRevenue: number }>();
+  for (const inv of active) {
+    const period = inv.period ?? 3;
+    const factor = periodToMonthlyFactor(period);
+    const monthly = (inv.revenue ?? 0) * factor;
+    mrr += monthly;
+    const bucket = grouped.get(period) ?? { contracts: 0, monthlyRevenue: 0 };
+    bucket.contracts += 1;
+    bucket.monthlyRevenue += monthly;
+    grouped.set(period, bucket);
+  }
+  const byPeriod = Array.from(grouped.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([period, b]) => ({
+      period,
+      label: PERIOD_LABELS[period] ?? `period ${period}`,
+      contracts: b.contracts,
+      monthlyRevenue: round2(b.monthlyRevenue),
+    }));
+  return {
+    mrr: round2(mrr),
+    activeContractCount: active.length,
+    byPeriod,
+  };
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+// ---------- Analytics: timesheets (utilization source) ----------
+
+/**
+ * Halo's /Timesheet endpoint returns a flat array — no `.timesheets` wrapper,
+ * no `record_count`. Date params `startdate` / `enddate` are YYYY-MM-DD.
+ */
+export async function listTimesheets(
+  startdate: string,
+  enddate: string,
+): Promise<HaloTimesheet[]> {
+  const q = new URLSearchParams({ startdate, enddate });
+  const res = await call<HaloTimesheet[] | { timesheets?: HaloTimesheet[] }>(
+    `/Timesheet?${q}`,
+  );
+  if (Array.isArray(res)) return res;
+  return res.timesheets ?? [];
+}
+
+/**
+ * Total chargeable / target hours × 100, plus per-agent breakdown.
+ * Window defaults to the trailing 30 days when start/end aren't supplied.
+ */
+export async function getTechnicianUtilizationSnapshot(
+  startdate?: string,
+  enddate?: string,
+): Promise<UtilizationSnapshot> {
+  const { start, end } = resolveWindow(startdate, enddate, 30);
+  const [rows, agents] = await Promise.all([
+    listTimesheets(start, end),
+    listAgents().catch(() => [] as HaloAgent[]),
+  ]);
+  const agentNameById = new Map(agents.map((a) => [a.id, a.name]));
+
+  let totalChargeable = 0;
+  let totalTarget = 0;
+  const perAgentMap = new Map<number, { chargeable: number; target: number }>();
+  for (const r of rows) {
+    const chargeable = r.chargeable_hours ?? 0;
+    const target = r.target_hours ?? 0;
+    totalChargeable += chargeable;
+    totalTarget += target;
+    if (r.agent_id != null) {
+      const b = perAgentMap.get(r.agent_id) ?? { chargeable: 0, target: 0 };
+      b.chargeable += chargeable;
+      b.target += target;
+      perAgentMap.set(r.agent_id, b);
+    }
+  }
+  const perAgent = Array.from(perAgentMap.entries())
+    .map(([agent_id, b]) => ({
+      agent_id,
+      agent_name: agentNameById.get(agent_id),
+      chargeable: round2(b.chargeable),
+      target: round2(b.target),
+      rate: b.target > 0 ? round2((b.chargeable / b.target) * 100) : null,
+    }))
+    .sort((a, b) => (b.rate ?? 0) - (a.rate ?? 0));
+
+  return {
+    startdate: start,
+    enddate: end,
+    totalChargeableHours: round2(totalChargeable),
+    totalTargetHours: round2(totalTarget),
+    utilizationRate: totalTarget > 0 ? round2((totalChargeable / totalTarget) * 100) : null,
+    perAgent,
+  };
+}
+
+function resolveWindow(
+  startdate: string | undefined,
+  enddate: string | undefined,
+  fallbackDays: number,
+): { start: string; end: string } {
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+  const end = enddate ?? fmt(new Date());
+  const startFallback = new Date();
+  startFallback.setUTCDate(startFallback.getUTCDate() - fallbackDays);
+  const start = startdate ?? fmt(startFallback);
+  return { start, end };
+}
+
+// ---------- Analytics: contracts ----------
+
+export async function listContracts(): Promise<HaloContract[]> {
+  const res = await call<
+    { contracts: HaloContract[] } | HaloContract[]
+  >("/ClientContract?pageinate=false&showcounts=true");
+  return Array.isArray(res) ? res : res.contracts ?? [];
+}
+
+// ---------- Analytics: opportunities ----------
+
+export async function listOpportunities(limit = 100): Promise<HaloOpportunity[]> {
+  const q = new URLSearchParams({
+    pageinate: "false",
+    count: String(limit),
+    showcounts: "true",
+  });
+  // /Opportunities is the correct path (plural); /Opportunity 404s.
+  const res = await call<
+    { opportunities: HaloOpportunity[] } | { tickets: HaloOpportunity[] } | HaloOpportunity[]
+  >(`/Opportunities?${q}`);
+  if (Array.isArray(res)) return res;
+  if ("opportunities" in res && Array.isArray(res.opportunities)) return res.opportunities;
+  if ("tickets" in res && Array.isArray(res.tickets)) return res.tickets;
+  return [];
+}
+
+// ---------- Analytics: active user count (for MRR/seat) ----------
+
+/** Fetch all active external contacts. Used for seat-count KPIs. */
+export async function listActiveUsers(limit = 1000): Promise<HaloUser[]> {
+  const q = new URLSearchParams({
+    pageinate: "false",
+    includeinactive: "false",
+    count: String(limit),
+  });
+  const res = await call<{ users: HaloUser[] } | HaloUser[]>(`/Users?${q}`);
+  const arr = Array.isArray(res) ? res : res.users ?? [];
+  return arr.filter((u) => u.inactive !== true);
+}
+
+// ---------- Composite KPI tools ----------
+
+/** MRR ÷ active agent count. Returns 0 if there are no active agents. */
+export async function getRevenuePerTechSnapshot(): Promise<{
+  mrr: number;
+  activeAgentCount: number;
+  revenuePerTech: number;
+}> {
+  const [mrrSnap, agents] = await Promise.all([
+    getMrrSnapshot(),
+    listAgents(),
+  ]);
+  const activeAgentCount = agents.length;
+  const revenuePerTech =
+    activeAgentCount > 0 ? round2(mrrSnap.mrr / activeAgentCount) : 0;
+  return { mrr: mrrSnap.mrr, activeAgentCount, revenuePerTech };
+}
+
+/** MRR ÷ active user count. Returns 0 if there are no active users. */
+export async function getMrrPerSeatSnapshot(): Promise<{
+  mrr: number;
+  activeUserCount: number;
+  mrrPerSeat: number;
+}> {
+  const [mrrSnap, users] = await Promise.all([
+    getMrrSnapshot(),
+    listActiveUsers(),
+  ]);
+  const activeUserCount = users.length;
+  const mrrPerSeat =
+    activeUserCount > 0 ? round2(mrrSnap.mrr / activeUserCount) : 0;
+  return { mrr: mrrSnap.mrr, activeUserCount, mrrPerSeat };
+}
+
+/**
+ * One-shot "give me everything" KPI tool. Cheaper than running each composite
+ * separately because MRR is computed once and shared. Utilization defaults to
+ * the trailing 30 days and is best-effort — failures degrade silently so a
+ * dashboard never goes blank because Timesheet is unavailable.
+ */
+export async function getMspKpis(
+  utilizationStart?: string,
+  utilizationEnd?: string,
+): Promise<MspKpis> {
+  const [mrrSnap, agents, users, utilization] = await Promise.all([
+    getMrrSnapshot(),
+    listAgents().catch(() => [] as HaloAgent[]),
+    listActiveUsers().catch(() => [] as HaloUser[]),
+    getTechnicianUtilizationSnapshot(utilizationStart, utilizationEnd).catch(
+      () => undefined,
+    ),
+  ]);
+  const activeAgentCount = agents.length;
+  const activeUserCount = users.length;
+  return {
+    mrr: mrrSnap.mrr,
+    activeAgentCount,
+    activeUserCount,
+    revenuePerTech:
+      activeAgentCount > 0 ? round2(mrrSnap.mrr / activeAgentCount) : 0,
+    mrrPerSeat:
+      activeUserCount > 0 ? round2(mrrSnap.mrr / activeUserCount) : 0,
+    utilization,
+  };
 }
 
 export { HaloApiError };

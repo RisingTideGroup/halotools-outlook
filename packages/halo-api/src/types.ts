@@ -481,3 +481,94 @@ export interface CreateCannedTextPayload {
   /** Default 0 (open). 2 restricts to listed agents, 3 to listed departments. */
   restriction_type?: number;
 }
+
+// ---------- Analytics surface (KPI tools) ----------
+
+/**
+ * Recurring invoice (contract). Source for MRR.
+ * - `revenue` is net (use this for MRR); `total` is gross including tax.
+ * - `period` is an integer enum — see periodToMonthlyFactor for the mapping.
+ * - `disabled: true` = paused / cancelled, exclude from MRR.
+ */
+export interface HaloRecurringInvoice {
+  id: number;
+  client_id?: number;
+  client_name?: string;
+  revenue?: number;
+  total?: number;
+  /** Period enum: 3=monthly, 4=quarterly, 5=semi-annual, 6=annual. */
+  period?: number;
+  disabled?: boolean;
+  contract_id?: number;
+}
+
+/**
+ * Single timesheet row — one agent × one day. Source for utilization.
+ * Halo's /Timesheet endpoint returns a FLAT array (not a wrapped object),
+ * unlike almost every other list endpoint — see listTimesheets.
+ */
+export interface HaloTimesheet {
+  id?: number;
+  agent_id?: number;
+  date?: string;
+  chargeable_hours?: number;
+  target_hours?: number;
+  actual_hours?: number;
+}
+
+/** Per-client contract (separate concept from RecurringInvoice in Halo). */
+export interface HaloContract {
+  id: number;
+  client_id?: number;
+  client_name?: string;
+  name?: string;
+  status?: string;
+  active?: boolean;
+  inactive?: boolean;
+  startdate?: string;
+  enddate?: string;
+}
+
+/**
+ * Sales opportunity. Halo represents opportunities as a kind of ticket with
+ * `tickettype.use === "opps"`, so list responses are still ticket-shaped.
+ */
+export interface HaloOpportunity {
+  id: number;
+  summary?: string;
+  client_id?: number;
+  client_name?: string;
+  status_id?: number;
+  statusname?: string;
+  oppvalue?: number;
+  oppstatus?: string;
+  dateoccurred?: string;
+}
+
+/** MRR snapshot returned by getMrrSnapshot. */
+export interface MrrSnapshot {
+  mrr: number;
+  activeContractCount: number;
+  /** Breakdown by billing period for visibility. */
+  byPeriod: { period: number; label: string; contracts: number; monthlyRevenue: number }[];
+}
+
+/** Utilization snapshot returned by getTechnicianUtilizationSnapshot. */
+export interface UtilizationSnapshot {
+  startdate: string;
+  enddate: string;
+  totalChargeableHours: number;
+  totalTargetHours: number;
+  utilizationRate: number | null;
+  perAgent: { agent_id: number; agent_name?: string; chargeable: number; target: number; rate: number | null }[];
+}
+
+/** Combined "give me the dashboard" KPI result. */
+export interface MspKpis {
+  mrr: number;
+  activeAgentCount: number;
+  activeUserCount: number;
+  revenuePerTech: number;
+  mrrPerSeat: number;
+  utilization?: UtilizationSnapshot;
+}
