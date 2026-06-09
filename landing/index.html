@@ -417,34 +417,38 @@
         </div>
         <div class="card">
           <span class="tag">What's exposed today</span>
-          <h3>Operational + analytics tools</h3>
+          <h3>Database access + KPI tools</h3>
           <p>
-            <strong>Per-ticket:</strong> <code>findContact</code>,
-            <code>searchTickets</code>, <code>listOpenTickets</code>,
-            <code>getActivityFeed</code>, <code>searchCannedText</code>,
-            <code>createTicket</code>, <code>appendActionToTicket</code>,
-            <code>logNote</code>.<br/>
-            <strong>Analytics:</strong> <code>getMrrSnapshot</code>,
+            <strong>The killer tool: <code>runSql</code></strong> —
+            direct SELECT against Halo's database via Report Center, so the
+            agent can write whatever query the question demands instead of
+            being limited to canned endpoints. Includes
+            <code>listReports</code> to reuse an MSP's saved reports.<br/><br/>
+            <strong>Canned KPIs</strong> for one-shot answers:
+            <code>getMrrSnapshot</code>,
             <code>getTechnicianUtilizationSnapshot</code>,
             <code>getRevenuePerTechSnapshot</code>,
             <code>getMrrPerSeatSnapshot</code>,
-            <code>getMspKpis</code> (whole dashboard in one call),
-            plus foundation reads for invoices, timesheets,
-            contracts, opportunities, and a generic
-            <code>haloApiRaw</code> escape hatch.
+            <code>getMspKpis</code> (full dashboard).<br/><br/>
+            <strong>Per-ticket</strong> when needed:
+            <code>findContact</code>, <code>searchTickets</code>,
+            <code>listOpenTickets</code>, <code>getActivityFeed</code>,
+            <code>searchCannedText</code>, <code>createTicket</code>,
+            <code>appendActionToTicket</code>, <code>logNote</code>.
+            Plus <code>haloApiRaw</code> as a REST escape hatch.
           </p>
         </div>
       </div>
 
       <ul class="features" style="margin-top: 24px">
+        <li>Direct SQL via Halo Report Center — agents write queries on the fly</li>
+        <li>Schema-discovery + screenshot pattern for mapping UI labels to columns</li>
         <li>Real Halo OAuth — users see your tenant's normal login page</li>
         <li>One copy-paste URL per Halo tenant; no per-user setup</li>
         <li>Works with Claude (web + desktop), Cursor, ChatGPT, MCP Inspector</li>
         <li>Universal <code>/auth/callback</code> — Halo admins register one URI for the whole hub</li>
-        <li>Server-to-server token exchange — no CORS configuration needed on Halo</li>
         <li>Streamable HTTP transport with session-pooled JSON-RPC</li>
         <li>Stateless server — Halo access + refresh tokens live with the AI client</li>
-        <li>Same <code>@iusehalo/halo-api</code> client as the Outlook add-in</li>
       </ul>
     </section>
 
