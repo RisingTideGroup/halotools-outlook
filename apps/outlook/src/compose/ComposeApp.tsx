@@ -47,6 +47,7 @@ import {
   isAuthenticated,
   findUserByEmail,
   findClientByDomain,
+  listOpenTicketsForClient,
   searchTickets,
   searchKbArticles,
   searchCannedText,
@@ -71,6 +72,7 @@ import {
   insertIntoBody,
   domainOf,
 } from "../lib/office";
+import { getDefaults } from "../lib/defaults";
 import { useDebouncedSearch } from "../lib/use-debounced-search";
 
 type Phase = "loading" | "needs-config" | "needs-auth" | "ready";
@@ -1031,29 +1033,101 @@ function LogStagingSection() {
   const [stagedTicketId, setStagedTicketId] = useState<number | undefined>();
   const [stagedTicketSummary, setStagedTicketSummary] = useState<string | undefined>();
   const [stagedCreate, setStagedCreate] = useState<PendingCreate | undefined>();
+  const [rehydrated, setRehydrated] = useState(false);
+  const [autoMatchedTickets, setAutoMatchedTickets] = useState<HaloTicket[]>([]);
+  const [autoMatchLoading, setAutoMatchLoading] = useState(false);
 
   // Rehydrate on mount so the user sees what's currently staged on this draft.
   useEffect(() => {
     const item = Office.context.mailbox.item;
-    if (!item) return;
+    if (!item) { setRehydrated(true); return; }
     item.loadCustomPropertiesAsync((r) => {
-      if (r.status !== Office.AsyncResultStatus.Succeeded) return;
-      const ticketRaw = r.value.get(TICKET_PROP);
-      const pendingRaw = r.value.get(PENDING_CREATE_PROP);
-      if (ticketRaw) {
-        const id = Number(ticketRaw);
-        setStagedTicketId(id);
-        searchTickets(`#${id}`, 1)
-          .then((res) => setStagedTicketSummary(res[0]?.summary))
-          .catch(() => { /* non-fatal */ });
+      if (r.status === Office.AsyncResultStatus.Succeeded) {
+        const ticketRaw = r.value.get(TICKET_PROP);
+        const pendingRaw = r.value.get(PENDING_CREATE_PROP);
+        if (ticketRaw) {
+          const id = Number(ticketRaw);
+          setStagedTicketId(id);
+          searchTickets(`#${id}`, 1)
+            .then((res) => setStagedTicketSummary(res[0]?.summary))
+            .catch(() => { /* non-fatal */ });
+        }
+        if (pendingRaw) {
+          try { setStagedCreate(JSON.parse(pendingRaw)); } catch { /* malformed */ }
+        }
       }
-      if (pendingRaw) {
-        try {
-          setStagedCreate(JSON.parse(pendingRaw));
-        } catch { /* malformed — ignore */ }
-      }
+      setRehydrated(true);
     });
   }, []);
+
+  // After rehydration: if auto-log is on and nothing is already staged, look up
+  // open tickets for the compose recipients. Auto-stage when exactly one is found;
+  // store candidates for the Append picker when multiple are found.
+  useEffect(() => {
+    if (!rehydrated) return;
+    if (!getDefaults().autoLogRepliesToTickets) return;
+
+    let cancelled = false;
+    setAutoMatchLoading(true);
+
+    (async () => {
+      try {
+        const { to } = await getRecipients();
+        if (cancelled || to.length === 0) return;
+
+        const resolved = await Promise.all(
+          to.map(async (email) => {
+            const [user, client] = await Promise.all([
+              findUserByEmail(email).catch(() => undefined),
+              findClientByDomain(domainOf(email)).catch(() => undefined),
+            ]);
+            return { user, client };
+          }),
+        );
+        if (cancelled) return;
+
+        const clientIds = new Set<number>();
+        for (const r of resolved) {
+          const cid = r.user?.client_id ?? r.client?.id;
+          if (cid) clientIds.add(cid);
+        }
+        if (clientIds.size === 0) return;
+
+        const ticketArrays = await Promise.all(
+          [...clientIds].map((id) =>
+            listOpenTicketsForClient(id).catch(() => [] as HaloTicket[]),
+          ),
+        );
+        if (cancelled) return;
+
+        const seen = new Set<number>();
+        const tickets: HaloTicket[] = [];
+        for (const arr of ticketArrays) {
+          for (const t of arr) {
+            if (!seen.has(t.id)) { seen.add(t.id); tickets.push(t); }
+          }
+        }
+        if (tickets.length === 0) return;
+
+        setAutoMatchedTickets(tickets);
+
+        // Auto-stage only when exactly one ticket found and nothing already staged.
+        if (tickets.length === 1) {
+          setStagedTicketId((prev) => {
+            if (prev !== undefined) return prev;
+            const t = tickets[0];
+            setStagedTicketSummary(t.summary);
+            writeLogProps({ ticketId: t.id });
+            return t.id;
+          });
+        }
+      } finally {
+        if (!cancelled) setAutoMatchLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [rehydrated]);
 
   const onAppendStaged = (t: HaloTicket) => {
     setStagedTicketId(t.id);
@@ -1085,9 +1159,23 @@ function LogStagingSection() {
         Log on send
       </Text>
       <div className={styles.logButtonsRow}>
-        <AppendStageDialog onStage={onAppendStaged} triggerClass={styles.logButtonFull} />
+        <AppendStageDialog
+          onStage={onAppendStaged}
+          triggerClass={styles.logButtonFull}
+          candidates={autoMatchedTickets}
+        />
         <CreateStageDialog onStage={onCreateStaged} triggerClass={styles.logButtonFull} />
       </div>
+      {autoMatchLoading && (
+        <Text className={styles.hint}>
+          <Spinner size="extra-tiny" style={{ marginRight: 4 }} /> Looking up related tickets…
+        </Text>
+      )}
+      {!autoMatchLoading && autoMatchedTickets.length > 1 && !stagedTicketId && !stagedCreate && (
+        <Text className={styles.hint}>
+          {autoMatchedTickets.length} related tickets found — click Append to pick one.
+        </Text>
+      )}
       {stagedTicketId && (
         <div className={styles.stagedBanner}>
           <CheckmarkCircle16Filled />
@@ -1126,13 +1214,24 @@ function LogStagingSection() {
 function AppendStageDialog({
   onStage,
   triggerClass,
+  candidates = [],
 }: {
   onStage: (t: HaloTicket) => void;
   triggerClass: string;
+  candidates?: HaloTicket[];
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const { results, loading } = useDebouncedSearch(query, searchTickets);
+
+  const pick = (t: HaloTicket) => { onStage(t); setOpen(false); };
+  const rowStyle = {
+    padding: "6px 8px",
+    cursor: "pointer",
+    borderBottom: `1px solid ${tokens.colorNeutralStroke3}`,
+  };
+  // Show candidates when query is too short to have search results yet.
+  const showCandidates = candidates.length > 0 && query.trim().length < 2;
 
   return (
     <Dialog open={open} onOpenChange={(_, d) => setOpen(d.open)}>
@@ -1149,7 +1248,22 @@ function AppendStageDialog({
         <DialogBody>
           <DialogTitle>Append on send to existing ticket</DialogTitle>
           <DialogContent>
-            <Field label="Find ticket">
+            {showCandidates && (
+              <div style={{ marginBottom: 12 }}>
+                <Text style={{ fontSize: tokens.fontSizeBase200, color: tokens.colorNeutralForeground3, display: "block", marginBottom: 4 }}>
+                  Related tickets
+                </Text>
+                <div style={{ maxHeight: 200, overflowY: "auto" }}>
+                  {candidates.slice(0, 15).map((t) => (
+                    <div key={t.id} onClick={() => pick(t)} style={rowStyle}>
+                      <strong>#{t.id}</strong> · {t.summary}
+                      {t.statusname ? ` · ${t.statusname}` : ""}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <Field label={showCandidates ? "Or search for a different ticket" : "Find ticket"}>
               <Input
                 value={query}
                 placeholder="Search by ID, summary, or client…"
@@ -1164,18 +1278,7 @@ function AppendStageDialog({
             ) : results.length > 0 ? (
               <div style={{ marginTop: 8, maxHeight: 240, overflowY: "auto" }}>
                 {results.slice(0, 15).map((t) => (
-                  <div
-                    key={t.id}
-                    onClick={() => {
-                      onStage(t);
-                      setOpen(false);
-                    }}
-                    style={{
-                      padding: "6px 8px",
-                      cursor: "pointer",
-                      borderBottom: `1px solid ${tokens.colorNeutralStroke3}`,
-                    }}
-                  >
+                  <div key={t.id} onClick={() => pick(t)} style={rowStyle}>
                     <strong>#{t.id}</strong> · {t.summary}
                     {t.statusname ? ` · ${t.statusname}` : ""}
                   </div>

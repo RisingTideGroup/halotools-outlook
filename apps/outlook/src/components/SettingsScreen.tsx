@@ -124,6 +124,9 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
   const [includeAttach, setIncludeAttach] = useState<boolean>(
     initialDefaults.includeAttachmentsByDefault ?? true,
   );
+  const [autoLogReplies, setAutoLogReplies] = useState<boolean>(
+    initialDefaults.autoLogRepliesToTickets ?? false,
+  );
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [events, setEvents] = useState<LogEntry[]>(() => getEvents());
@@ -192,6 +195,7 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
         defaultTicketTypeId: defaultTypeId,
         defaultAppendOutcome: defaultOutcome,
         includeAttachmentsByDefault: includeAttach,
+        autoLogRepliesToTickets: autoLogReplies,
       });
       onClose();
     } finally {
@@ -271,6 +275,17 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
           onChange={(_, d) => setIncludeAttach(d.checked)}
           label="Include attachments by default when logging"
         />
+
+        <Switch
+          checked={autoLogReplies}
+          onChange={(_, d) => setAutoLogReplies(d.checked)}
+          label="Auto-stage replies to Halo tickets on send"
+        />
+        <Text className={styles.meta}>
+          When enabled, the compose pane looks up open tickets for your recipients and
+          automatically stages the email for logging. If exactly one ticket is found it
+          is pre-selected; if multiple are found you'll be prompted to pick.
+        </Text>
 
         <Divider />
 
