@@ -1187,4 +1187,59 @@ export async function getMspKpis(
   };
 }
 
+// ---------- Report Center: ad-hoc SQL ----------
+
+/**
+ * Execute a SELECT statement against the HaloPSA database via Halo's Report
+ * Center. POST /api/Report with `sql` and `_loadreportonly: true` runs the
+ * query inline without persisting a saved report. Omit `_loadreportonly` and
+ * pass `name` + `folder_id` to persist for reuse.
+ *
+ * Halo Report Center constraints (the SQL itself):
+ *  - one statement only
+ *  - no `--` single-line comments (use slash-star block comments)
+ *  - no trailing semicolons
+ *  - no variables / DECLARE
+ *
+ * The response shape varies — Halo returns the saved (or ephemeral) report
+ * record plus a `report` or `results`/`rows` array. Callers should treat the
+ * full body as opaque and let the MCP tool surface it whole.
+ */
+export interface RunSqlOptions {
+  /** Persist as a saved report instead of running inline. */
+  save?: { name: string; folder_id?: number };
+}
+
+export async function runReportSql(
+  sql: string,
+  opts: RunSqlOptions = {},
+): Promise<unknown> {
+  const body: Record<string, unknown> = { sql };
+  if (opts.save) {
+    body.name = opts.save.name;
+    if (opts.save.folder_id != null) body.folder_id = opts.save.folder_id;
+  } else {
+    body._loadreportonly = true;
+  }
+  // Halo's /Report endpoint accepts an array body for batch ops; single-object
+  // bodies work too. We send a single object — matches the inline-execute idiom.
+  return call<unknown>("/Report", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** List existing saved reports — names, ids, folder placement.
+ *  Useful so the agent can reuse an MSP's existing analysis instead of
+ *  reinventing it on every question. */
+export async function listReports(): Promise<unknown[]> {
+  const res = await call<unknown>("/Report?pageinate=false");
+  if (Array.isArray(res)) return res;
+  if (res && typeof res === "object") {
+    const obj = res as Record<string, unknown>;
+    if (Array.isArray(obj.reports)) return obj.reports as unknown[];
+  }
+  return [];
+}
+
 export { HaloApiError };

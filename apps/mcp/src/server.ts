@@ -12,18 +12,17 @@ export function createHaloMcpServer(): McpServer {
         tools: {},
       },
       instructions:
-        "HaloPSA tools for an MSP, with two distinct layers.\n\n" +
-        "OPERATIONAL (per-contact / per-ticket work):\n" +
-        "- findContact when an email is mentioned to anchor context to a Halo client/user.\n" +
-        "- searchTickets for free-text lookup, listOpenTickets for a known client/user.\n" +
-        "- appendActionToTicket to log work on an existing ticket; createTicket to open a new one.\n" +
-        "- logNote for non-ticket CRM activity; searchCannedText returns saved snippets.\n" +
-        "- getActivityFeed gives a merged timeline of an account.\n\n" +
-        "ANALYTICS (business-level KPIs and exploration):\n" +
-        "- For a single number, prefer the composite tools: getMrrSnapshot, getTechnicianUtilizationSnapshot, getRevenuePerTechSnapshot, getMrrPerSeatSnapshot.\n" +
-        "- getMspKpis returns the whole dashboard in one call — use when the user asks broad health questions.\n" +
-        "- Foundation reads (listRecurringInvoices, listTimesheets, listContracts, listOpportunities) when the composite isn't quite what's wanted.\n" +
-        "- haloApiRaw is the escape hatch: any endpoint, any method. Use it only when no typed tool covers the need, and tell the user you're exploring.",
+        "HaloPSA tools for an MSP. The point of this MCP is to crunch data a human can't quickly assemble from Halo's UI — cross-client trends, time-series rollups, profitability, licence inventory, MTTR by category, etc. Per-ticket edits are usually faster done in Halo's UI; prefer this MCP for analysis.\n\n" +
+        "ANALYSIS — the primary use case:\n" +
+        "- runSql is the highest-leverage tool. It runs a SELECT against Halo's database via Report Center. Read its description for the 7 rules (one statement, no -- comments, no semicolons, no variables, British spellings, old-fashioned table names like FAULTS=tickets, ACTIONS=notes/time, USERS≠AGENT). When asked an analytical question, the default path is: listReports first (the MSP may already have it saved), then runSql, NOT the composite KPI tools.\n" +
+        "- Composite KPI tools (getMrrSnapshot, getMspKpis, getTechnicianUtilizationSnapshot, getRevenuePerTechSnapshot, getMrrPerSeatSnapshot) are convenient one-shot answers for canonical MSP KPIs. Use them when the question is exactly what they compute; otherwise reach for runSql.\n" +
+        "- Foundation REST reads (listRecurringInvoices, listTimesheets, listContracts, listOpportunities) are available when REST is more natural than SQL.\n" +
+        "- haloApiRaw is the REST escape hatch for endpoints with side effects (writes) or that aren't exposed via SQL.\n\n" +
+        "OPERATIONAL — secondary, use sparingly:\n" +
+        "- findContact, searchTickets, listOpenTickets, getActivityFeed for anchoring conversation to a person/account.\n" +
+        "- appendActionToTicket, createTicket, logNote for logging the agent's own work.\n" +
+        "- searchCannedText returns snippets to paste.\n\n" +
+        "When the user references a value they can see in Halo's UI but you can't find which column stores it, ask for a screenshot and then SELECT TOP 5 against likely text columns to triangulate. The schema is huge and undocumented externally — runSql's discovery flow (INFORMATION_SCHEMA.TABLES → SELECT TOP 5 from candidates) is how you map UI labels to columns.",
     },
   );
 

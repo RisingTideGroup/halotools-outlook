@@ -10,6 +10,8 @@ import { registerSearchCannedText } from "./searchCannedText.js";
 import { registerGetActivityFeed } from "./getActivityFeed.js";
 
 import { registerHaloApiRaw } from "./haloApiRaw.js";
+import { registerRunSql } from "./runSql.js";
+import { registerListReports } from "./listReports.js";
 import { registerListRecurringInvoices } from "./listRecurringInvoices.js";
 import { registerListTimesheets } from "./listTimesheets.js";
 import { registerListContracts } from "./listContracts.js";
@@ -44,7 +46,15 @@ export function registerAllTools(server: McpServer): void {
   registerGetMrrPerSeatSnapshot(server);
   registerGetMspKpis(server);
 
-  // Generic escape hatch — for unwrapped endpoints / exploration.
-  // Registered last so a curious agent reads the typed tools first.
+  // Direct database access via Halo Report Center — the highest-leverage tool
+  // for cross-data analysis. Registered after the composites so they're tried
+  // first for canonical KPI questions, but before haloApiRaw since SQL is the
+  // primary escape hatch for "we don't have a tool for this question".
+  registerListReports(server);
+  registerRunSql(server);
+
+  // Generic REST escape hatch — for unwrapped endpoints / exploration where
+  // SQL isn't the right tool (e.g. firing a write that has side effects we
+  // want Halo's business logic to handle).
   registerHaloApiRaw(server);
 }
