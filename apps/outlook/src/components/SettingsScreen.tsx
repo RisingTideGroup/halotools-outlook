@@ -279,12 +279,13 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
         <Switch
           checked={autoLogReplies}
           onChange={(_, d) => setAutoLogReplies(d.checked)}
-          label="Auto-stage replies to Halo tickets on send"
+          label="Auto-import replies into Halo tickets on send"
         />
         <Text className={styles.meta}>
-          When enabled, the compose pane looks up open tickets for your recipients and
-          automatically stages the email for logging. If exactly one ticket is found it
-          is pre-selected; if multiple are found you'll be prompted to pick.
+          When enabled, Halo automatically logs your reply to the matching open ticket on
+          send — no need to open the compose pane. If exactly one open ticket is found for
+          the recipient it is logged silently; if multiple are found the email sends without
+          logging (open the Halo pane to pick manually).
         </Text>
 
         <Divider />
