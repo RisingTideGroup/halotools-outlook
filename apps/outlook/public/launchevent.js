@@ -259,6 +259,11 @@
       /(?:<p[^>]*>(?:\s|&nbsp;| )*<\/p>\s*){2,}/gi,
       "<p>&nbsp;</p>",
     );
+    out = out.replace(
+      /(?:<div[^>]*>(?:\s|&nbsp;|<br\s*\/?>)*<\/div>\s*){2,}/gi,
+      "<div>&nbsp;</div>",
+    );
+    out = out.replace(/(?:<br\s*\/?>\s*){3,}/gi, "<br><br>");
     return out;
   }
 
