@@ -80,6 +80,21 @@ export function sanitizeOutlookHtml(html: string): string {
     "<p>&nbsp;</p>",
   );
 
+  // Same pattern for `<div>` — Outlook desktop's "new mail" format uses
+  // `<div>` blocks rather than `<p>` for paragraphs, so the empty-block runs
+  // look like `<div>&nbsp;</div><div>&nbsp;</div><div><br></div>` etc. Match
+  // against any of `&nbsp;` / whitespace / `<br>` content inside the div.
+  out = out.replace(
+    /(?:<div[^>]*>(?:\s|&nbsp;|<br\s*\/?>)*<\/div>\s*){2,}/gi,
+    "<div>&nbsp;</div>",
+  );
+
+  // Collapse runs of `<br>` to at most two. One `<br>` is a legitimate line
+  // break, two reads as a paragraph-style blank line — anything more is
+  // Outlook compounding "press Enter" presses from the sender (very common
+  // in forwarded threads). Preserves intentional spacing, drops bloat.
+  out = out.replace(/(?:<br\s*\/?>\s*){3,}/gi, "<br><br>");
+
   return out;
 }
 
