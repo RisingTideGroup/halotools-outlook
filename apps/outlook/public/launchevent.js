@@ -243,6 +243,25 @@
   // Minimal HTML → plain text for emailbody field. Same approach as the
   // task pane's htmlToText helper but inline in ES5 for the launchevent
   // runtime.
+  // Mirrors sanitizeOutlookHtml in apps/outlook/src/lib/html.ts — see the
+  // doc comment there for what each pass strips and why. Duplicated here
+  // because the launch-event runtime is vanilla JS and can't import the
+  // shared lib. Keep the two in sync if either is touched.
+  function sanitizeOutlookHtml(html) {
+    if (!html) return "";
+    var out = html;
+    out = out.replace(/<!--\[if[\s\S]*?<!\[endif\]-->/gi, "");
+    out = out.replace(/<\/?[ovwx]:[a-z][^>]*>/gi, "");
+    out = out.replace(/(\s*)mso-[a-z-]+\s*:[^;"']*(?:;|(?=["']))/gi, "");
+    out = out.replace(/\s*class=(?:"|')Mso[^"']*(?:"|')/g, "");
+    out = out.replace(/\s*style=(?:"|')\s*(?:"|')/g, "");
+    out = out.replace(
+      /(?:<p[^>]*>(?:\s|&nbsp;| )*<\/p>\s*){2,}/gi,
+      "<p>&nbsp;</p>",
+    );
+    return out;
+  }
+
   function htmlToText(html) {
     if (!html) return "";
     return html
@@ -285,9 +304,13 @@
       } catch (e) { /* swallow */ }
       try { mailentryid = Office.context.mailbox.item.itemId || ""; } catch (e) { /* swallow */ }
 
+      // Sanitize once and reuse — details + emailbody_html both want the
+      // cleaned HTML, htmlToText runs over the cleaned version too.
+      var cleanedBody = sanitizeOutlookHtml(data.body || "");
+
       var payload = [{
         summary: pending.summary,
-        details: data.body || "",
+        details: cleanedBody,
         tickettype_id: pending.ticketTypeId,
         emailfrom: senderName || senderEmail,
         emailfromname: senderName,
@@ -298,8 +321,8 @@
         mailentryid: mailentryid || undefined,
         emaildirection: "O",
         email_status: 2,
-        emailbody_html: data.body || "",
-        emailbody: htmlToText(data.body || ""),
+        emailbody_html: cleanedBody,
+        emailbody: htmlToText(cleanedBody),
         from_address_override: senderEmail,
         from_mailbox_id: -2,
         sales_mailbox_override_id: agent.salesMailboxId || undefined,
@@ -366,7 +389,11 @@
       // configured Halo signature from note_html so the action's short-form
       // note isn't dominated by the sig block; keep the full body in
       // emailbody_html for parity with native intake.
-      var noteHtml = stripSignature(data.body || "", agent.signature);
+      // Sanitize first so signature stripping and Halo's stored copy both
+      // see the cleaned HTML — otherwise MSO conditional comments + class
+      // markers would blow out the rendered action.
+      var cleanedBody = sanitizeOutlookHtml(data.body || "");
+      var noteHtml = stripSignature(cleanedBody, agent.signature);
       var payload = [{
         ticket_id: Number(ticketId),
         outcome: "Outgoing Email",
@@ -386,8 +413,8 @@
         email_status: 2,
         // Full original body in both formats so the action mirrors what
         // native intake produces.
-        emailbody_html: data.body || "",
-        emailbody: htmlToText(data.body || ""),
+        emailbody_html: cleanedBody,
+        emailbody: htmlToText(cleanedBody),
         // For outbound mail: stamp from_address_override with the agent's
         // actual send-from address. from_mailbox_id: -2 signals "use
         // overridden from address".
