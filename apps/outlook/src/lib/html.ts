@@ -23,3 +23,63 @@ export function htmlToText(html: string): string {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
+
+/**
+ * Strip Outlook/Word-specific noise from an email body before sending it to
+ * Halo. The raw HTML Office.js returns includes MSO conditional comments,
+ * `<o:p>&nbsp;</o:p>` paragraph markers, `class="MsoNormal"` paragraphs with
+ * Word's default 12pt margins, and `mso-*` style declarations. Halo renders
+ * the result literally — the visible effect is huge vertical gaps between
+ * paragraphs and "blown out" email view layouts.
+ *
+ * What we strip (the bits MSP recipients never want to see):
+ *   - MSO conditional comments  `<!--[if gte mso 9]>...<![endif]-->`
+ *   - Office XML namespaces     `<o:*>`, `<v:*>`, `<w:*>`, `<x:*>` tags
+ *   - MSO-prefixed style props  `mso-margin-top-alt: auto; ...`
+ *   - Word stylesheet classes   `class="MsoNormal"`, `MsoListParagraph`, etc.
+ *   - Runs of empty paragraphs  collapsed to a single empty paragraph
+ *
+ * What we keep:
+ *   - All real content, real markup, and non-MSO inline styles. Real font
+ *     choices, colours and quoted threads survive intact.
+ *
+ * Idempotent — running it twice on the same input gives the same output.
+ */
+export function sanitizeOutlookHtml(html: string): string {
+  if (!html) return "";
+
+  let out = html;
+
+  // Conditional comments first — they often contain massive `<xml>` blocks
+  // of Office metadata that other replacements would have to walk through.
+  out = out.replace(/<!--\[if[\s\S]*?<!\[endif\]-->/gi, "");
+
+  // Office namespace tags. Keep any text between open and close (rare in
+  // practice — `<o:p>` is almost always empty or holds `&nbsp;`).
+  out = out.replace(/<\/?[ovwx]:[a-z][^>]*>/gi, "");
+
+  // `mso-*` properties inside style attributes — most renderers ignore them,
+  // but Halo's stored copy bloats by ~30% from them alone. Drop the property
+  // and its value, leaving any siblings intact.
+  out = out.replace(/(\s*)mso-[a-z-]+\s*:[^;"']*(?:;|(?=["']))/gi, "");
+
+  // `class="MsoNormal"` (and friends) reference a Word stylesheet that's
+  // never present, so the class adds nothing visually but the matching
+  // paragraph still inherits Word's default 12pt before/after margin.
+  // Stripping the class drops the margin and the spacing collapses to the
+  // recipient's CSS defaults.
+  out = out.replace(/\s*class=(?:"|')Mso[^"']*(?:"|')/g, "");
+
+  // Empty `style=""` left behind by the mso-* pass.
+  out = out.replace(/\s*style=(?:"|')\s*(?:"|')/g, "");
+
+  // Collapse runs of empty paragraphs (Outlook adds these as "press Enter
+  // again for visual space"). Three or more becomes one; two becomes one.
+  out = out.replace(
+    /(?:<p[^>]*>(?:\s|&nbsp;| )*<\/p>\s*){2,}/gi,
+    "<p>&nbsp;</p>",
+  );
+
+  return out;
+}
+

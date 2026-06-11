@@ -39,7 +39,7 @@ import {
   type EmailContext,
   type FetchedAttachment,
 } from "../lib/office";
-import { htmlToText } from "../lib/html";
+import { htmlToText, sanitizeOutlookHtml } from "../lib/html";
 import type {
   HaloTicket,
   HaloUser,
@@ -241,7 +241,10 @@ function AppendDialog({
     if (!selectedId) return;
     setBusy(true);
     try {
-      const html = await getBody("html");
+      // sanitizeOutlookHtml strips MSO conditional comments, <o:p> tags,
+      // class="MsoNormal" margins, and runs of empty paragraphs — without
+      // this, the recorded action renders with huge vertical gaps in Halo.
+      const html = sanitizeOutlookHtml(await getBody("html"));
       let attachments: HaloAttachmentInline[] = [];
       let attachWarning: string | undefined;
       if (includeAttachments && attachmentCount > 0) {
@@ -492,7 +495,8 @@ function CreateDialog({
   const submit = async () => {
     setBusy(true);
     try {
-      const html = await getBody("html");
+      // See sanitizeOutlookHtml usage in the append flow above — same reason.
+      const html = sanitizeOutlookHtml(await getBody("html"));
       let attachments: HaloAttachmentInline[] = [];
       let attachWarning: string | undefined;
       if (includeAttachments && attachmentCount > 0) {
