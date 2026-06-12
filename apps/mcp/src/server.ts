@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAllTools } from "./tools/index.js";
 
-export function createHaloMcpServer(): McpServer {
+export function createHaloMcpServer(opts: { suppressTools?: ReadonlySet<string> } = {}): McpServer {
   const server = new McpServer(
     {
       name: "halo-mcp-server",
@@ -26,6 +26,6 @@ export function createHaloMcpServer(): McpServer {
     },
   );
 
-  registerAllTools(server);
+  registerAllTools(server, opts.suppressTools);
   return server;
 }

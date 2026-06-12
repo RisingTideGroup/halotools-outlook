@@ -19,6 +19,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 
 import { createHaloMcpServer } from "../server.js";
 import { withRequestAuth } from "../halo/context.js";
+import {
+  detectHaloMcp,
+  registerHaloProxyTools,
+  OVERLAPPING_TOOL_NAMES,
+} from "../halo/native-mcp.js";
 
 import { parseTenantPath } from "./tenant.js";
 import { getPublicOrigin } from "./origin.js";
@@ -260,6 +265,12 @@ async function handleMcpTransport(
       return;
     }
 
+    // Detect Halo's native MCP for this tenant. If it's enabled we suppress
+    // overlapping local tools and register each of Halo's as a `halo_<name>`
+    // proxy on this session so they show up alongside our analytics.
+    const haloMcp = await detectHaloMcp(tenant.halo, accessToken);
+    const suppress = haloMcp.enabled ? OVERLAPPING_TOOL_NAMES : undefined;
+
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       enableJsonResponse: true,
@@ -267,7 +278,10 @@ async function handleMcpTransport(
         sessions.set(sid, { transport, server });
       },
     });
-    const server = createHaloMcpServer();
+    const server = createHaloMcpServer({ suppressTools: suppress });
+    if (haloMcp.enabled) {
+      registerHaloProxyTools(server, haloMcp.tools, tenant.halo);
+    }
     transport.onclose = () => {
       if (transport.sessionId) sessions.delete(transport.sessionId);
       server.close().catch(() => undefined);
