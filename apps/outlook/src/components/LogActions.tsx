@@ -39,7 +39,7 @@ import {
   type EmailContext,
   type FetchedAttachment,
 } from "../lib/office";
-import { htmlToText, sanitizeOutlookHtml } from "../lib/html";
+import { htmlToText, sanitizeOutlookHtml, extractTopReply } from "../lib/html";
 import type {
   HaloTicket,
   HaloUser,
@@ -264,13 +264,14 @@ function AppendDialog({
         ? getDefaults().defaultOutgoingOutcome ?? "Outgoing Email"
         : getDefaults().defaultAppendOutcome ?? "Email Received";
 
-      // For outbound mail, strip the agent's configured Halo signature from
-      // note_html so the short-form note isn't dominated by the sig block.
-      // emailbody_html below keeps the full original body — Halo's native
-      // intake convention is "full thread in emailbody, just-the-content in
-      // note". Falls through to the unmodified body when the signature
-      // isn't configured or doesn't match exactly.
-      const noteHtml = isOutgoing ? stripAgentSignature(html) : html;
+      // Halo's native intake convention is "full thread in emailbody, only the
+      // topmost new content in note". emailbody_html below keeps the unchanged
+      // original body (including the quoted reply separator). The note slice
+      // is everything above the first quoted-reply separator the extractor
+      // can detect; for outbound mail we additionally strip the agent's
+      // saved Halo signature so the note isn't sig-dominated.
+      let noteHtml = extractTopReply(html);
+      if (isOutgoing) noteHtml = stripAgentSignature(noteHtml);
       const agent = getCachedClientCache()?.agent;
 
       const action = await appendAction({
@@ -278,6 +279,10 @@ function AppendDialog({
         outcome: defaultOutcome,
         note: noteHtml,
         hiddenfromuser: internalNote,
+        // actionhide is the literal Halo column the Email tab filters on:
+        // `emailto IS NOT NULL AND actionhide <> 1`. Set explicitly — Halo
+        // doesn't reliably default it from hiddenfromuser.
+        actionhide: internalNote ? 1 : 0,
         // RFC sender — for outgoing this is the agent, for incoming the customer.
         // Halo logs this verbatim as the From: header of the recorded action.
         emailfrom: email.senderName || email.senderEmail,
@@ -508,7 +513,10 @@ function CreateDialog({
       }
 
       const isOutgoing = email.direction === "outgoing";
-      const detailsHtml = isOutgoing ? stripAgentSignature(html) : html;
+      // `details` mirrors the `note` convention from the append flow — just
+      // the topmost new content. emailbody_html below keeps the full thread.
+      let detailsHtml = extractTopReply(html);
+      if (isOutgoing) detailsHtml = stripAgentSignature(detailsHtml);
       const ticket = await createTicket({
         summary,
         details: detailsHtml,

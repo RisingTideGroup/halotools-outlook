@@ -250,6 +250,11 @@ export interface CreateActionPayload {
   outcome: string;
   note: string;
   hiddenfromuser?: boolean;
+  /** Literal Halo column that drives the Email-tab visibility filter:
+   *  the tab shows actions where `emailto IS NOT NULL AND actionhide <> 1`.
+   *  Always set this explicitly — Halo doesn't reliably default it from
+   *  `hiddenfromuser`. 0 = visible, 1 = hidden. */
+  actionhide?: number;
   attachments?: HaloAttachmentInline[];
   emailfrom?: string;
   emailfromname?: string;

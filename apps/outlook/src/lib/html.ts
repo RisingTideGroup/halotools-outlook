@@ -98,3 +98,76 @@ export function sanitizeOutlookHtml(html: string): string {
   return out;
 }
 
+/**
+ * Return only the topmost portion of an email body — the new content the user
+ * actually wrote / received, with the quoted history below it cut off. The
+ * separator itself is dropped so the slice ends cleanly.
+ *
+ * This is the convention Halo's native email service uses internally: `note`
+ * gets just the topmost reply, `emailbody`/`emailbody_html` keep the full
+ * thread including the separator. Best-effort and known to misfire on
+ * non-standard threads — when no separator is found, returns the input
+ * unchanged (i.e., the whole body is the topmost reply, which is correct
+ * for a clean unforwarded mail).
+ *
+ * Separators are tried in priority order, first match wins. Apply this AFTER
+ * sanitizeOutlookHtml so the patterns aren't masked by `class="MsoNormal"`
+ * wrappers or `<o:p>` noise.
+ */
+export function extractTopReply(html: string): string {
+  if (!html) return "";
+
+  // Priority list — most-specific markers first.
+  // Each entry is a regex; we cut at the first match's index.
+  const separators: RegExp[] = [
+    // Outlook desktop (modern, on-send): explicit "your typing ends here" marker.
+    /<div\s+id=["']appendonsend["'][^>]*>/i,
+    // Outlook classic — older Outlook reply wrapper.
+    /<div\s+id=["']OLK_SRC_BODY_SECTION["'][^>]*>/i,
+    // Outlook reply divider — desktop adds this around the header block on reply.
+    /<div\s+id=["']divRplyFwdMsg["'][^>]*>/i,
+    // Gmail quoted reply container.
+    /<div\s+class=["'][^"']*\bgmail_quote\b[^"']*["'][^>]*>/i,
+    // Apple Mail / various: blockquote with cite type wraps quoted history.
+    /<blockquote[^>]*type=["']cite["'][^>]*>/i,
+    // Plain-text "Original Message" marker (English + most common Western EU).
+    /-{2,}\s*(?:Original\s+Message|Message\s+d['’]origine|Ursprüngliche\s+Nachricht|Mensaje\s+original|Messaggio\s+originale|Mensagem\s+original)\s*-{2,}/i,
+    // HR followed by an English header block — some replies use this shape.
+    /<hr[^>]*>\s*(?:<div[^>]*>|<p[^>]*>)?\s*(?:<b>|<strong>)?\s*From\s*:/i,
+    // Header block on its own ("From: ...<br>Sent: ..."). Locale-aware on the
+    // first label so French/German/Spanish/Italian/Portuguese forwards match.
+    // Looks for the label followed by ':' then within ~200 chars a Sent/To/Subject
+    // companion label — minimises false positives on the literal word "From".
+    // Allow any characters in the gap (including `<br>` and other inline tags)
+    // since header blocks routinely use `<br>` between lines; the lazy quantifier
+    // bounds how far the match can wander.
+    /(?:From|De|Da|Von|Inviato\s+da)\s*:[\s\S]{0,200}?(?:Sent|Envoyé|Enviado|Gesendet|Inviato|Verzonden)\s*:/i,
+  ];
+
+  let bestIdx = -1;
+  for (const re of separators) {
+    const m = re.exec(html);
+    if (m && m.index >= 0 && (bestIdx === -1 || m.index < bestIdx)) {
+      bestIdx = m.index;
+    }
+  }
+
+  if (bestIdx === -1) return html;
+
+  // Cuts may land in the middle of a wrapping block (e.g., the separator is
+  // `From:` inside `<p>From: ...</p>` — slicing at "From:" leaves an orphan
+  // `<p>`). Loop trim: drop trailing empty blocks, drop trailing orphan
+  // openers, repeat until stable. Converges in 1–2 iterations.
+  let top = html.slice(0, bestIdx);
+  const trailingJunk =
+    /(?:\s|&nbsp;|<br\s*\/?>|<p[^>]*>(?:\s|&nbsp;|<br\s*\/?>)*<\/p>|<div[^>]*>(?:\s|&nbsp;|<br\s*\/?>)*<\/div>)+$/i;
+  const trailingOrphanOpener = /<(?:p|div|span)\b[^>]*>\s*$/i;
+  for (let i = 0; i < 4; i++) {
+    const before = top;
+    top = top.replace(trailingJunk, "");
+    top = top.replace(trailingOrphanOpener, "");
+    if (top === before) break;
+  }
+  return top;
+}
+
