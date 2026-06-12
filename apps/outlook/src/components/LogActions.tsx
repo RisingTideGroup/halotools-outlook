@@ -36,6 +36,9 @@ import {
   getBody,
   fetchAllAttachments,
   listAttachments,
+  getCurrentUserEmail,
+  getItemImportance,
+  formatHaloDate,
   type EmailContext,
   type FetchedAttachment,
 } from "../lib/office";
@@ -272,12 +275,20 @@ function AppendDialog({
       // saved Halo signature so the note isn't sig-dominated.
       let noteHtml = extractTopReply(html);
       if (isOutgoing) noteHtml = stripAgentSignature(noteHtml);
+      const notePlain = htmlToText(noteHtml);
       const agent = getCachedClientCache()?.agent;
 
       const action = await appendAction({
         ticket_id: selectedId,
         outcome: defaultOutcome,
-        note: noteHtml,
+        outcome_id: 0,
+        // True when the customer effectively posted this (inbound). Halo's
+        // "Updated by User" automations fire off this flag.
+        _isuserupdate: !isOutgoing,
+        // Halo's convention: note carries plain text, note_html carries the
+        // matching HTML. Both required.
+        note: notePlain,
+        note_html: noteHtml,
         hiddenfromuser: internalNote,
         // actionhide is the literal Halo column the Email tab filters on:
         // `emailto IS NOT NULL AND actionhide <> 1`. Set explicitly — Halo
@@ -288,8 +299,19 @@ function AppendDialog({
         emailfrom: email.senderName || email.senderEmail,
         emailfromname: email.senderName,
         emailfromaddress: email.senderEmail,
-        emailsubject: email.subject,
-        emailto: isOutgoing ? email.customerEmail : email.senderEmail,
+        // Canonical Halo subject field — replaces the legacy emailsubject.
+        emailsubjectnew: email.subject,
+        // The person who received the email — inbound = the Outlook user (us),
+        // outbound = the customer. Halo's classifier reads this directly; do
+        // NOT set it to the sender on inbound.
+        emailto: isOutgoing ? email.customerEmail : (getCurrentUserEmail() ?? ""),
+        // Importance class read from the message; falls back to "normal" on
+        // hosts without the Mailbox 1.10 property.
+        emailimportance: getItemImportance(),
+        // ISO datetime without trailing Z. Inbound = received time;
+        // outbound = sent time. email.receivedAt covers both (Outlook's
+        // dateTimeCreated semantically maps to both depending on folder).
+        dateemailed: formatHaloDate(email.receivedAt),
         attachments: attachments.length ? attachments : undefined,
         // user_id is always the customer regardless of direction so the
         // action is linked to the right person in Halo. The Dashboard's
@@ -300,6 +322,14 @@ function AppendDialog({
         // Agent attribution on outbound mail. For inbound we leave agent_id
         // unset so Halo treats it as customer-originated.
         agent_id: isOutgoing ? agent?.id : undefined,
+        // Action-author display triplet. Inbound: the sender's name with
+        // who_type=2 (user) and who_agentid=-1 (not an agent). Outbound:
+        // the agent's name with who_type=1 (agent) and the agent's id.
+        who: isOutgoing
+          ? (agent?.name ?? "")
+          : (email.senderName || email.senderEmail),
+        who_agentid: isOutgoing ? (agent?.id ?? -1) : -1,
+        who_type: isOutgoing ? 1 : 2,
         internetmessageid: email.internetMessageId,
         inreplyto: email.inReplyTo,
         references: email.references.length ? email.references.join(" ") : undefined,
@@ -517,6 +547,8 @@ function CreateDialog({
       // the topmost new content. emailbody_html below keeps the full thread.
       let detailsHtml = extractTopReply(html);
       if (isOutgoing) detailsHtml = stripAgentSignature(detailsHtml);
+      const detailsPlain = htmlToText(detailsHtml);
+      const agent = getCachedClientCache()?.agent;
       const ticket = await createTicket({
         summary,
         details: detailsHtml,
@@ -527,8 +559,23 @@ function CreateDialog({
         emailfrom: email.senderName || email.senderEmail,
         emailfromname: email.senderName,
         emailfromaddress: email.senderEmail,
-        emailsubject: email.subject,
-        emailto: isOutgoing ? email.customerEmail : email.senderEmail,
+        // See append-flow comments for each new field — same semantics apply
+        // to the initial action Halo creates from a ticket POST.
+        emailsubjectnew: email.subject,
+        emailto: isOutgoing ? email.customerEmail : (getCurrentUserEmail() ?? ""),
+        emailimportance: getItemImportance(),
+        dateemailed: formatHaloDate(email.receivedAt),
+        outcome_id: 0,
+        _isuserupdate: !isOutgoing,
+        note_html: detailsHtml,
+        // `details` is the ticket body field. We additionally send a plain
+        // text mirror on the initial action via `note`.
+        note: detailsPlain,
+        who: isOutgoing
+          ? (agent?.name ?? "")
+          : (email.senderName || email.senderEmail),
+        who_agentid: isOutgoing ? (agent?.id ?? -1) : -1,
+        who_type: isOutgoing ? 1 : 2,
         internetmessageid: email.internetMessageId,
         inreplyto: email.inReplyTo,
         references: email.references.length ? email.references.join(" ") : undefined,

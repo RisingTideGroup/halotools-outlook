@@ -284,6 +284,28 @@ export function getCurrentUserEmail(): string | undefined {
   return Office.context.mailbox.userProfile?.emailAddress;
 }
 
+/** Read the importance class of the current message — "low" | "normal" | "high".
+ *  Requires Mailbox 1.10+. Falls back to "normal" on older hosts or when the
+ *  property isn't surfaced. */
+export function getItemImportance(): string {
+  try {
+    const imp = (Office.context.mailbox.item as unknown as { importance?: string })
+      .importance;
+    if (typeof imp === "string" && imp) return imp.toLowerCase();
+  } catch {
+    /* swallow */
+  }
+  return "normal";
+}
+
+/** Format a Date / ISO string as Halo's `dateemailed` shape:
+ *  `YYYY-MM-DDTHH:mm:ss.SSS` — toISOString output minus the trailing Z.
+ *  Returns the current time when input is undefined. */
+export function formatHaloDate(d: Date | string | undefined): string {
+  const dt = d instanceof Date ? d : (d ? new Date(d) : new Date());
+  return dt.toISOString().replace(/Z$/, "");
+}
+
 /** Extract the domain part from an email address (lowercased). */
 export function domainOf(email: string): string {
   const at = email.lastIndexOf("@");

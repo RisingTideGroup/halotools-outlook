@@ -313,6 +313,30 @@ export interface CreateActionPayload {
   /** Agent (employee) attribution. Set on outbound mail so the action shows
    *  as agent-originated; omit on inbound so Halo treats it as customer-from. */
   agent_id?: number;
+  /** Always 0 — Halo doesn't need the resolved outcome id on POST. */
+  outcome_id?: number;
+  /** Flag that drives Halo's "Updated by User" automation triggers.
+   *  true on inbound (customer posted), false on outbound (agent posted). */
+  _isuserupdate?: boolean;
+  /** HTML body of the new content (no quoted history). Paired with `note`
+   *  which carries the plain-text equivalent — Halo requires both. */
+  note_html?: string;
+  /** Canonical email subject — replaces legacy `emailsubject`. */
+  emailsubjectnew?: string;
+  /** Display address of the Halo mailbox that received the email, formatted
+   *  `"Display Name" <email>`. Sourced from the ticket record's mailbox info. */
+  emailtonew?: string;
+  /** ISO datetime without trailing Z, e.g. "2026-06-07T20:28:41.657".
+   *  Inbound: when the email was received. Outbound: when the email was sent. */
+  dateemailed?: string;
+  /** Outlook importance class: "low" | "normal" | "high". */
+  emailimportance?: string;
+  /** Display name of the author Halo shows on the action's timeline entry. */
+  who?: string;
+  /** Halo agent id of the author. Use -1 on inbound — sender is not an agent. */
+  who_agentid?: number;
+  /** Author type discriminator: 1 = agent (outbound), 2 = user (inbound). */
+  who_type?: number;
 }
 
 export interface CreateTicketPayload {
@@ -360,6 +384,20 @@ export interface CreateTicketPayload {
    *  email intake does — silent create, no popups. */
   _novalidate?: boolean;
   _forcereassign?: boolean;
+  // ---- Initial-action email fields (mirror of CreateActionPayload) ----
+  outcome_id?: number;
+  _isuserupdate?: boolean;
+  /** Plain-text body of the initial action. Pair with note_html which carries
+   *  the HTML. `details` remains the ticket-body field on the ticket itself. */
+  note?: string;
+  note_html?: string;
+  emailsubjectnew?: string;
+  emailtonew?: string;
+  dateemailed?: string;
+  emailimportance?: string;
+  who?: string;
+  who_agentid?: number;
+  who_type?: number;
 }
 
 /** Partial update payload for an existing ticket. Halo accepts mutated fields only. */
