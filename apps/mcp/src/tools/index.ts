@@ -22,39 +22,45 @@ import { registerGetRevenuePerTechSnapshot } from "./getRevenuePerTechSnapshot.j
 import { registerGetMrrPerSeatSnapshot } from "./getMrrPerSeatSnapshot.js";
 import { registerGetMspKpis } from "./getMspKpis.js";
 
-export function registerAllTools(server: McpServer): void {
-  // Core read + write
-  registerFindContact(server);
-  registerListOpenTickets(server);
-  registerSearchTickets(server);
-  registerCreateTicket(server);
-  registerAppendActionToTicket(server);
-  registerLogNote(server);
-  registerSearchCannedText(server);
-  registerGetActivityFeed(server);
+/** Map of tool name → register function so suppression can decide per-tool
+ *  whether to wire it up. The order here defines the order the agent sees
+ *  in tools/list — kept the same as the prior registerAllTools calls. */
+const TOOL_REGISTRY: Array<{ name: string; register: (s: McpServer) => void }> = [
+  // Operational
+  { name: "findContact", register: registerFindContact },
+  { name: "listOpenTickets", register: registerListOpenTickets },
+  { name: "searchTickets", register: registerSearchTickets },
+  { name: "createTicket", register: registerCreateTicket },
+  { name: "appendActionToTicket", register: registerAppendActionToTicket },
+  { name: "logNote", register: registerLogNote },
+  { name: "searchCannedText", register: registerSearchCannedText },
+  { name: "getActivityFeed", register: registerGetActivityFeed },
 
   // Analytics — foundation reads
-  registerListRecurringInvoices(server);
-  registerListTimesheets(server);
-  registerListContracts(server);
-  registerListOpportunities(server);
+  { name: "listRecurringInvoices", register: registerListRecurringInvoices },
+  { name: "listTimesheets", register: registerListTimesheets },
+  { name: "listContracts", register: registerListContracts },
+  { name: "listOpportunities", register: registerListOpportunities },
 
   // Analytics — composite KPIs
-  registerGetMrrSnapshot(server);
-  registerGetTechnicianUtilizationSnapshot(server);
-  registerGetRevenuePerTechSnapshot(server);
-  registerGetMrrPerSeatSnapshot(server);
-  registerGetMspKpis(server);
+  { name: "getMrrSnapshot", register: registerGetMrrSnapshot },
+  { name: "getTechnicianUtilizationSnapshot", register: registerGetTechnicianUtilizationSnapshot },
+  { name: "getRevenuePerTechSnapshot", register: registerGetRevenuePerTechSnapshot },
+  { name: "getMrrPerSeatSnapshot", register: registerGetMrrPerSeatSnapshot },
+  { name: "getMspKpis", register: registerGetMspKpis },
 
-  // Direct database access via Halo Report Center — the highest-leverage tool
-  // for cross-data analysis. Registered after the composites so they're tried
-  // first for canonical KPI questions, but before haloApiRaw since SQL is the
-  // primary escape hatch for "we don't have a tool for this question".
-  registerListReports(server);
-  registerRunSql(server);
+  // Database access + REST escape hatch
+  { name: "listReports", register: registerListReports },
+  { name: "runSql", register: registerRunSql },
+  { name: "haloApiRaw", register: registerHaloApiRaw },
+];
 
-  // Generic REST escape hatch — for unwrapped endpoints / exploration where
-  // SQL isn't the right tool (e.g. firing a write that has side effects we
-  // want Halo's business logic to handle).
-  registerHaloApiRaw(server);
+export function registerAllTools(
+  server: McpServer,
+  suppress?: ReadonlySet<string>,
+): void {
+  for (const tool of TOOL_REGISTRY) {
+    if (suppress?.has(tool.name)) continue;
+    tool.register(server);
+  }
 }
