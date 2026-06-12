@@ -39,6 +39,9 @@ import type {
   TechnicianScorecardRow,
   ClientHealthScorecard,
   ClientHealthRow,
+  CategoryInsights,
+  TechnicianRiskSignals,
+  TechnicianRiskRow,
   TicketBacklog,
 } from "./types.js";
 
@@ -1614,6 +1617,191 @@ order by f.dateoccured asc`;
       fixSlaState: String(r.fix_sla_state ?? ""),
       firstResponseState: String(r.frt_state ?? ""),
     })),
+  };
+}
+
+/**
+ * Ticket-categorisation insight for a window (defaults to trailing 30 days):
+ * how much of the queue is uncategorised, the top categories by volume and by
+ * logged hours, and the recurring-problem candidates (named categories ranked
+ * by tickets × hours — the KB-article / automation targets). A high
+ * `uncategorisedPct` (industry red flag is ~40%+) means reporting is blind to
+ * recurring issues. Uses faults.category2 (Halo's primary category, stored as a
+ * denormalised "A>B>C" path); hours come from ACTIONS time logged in the window.
+ */
+export async function getCategoryInsights(
+  startdate?: string,
+  enddate?: string,
+  scope: TicketScope = "reactive",
+  limit = 15,
+): Promise<CategoryInsights> {
+  const { start, end } = resolveWindow(startdate, enddate, 30);
+  const ex = exclusiveEnd(end);
+  const join = scope === "reactive" ? "join requesttype rt on f.requesttypenew = rt.RTid" : "";
+  const reactive = scope === "reactive" ? "and rt.RTIsProject = 0 and rt.RTIsOpportunity = 0" : "";
+  const base = `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0) ${reactive} and f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`;
+  const cat = `coalesce(nullif(ltrim(rtrim(f.category2)), ''), '(uncategorised)')`;
+
+  const summarySql = `select
+  count(*) as total,
+  sum(case when nullif(ltrim(rtrim(f.category2)), '') is null then 1 else 0 end) as uncategorised
+from faults f
+${join}
+where ${base}`;
+
+  const catSql = `select top 100
+  ${cat} as category,
+  count(*) as tickets,
+  cast(sum(coalesce(a.hrs, 0)) as decimal(12,2)) as hours
+from faults f
+${join}
+left join (select faultid, sum(timetaken) as hrs from actions where ActionDateCreated >= '${start}' and ActionDateCreated < '${ex}' group by faultid) a on a.faultid = f.faultid
+where ${base}
+group by ${cat}
+order by count(*) desc`;
+
+  const [summaryRows, catRows] = await Promise.all([reportRows(summarySql), reportRows(catSql)]);
+  const summary = summaryRows[0] ?? {};
+  const total = num(summary.total);
+  const uncategorised = num(summary.uncategorised);
+  const cats = catRows.map((r) => ({
+    category: String(r.category ?? ""),
+    tickets: num(r.tickets),
+    hours: round2(num(r.hours)),
+  }));
+  const named = cats.filter((c) => c.category !== "(uncategorised)");
+  return {
+    window: { startdate: start, enddate: end, scope },
+    totalTickets: total,
+    uncategorisedTickets: uncategorised,
+    uncategorisedPct: rate(uncategorised, total),
+    topByVolume: cats.slice(0, limit),
+    topByHours: [...cats].sort((a, b) => b.hours - a.hours).slice(0, limit),
+    recurringProblemCandidates: named
+      .map((c) => ({ ...c, effortScore: round2(c.tickets * c.hours) }))
+      .sort((a, b) => b.effortScore - a.effortScore)
+      .slice(0, limit),
+  };
+}
+
+/**
+ * Per-technician leading risk signals for a window (defaults to trailing 30
+ * days): of the reactive tickets a tech closed — zero-time-close rate (closed
+ * with no time logged) and resolution-SLA breach rate and AI CSAT; plus their
+ * current owned-open backlog and how much of it is stale (no action in 3+ days).
+ * Raises heuristic `flags` (high-zero-time-closes >30%, low-sla >20% breach,
+ * stale-backlog, low-csat <5) to separate "needs coaching" from "disengaged".
+ * These are signals to investigate, not verdicts — a tech who under-logs time
+ * looks idle while busy, so always read with throughput and context.
+ */
+export async function getTechnicianRiskSignals(
+  startdate?: string,
+  enddate?: string,
+  scope: TicketScope = "reactive",
+  limit = 50,
+): Promise<TechnicianRiskSignals> {
+  const { start, end } = resolveWindow(startdate, enddate, 30);
+  const ex = exclusiveEnd(end);
+  const join = scope === "reactive" ? "join requesttype rt on f.requesttypenew = rt.RTid" : "";
+  const reactive = scope === "reactive" ? "and rt.RTIsProject = 0 and rt.RTIsOpportunity = 0" : "";
+  const notDeleted = "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)";
+  const realAgent = "coalesce(u.uisapiagent,0) = 0";
+  const top = Math.max(1, Math.trunc(limit));
+
+  // Closed-by-tech cohort: throughput + zero-time closes + SLA breach + CSAT.
+  const closedSql = `select top ${top}
+  u.unum as agent_id,
+  u.uname as agent,
+  count(*) as resolved,
+  sum(case when coalesce(a.hrs,0) = 0 then 1 else 0 end) as zero_time_closes,
+  sum(case when f.Slastate = 'O' then 1 else 0 end) as sla_breach,
+  cast(avg(try_convert(float, nullif(f.faisatisfactionlevel, ''))) as decimal(6,2)) as ai_csat
+from faults f
+join uname u on f.clearwhoint = u.unum
+${join}
+left join (select faultid, sum(timetaken) as hrs from actions group by faultid) a on a.faultid = f.faultid
+where ${notDeleted} ${reactive} and ${realAgent} and f.datecleared >= '${start}' and f.datecleared < '${ex}'
+group by u.unum, u.uname
+order by count(*) desc`;
+
+  // Owned-open cohort: current backlog held by each tech + stale share.
+  const ownedSql = `select top ${top}
+  u.unum as agent_id,
+  u.uname as agent,
+  count(*) as open_owned,
+  sum(case when f.Flastactiondate < dateadd(day, -3, getdate()) then 1 else 0 end) as stale_3d,
+  cast(avg(datediff(day, f.dateoccured, getdate()) * 1.0) as decimal(10,1)) as avg_age_days
+from faults f
+join uname u on f.assignedtoint = u.unum
+${join}
+where ${notDeleted} ${reactive} and ${realAgent} and u.unum <> 1 and (f.datecleared is null or f.datecleared < '1900-01-01')
+group by u.unum, u.uname
+order by count(*) desc`;
+
+  const [closedRows, ownedRows] = await Promise.all([reportRows(closedSql), reportRows(ownedSql)]);
+
+  const byId = new Map<number, TechnicianRiskRow>();
+  for (const r of closedRows) {
+    const id = num(r.agent_id);
+    const resolved = num(r.resolved);
+    const zero = num(r.zero_time_closes);
+    const breach = num(r.sla_breach);
+    byId.set(id, {
+      agentId: id,
+      agent: String(r.agent ?? ""),
+      resolved,
+      zeroTimeCloses: zero,
+      zeroTimeCloseRate: rate(zero, resolved),
+      slaBreaches: breach,
+      resolutionSlaBreachRate: rate(breach, resolved),
+      aiCsatAvg: numOrNull(r.ai_csat),
+      openOwned: 0,
+      staleOwned: 0,
+      staleOwnedRate: null,
+      avgOpenAgeDays: null,
+      flags: [],
+    });
+  }
+  for (const r of ownedRows) {
+    const id = num(r.agent_id);
+    const openOwned = num(r.open_owned);
+    const stale = num(r.stale_3d);
+    const existing = byId.get(id) ?? {
+      agentId: id,
+      agent: String(r.agent ?? ""),
+      resolved: 0,
+      zeroTimeCloses: 0,
+      zeroTimeCloseRate: null,
+      slaBreaches: 0,
+      resolutionSlaBreachRate: null,
+      aiCsatAvg: null,
+      openOwned: 0,
+      staleOwned: 0,
+      staleOwnedRate: null,
+      avgOpenAgeDays: null,
+      flags: [],
+    };
+    existing.openOwned = openOwned;
+    existing.staleOwned = stale;
+    existing.staleOwnedRate = rate(stale, openOwned);
+    existing.avgOpenAgeDays = numOrNull(r.avg_age_days);
+    byId.set(id, existing);
+  }
+
+  const technicians = Array.from(byId.values()).map((t) => {
+    const flags: string[] = [];
+    if ((t.zeroTimeCloseRate ?? 0) > 30 && t.resolved >= 5) flags.push("high-zero-time-closes");
+    if ((t.resolutionSlaBreachRate ?? 0) > 20 && t.resolved >= 5) flags.push("low-sla-attainment");
+    if (t.staleOwned >= 5 && (t.staleOwnedRate ?? 0) >= 50) flags.push("stale-backlog");
+    if (t.aiCsatAvg != null && t.aiCsatAvg < 5) flags.push("low-csat");
+    return { ...t, flags };
+  });
+  technicians.sort((a, b) => b.resolved - a.resolved);
+
+  return {
+    window: { startdate: start, enddate: end, scope },
+    note: "Signals to investigate, not verdicts. Cross-read with throughput and context — e.g. zero-time-closes can mean under-logging, not idleness; after-hours and category-level coaching signals live in the reports/technicians SQL library.",
+    technicians,
   };
 }
 

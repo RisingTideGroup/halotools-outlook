@@ -712,6 +712,46 @@ export interface ClientHealthScorecard {
   clients: ClientHealthRow[];
 }
 
+/** Ticket-categorisation insight: coverage + top categories + recurring-problem
+ *  candidates. Surfaces broken taxonomies (high uncategorised share) and the
+ *  high-volume/high-effort categories worth a KB article or automation. */
+export interface CategoryInsights {
+  window: ServiceWindow;
+  totalTickets: number;
+  uncategorisedTickets: number;
+  uncategorisedPct: number | null;
+  topByVolume: { category: string; tickets: number; hours: number }[];
+  topByHours: { category: string; tickets: number; hours: number }[];
+  /** Named categories ranked by tickets × hours — the automation / KB targets. */
+  recurringProblemCandidates: { category: string; tickets: number; hours: number; effortScore: number }[];
+}
+
+/** Per-technician leading risk signals for coaching vs disengagement. All rates
+ *  are heuristic flags, not verdicts — read alongside throughput and context
+ *  (e.g. a tech who logs no time can look idle while busy). */
+export interface TechnicianRiskRow {
+  agentId: number;
+  agent: string;
+  resolved: number;
+  zeroTimeCloses: number;
+  zeroTimeCloseRate: number | null;
+  slaBreaches: number;
+  resolutionSlaBreachRate: number | null;
+  aiCsatAvg: number | null;
+  openOwned: number;
+  staleOwned: number;
+  staleOwnedRate: number | null;
+  avgOpenAgeDays: number | null;
+  /** Heuristic flags raised for this tech (e.g. high-zero-time-closes, low-sla, stale-backlog, low-csat). */
+  flags: string[];
+}
+
+export interface TechnicianRiskSignals {
+  window: ServiceWindow;
+  note: string;
+  technicians: TechnicianRiskRow[];
+}
+
 /** Point-in-time open-ticket backlog with aging + SLA-at-risk counts. */
 export interface TicketBacklog {
   scope: TicketScope;
