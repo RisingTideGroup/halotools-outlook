@@ -1345,12 +1345,26 @@ function exclusiveEnd(end: string): string {
   return d.toISOString().slice(0, 10);
 }
 
+/**
+ * Excludes "closed-on-creation" stub tickets (e.g. Halo "Quick Time" time-log
+ * entries) from service-delivery metrics: a ticket that was closed at the same
+ * instant it was opened (`datecleared == dateoccured`) was never serviced. Real
+ * closed tickets (`datecleared > dateoccured`) and any still-open ticket are
+ * kept. These stubs can dominate a tenant (~96% of the "reactive" set here) and
+ * drag every duration toward zero, so they're filtered everywhere. Note: time
+ * logged on stubs still counts towards technician hours — that comes from
+ * ACTIONS, not this ticket filter.
+ */
+const NOT_STUB =
+  "(f.datecleared > f.dateoccured or f.datecleared is null or f.datecleared < '1900-01-01')";
+
 /** SQL fragments shared by the windowed service-delivery queries. */
 function deliverySql(start: string, end: string, scope: TicketScope, clientId?: number) {
   const ex = exclusiveEnd(end);
   const join = scope === "reactive" ? "join requesttype rt on f.RequestTypeNew = rt.RTid" : "";
   const filters = [
     "f.fdeleted = f.fmergedintofaultid",
+    NOT_STUB,
     scope === "reactive" ? "rt.RTIsProject = 0 and rt.RTIsOpportunity = 0" : "",
     clientId != null ? `f.areaint = ${Math.trunc(clientId)}` : "",
   ]
@@ -1639,7 +1653,7 @@ export async function getCategoryInsights(
   const ex = exclusiveEnd(end);
   const join = scope === "reactive" ? "join requesttype rt on f.requesttypenew = rt.RTid" : "";
   const reactive = scope === "reactive" ? "and rt.RTIsProject = 0 and rt.RTIsOpportunity = 0" : "";
-  const base = `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0) ${reactive} and f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`;
+  const base = `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0) and ${NOT_STUB} ${reactive} and f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`;
   const cat = `coalesce(nullif(ltrim(rtrim(f.category2)), ''), '(uncategorised)')`;
 
   const summarySql = `select
@@ -1720,7 +1734,7 @@ from faults f
 join uname u on f.clearwhoint = u.unum
 ${join}
 left join (select faultid, sum(timetaken) as hrs from actions group by faultid) a on a.faultid = f.faultid
-where ${notDeleted} ${reactive} and ${realAgent} and f.datecleared >= '${start}' and f.datecleared < '${ex}'
+where ${notDeleted} and ${NOT_STUB} ${reactive} and ${realAgent} and f.datecleared >= '${start}' and f.datecleared < '${ex}'
 group by u.unum, u.uname
 order by count(*) desc`;
 

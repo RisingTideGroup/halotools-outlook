@@ -20,8 +20,14 @@ status/type ID) is marked `/* EDIT: ... */` in each file's header.
 
 One statement per query · no `--` comments (use `/* */`) · no trailing semicolon ·
 no variables/`DECLARE`/temp tables/CTEs-with-variables · British spellings in
-string literals · `ORDER BY` requires a `TOP`. `runSql` array-batching returns
-only the **last** statement's result, so each report is a single statement.
+string literals · `ORDER BY` requires `TOP`, `OFFSET`, or `FOR XML`. `runSql`
+array-batching returns only the **last** statement's result, so each report is a
+single statement.
+
+> **`ORDER BY` tip:** to return a *full* ordered result set (no arbitrary cap),
+> append `OFFSET 0 ROWS` instead of `TOP n` — it satisfies the parser rule and
+> preserves order. Avoid `TOP 100 PERCENT ... ORDER BY`: the optimizer is allowed
+> to drop the sort. Use `TOP n` only when you deliberately want the top N rows.
 
 ## ⚠️ Data-quality traps (read before trusting any number)
 
@@ -31,8 +37,9 @@ library and are the difference between a real number and a garbage one.
 | Trap | Reality | Use instead |
 | --- | --- | --- |
 | **`datecreated`** | Row-metadata stamp; post-dates clearance on ~95% of tickets (negative durations). | `dateoccured` for the ticket-open time. |
-| **`datecleared` as a timestamp** | Corrupt — ~96% equal `dateoccured` (0-span), only a few have real values. | Reliable only as a **flag/window** ("resolved in period"). For resolution *duration* use `Flastactiondate`. |
-| **`cleartime`** | Halo working-**days** SLA duration (different semantic), not wall-clock. | Wall-clock `DATEDIFF(minute, dateoccured, Flastactiondate)`. |
+| **`datecleared`** | **Reliable.** For real tickets it matches the actual close action to the minute. It only *looks* corrupt in aggregate because closed-on-creation stubs (see next row) make it equal `dateoccured`. Don't use `Flastactiondate` (contaminated by post-close automations/reopens/appointments) or the last-close-action `Whe_` (contaminated by hourly bot status-syncs). | `DATEDIFF(minute, dateoccured, datecleared)` for wall-clock MTTR. |
+| **Closed-on-creation stubs** | "Quick Time" time-log tickets (and similar) are opened and closed in the same instant, so `datecleared == dateoccured`. They can be ~96% of the "reactive" set and drag every duration to zero. | Exclude from service-delivery metrics: keep only `datecleared > dateoccured OR still open`. Their *time* still counts via ACTIONS. |
+| **`cleartime`** | Halo working-**days** SLA duration (different semantic), not wall-clock. | `DATEDIFF(minute, dateoccured, datecleared)`. |
 | **Bit columns are NULL, not 0** | `uisapiagent`, `fdeleted`, `fmergedintofaultid` are often NULL; `x = 0` drops rows. | `COALESCE(x,0)`. Exclude bots via `COALESCE(u.uisapiagent,0)=0`. |
 | **`faisatisfactionlevel` / `Slastate`** | Stored as **nvarchar** with non-numeric values ('O', etc.). | `TRY_CONVERT(float, …)` before maths. |
 | **Open vs closed** | `TstatusType` is **not** a reliable open/closed flag (Resolved/Closed/Completed are all type 0). | Open = `datecleared` NULL/`<1900`; closed statuses are IDs `(8,9,20)` here `/* EDIT */`. |
@@ -119,8 +126,10 @@ AI assistant doesn't have to write SQL:
 Plus financial tools already in the server: `getMrrSnapshot`, `getMspKpis`,
 `getRevenuePerTechSnapshot`, `getMrrPerSeatSnapshot`, `getTechnicianUtilizationSnapshot`.
 
-> Note: the composite ticket KPIs in `getServiceDeskHealth` / `getTechnicianScorecard`
-> / `getClientHealthScorecard` compute MTTR from `dateoccured`→`datecleared`. The
-> `datecleared`-as-timestamp trap above means that figure is mean-skewed (mode ≈ 0
-> from instant/auto closes); the SQL reports use `Flastactiondate`, which is the
-> more accurate resolution-duration source.
+> Note: the composite ticket KPIs (`getServiceDeskHealth` / `getTechnicianScorecard`
+> / `getClientHealthScorecard` / `getCategoryInsights` / `getTechnicianRiskSignals`)
+> compute MTTR from `dateoccured`→`datecleared` and exclude closed-on-creation stubs
+> (`datecleared > dateoccured OR still open`), so they reflect real serviced tickets.
+> Some `.sql` files in `service-desk/` predate this finding and may still use
+> `Flastactiondate` or count Quick Time stubs — prefer `datecleared` + the stub
+> filter when adapting them.
