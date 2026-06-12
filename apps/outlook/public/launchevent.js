@@ -267,6 +267,41 @@
     return out;
   }
 
+  // Mirrors extractTopReply in apps/outlook/src/lib/html.ts — keep in sync.
+  // Returns only the topmost portion of an email body (above the first quoted-
+  // reply separator). The separator itself is dropped; trailing empty
+  // paragraphs / orphan opening tags from a mid-block cut are trimmed.
+  function extractTopReply(html) {
+    if (!html) return "";
+    var separators = [
+      /<div\s+id=["']appendonsend["'][^>]*>/i,
+      /<div\s+id=["']OLK_SRC_BODY_SECTION["'][^>]*>/i,
+      /<div\s+id=["']divRplyFwdMsg["'][^>]*>/i,
+      /<div\s+class=["'][^"']*\bgmail_quote\b[^"']*["'][^>]*>/i,
+      /<blockquote[^>]*type=["']cite["'][^>]*>/i,
+      /-{2,}\s*(?:Original\s+Message|Message\s+d['’]origine|Ursprüngliche\s+Nachricht|Mensaje\s+original|Messaggio\s+originale|Mensagem\s+original)\s*-{2,}/i,
+      /<hr[^>]*>\s*(?:<div[^>]*>|<p[^>]*>)?\s*(?:<b>|<strong>)?\s*From\s*:/i,
+      /(?:From|De|Da|Von|Inviato\s+da)\s*:[\s\S]{0,200}?(?:Sent|Envoyé|Enviado|Gesendet|Inviato|Verzonden)\s*:/i,
+    ];
+    var bestIdx = -1;
+    for (var i = 0; i < separators.length; i++) {
+      var m = separators[i].exec(html);
+      if (m && m.index >= 0 && (bestIdx === -1 || m.index < bestIdx)) bestIdx = m.index;
+    }
+    if (bestIdx === -1) return html;
+    var top = html.slice(0, bestIdx);
+    var trailingJunk =
+      /(?:\s|&nbsp;|<br\s*\/?>|<p[^>]*>(?:\s|&nbsp;|<br\s*\/?>)*<\/p>|<div[^>]*>(?:\s|&nbsp;|<br\s*\/?>)*<\/div>)+$/i;
+    var trailingOrphanOpener = /<(?:p|div|span)\b[^>]*>\s*$/i;
+    for (var j = 0; j < 4; j++) {
+      var before = top;
+      top = top.replace(trailingJunk, "");
+      top = top.replace(trailingOrphanOpener, "");
+      if (top === before) break;
+    }
+    return top;
+  }
+
   function htmlToText(html) {
     if (!html) return "";
     return html
@@ -312,10 +347,14 @@
       // Sanitize once and reuse — details + emailbody_html both want the
       // cleaned HTML, htmlToText runs over the cleaned version too.
       var cleanedBody = sanitizeOutlookHtml(data.body || "");
+      // Native-intake convention: details (= note for the auto-created action)
+      // gets only the topmost reply; emailbody_html below keeps the full body
+      // including the quoted thread.
+      var detailsHtml = extractTopReply(cleanedBody);
 
       var payload = [{
         summary: pending.summary,
-        details: cleanedBody,
+        details: detailsHtml,
         tickettype_id: pending.ticketTypeId,
         emailfrom: senderName || senderEmail,
         emailfromname: senderName,
@@ -390,19 +429,19 @@
       } catch (e) {
         /* swallow */
       }
-      // On-send is always outbound by construction. Strip the agent's
-      // configured Halo signature from note_html so the action's short-form
-      // note isn't dominated by the sig block; keep the full body in
-      // emailbody_html for parity with native intake.
-      // Sanitize first so signature stripping and Halo's stored copy both
-      // see the cleaned HTML — otherwise MSO conditional comments + class
-      // markers would blow out the rendered action.
+      // On-send is always outbound. Note gets only the topmost new content
+      // (above the first quoted-reply separator) with the agent's saved Halo
+      // signature additionally stripped. emailbody_html below keeps the full
+      // body for parity with native intake.
+      // Sanitize first so all downstream patterns see the cleaned HTML.
       var cleanedBody = sanitizeOutlookHtml(data.body || "");
-      var noteHtml = stripSignature(cleanedBody, agent.signature);
+      var noteHtml = stripSignature(extractTopReply(cleanedBody), agent.signature);
       var payload = [{
         ticket_id: Number(ticketId),
         outcome: "Outgoing Email",
         note: noteHtml,
+        // Literal Halo column for the Email-tab filter; on-send is never internal.
+        actionhide: 0,
         emailfrom: senderName || senderEmail,
         emailfromname: senderName,
         emailfromaddress: senderEmail,
