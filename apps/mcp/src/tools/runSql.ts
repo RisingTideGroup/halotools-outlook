@@ -4,10 +4,9 @@ import { runReportSql } from "@iusehalo/halo-api";
 
 const inputSchema = {
   sql: z
-    .string()
-    .min(1)
+    .union([z.string().min(1), z.array(z.string().min(1)).min(1).max(10)])
     .describe(
-      "A single SELECT statement against the HaloPSA database. See the tool description for the seven rules — most importantly: one statement only, no -- comments, no trailing semicolon, no variables, British spellings, and Halo's old-fashioned table names (fault = ticket, faultid = ticket number, actions = notes/time entries).",
+      "Either a single SELECT statement OR an array of statements. See the tool description for the seven rules and when to batch. Use a single string for the common case; pass an array (max 10) only when you need several uncorrelated datasets in one round-trip and a SQL JOIN can't express them.",
     ),
   save: z
     .object({
@@ -24,7 +23,7 @@ const inputSchema = {
     })
     .optional()
     .describe(
-      "Persist as a reusable saved report instead of running inline. Use for queries the MSP will want to run repeatedly. Omit for ad-hoc analysis.",
+      "Persist as a reusable saved report instead of running inline. Only valid with a single SQL string. Use for queries the MSP will want to run repeatedly.",
     ),
 };
 
@@ -34,13 +33,16 @@ export function registerRunSql(server: McpServer): void {
     {
       title: "Run a SQL SELECT against the HaloPSA database",
       description: [
-        "Execute a SELECT statement against the HaloPSA database via Halo's Report Center.",
-        "Returns the raw report response (rows + any column metadata Halo provides).",
+        "Execute one or more SELECT statements against the HaloPSA database via Halo's Report Center.",
+        "Returns the raw report response. For a single SQL string, returns one result. For an array, returns an array of results in the same order — one HTTP round-trip server-side.",
         "This is the highest-leverage tool in the kit — most analytical questions across an MSP's data are best answered by writing a query rather than paginating through REST endpoints.",
         "",
-        "THE SEVEN RULES — follow all of them:",
+        "WHEN TO BATCH:",
+        "Pass an array of SQL strings (max 10) when you need several uncorrelated datasets that a single JOIN can't express — e.g. \"MRR rollup AND top 10 overdue invoices AND licence expiry list\" for a dashboard answer. Halo runs them in parallel and returns the bundle in one round-trip. For correlated data that a JOIN handles, use a single query.",
         "",
-        "1. ONE statement per call. No batching, no UNION-of-everything.",
+        "THE SEVEN RULES — follow all of them, per query:",
+        "",
+        "1. ONE statement per query string. No semicolon-joined batches, no UNION-of-everything. (Pass an array if you genuinely need separate result sets.)",
         "2. No `--` single-line comments. Use /* block comments */ if you need to annotate.",
         "3. No trailing semicolon.",
         "4. No variables. No DECLARE, no @vars, no #temp tables, no CTEs that require WITH-at-the-top variables.",
@@ -61,7 +63,7 @@ export function registerRunSql(server: McpServer): void {
         "If the user references a value they see in Halo's UI but you can't locate which column stores it, ASK THEM FOR A SCREENSHOT of where it appears. Then `SELECT TOP 5 * FROM <likely_table> WHERE <text_col> = '<value>'` across candidate columns until one returns the row. Halo's UI labels rarely match column names verbatim — the screenshot lets you triangulate.",
         "",
         "SAVE-AS-REPORT:",
-        "For one-off analysis, omit the `save` parameter — the query runs inline and isn't persisted. To save a query for the MSP to reuse from Halo's UI (or for you to invoke later via listReports), pass `{name, folder_id}`. Use this only when the user asks you to save it.",
+        "For one-off analysis, omit the `save` parameter — the query runs inline and isn't persisted. To save a query for the MSP to reuse from Halo's UI (or for you to invoke later via listReports), pass `{name, folder_id}`. Save is only valid with a single SQL string (not an array). Use this only when the user asks you to save it.",
       ].join("\n"),
       inputSchema,
     },
