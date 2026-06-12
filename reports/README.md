@@ -91,6 +91,7 @@ reassignment = `ACTIONS.Actoutcome='Re-Assign'`.
 | `disengagement-signals.sql` | Resolved vs peer median, hours logged, untouched owned tickets, after-hours % |
 | `time-entry-hygiene.sql` | % of closes with **zero time logged**; closed-with-no-notes |
 | `time-entry-round-number-gaming.sql` | Share of time entries on round values (padding signal) |
+| `time-entry-latency.sql` | Real-time logging discipline: lag between work date and entry, % logged within 1h, back-edits >1 day later |
 | `utilisation-vs-target.sql` | Logged & billable hours vs configured target (REST `/Timesheet` for authoritative) |
 | `monthly-throughput-trend.sql` | Per-tech monthly resolved/hours/touched (decline detector) |
 | `after-hours-work-pattern.sql` | Business-hours vs after-hours action split (timezone caveat) |
@@ -118,7 +119,7 @@ AI assistant doesn't have to write SQL:
 
 - **`getServiceDeskHealth`** — inflow/outflow, backlog, SLA attainment, MTTR, FTF, CSAT.
 - **`getTechnicianScorecard`** — per-tech resolved, MTTR, SLA, CSAT, hours.
-- **`getTechnicianRiskSignals`** — coaching-vs-disengagement flags (zero-time closes, SLA breach, stale backlog, low CSAT).
+- **`getTechnicianRiskSignals`** — coaching-vs-disengagement flags (zero-time closes, SLA breach, stale backlog, low CSAT, late time-entry / real-time logging discipline).
 - **`getClientHealthScorecard`** — per-client volume, SLA, MTTR, CSAT.
 - **`getCategoryInsights`** — uncategorised %, top categories, recurring-problem candidates.
 - **`getTicketBacklog`** — point-in-time aging + SLA-at-risk + oldest tickets.

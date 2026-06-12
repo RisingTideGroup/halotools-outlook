@@ -742,7 +742,14 @@ export interface TechnicianRiskRow {
   staleOwned: number;
   staleOwnedRate: number | null;
   avgOpenAgeDays: number | null;
-  /** Heuristic flags raised for this tech (e.g. high-zero-time-closes, low-sla, stale-backlog, low-csat). */
+  // Time-entry discipline (real-time logging). Lag = entry-created minus work-date
+  // (ACTIONS.ActionDateCreated - Whe_). lateEditedEntries clears the automation
+  // window by only counting edits >1 day after creation.
+  timeEntries: number;
+  avgEntryLagHours: number | null;
+  pctLoggedRealtime: number | null;
+  lateEditedEntries: number;
+  /** Heuristic flags raised for this tech (e.g. high-zero-time-closes, low-sla, stale-backlog, low-csat, late-time-entry). */
   flags: string[];
 }
 

@@ -1702,9 +1702,12 @@ order by count(*) desc`;
  * Per-technician leading risk signals for a window (defaults to trailing 30
  * days): of the reactive tickets a tech closed — zero-time-close rate (closed
  * with no time logged) and resolution-SLA breach rate and AI CSAT; plus their
- * current owned-open backlog and how much of it is stale (no action in 3+ days).
- * Raises heuristic `flags` (high-zero-time-closes >30%, low-sla >20% breach,
- * stale-backlog, low-csat <5) to separate "needs coaching" from "disengaged".
+ * current owned-open backlog and how much of it is stale (no action in 3+ days);
+ * plus time-entry discipline — average lag between work date and entry creation,
+ * % logged within an hour, and entries back-edited >1 day later. Raises heuristic
+ * `flags` (high-zero-time-closes >30%, low-sla >20% breach, stale-backlog,
+ * low-csat <5, late-time-entry <60% real-time) to separate "needs coaching"
+ * from "disengaged".
  * These are signals to investigate, not verdicts — a tech who under-logs time
  * looks idle while busy, so always read with throughput and context.
  */
@@ -1752,7 +1755,47 @@ where ${notDeleted} ${reactive} and ${realAgent} and u.unum <> 1 and (f.dateclea
 group by u.unum, u.uname
 order by count(*) desc`;
 
-  const [closedRows, ownedRows] = await Promise.all([reportRows(closedSql), reportRows(ownedSql)]);
+  // Time-entry discipline: lag between work date (Whe_) and entry creation, plus
+  // back-edits >1 day after creation (which clears this tenant's automation that
+  // touches every action a few minutes after creation).
+  const latencySql = `select top ${top}
+  u.unum as agent_id,
+  u.uname as agent,
+  count(*) as time_entries,
+  cast(avg(datediff(minute, a.Whe_, a.ActionDateCreated) / 60.0) as decimal(10,1)) as avg_lag_hrs,
+  sum(case when datediff(hour, a.Whe_, a.ActionDateCreated) <= 1 then 1 else 0 end) as realtime_1h,
+  sum(case when a.ALastUpdated > dateadd(hour, 24, a.ActionDateCreated) then 1 else 0 end) as edited_1day_plus
+from actions a
+join uname u on a.whoagentid = u.unum
+where ${realAgent} and a.timetaken > 0 and a.Whe_ >= '${start}' and a.Whe_ < '${ex}'
+group by u.unum, u.uname
+order by count(*) desc`;
+
+  const [closedRows, ownedRows, latencyRows] = await Promise.all([
+    reportRows(closedSql),
+    reportRows(ownedSql),
+    reportRows(latencySql),
+  ]);
+
+  const blank = (id: number, agent: string): TechnicianRiskRow => ({
+    agentId: id,
+    agent,
+    resolved: 0,
+    zeroTimeCloses: 0,
+    zeroTimeCloseRate: null,
+    slaBreaches: 0,
+    resolutionSlaBreachRate: null,
+    aiCsatAvg: null,
+    openOwned: 0,
+    staleOwned: 0,
+    staleOwnedRate: null,
+    avgOpenAgeDays: null,
+    timeEntries: 0,
+    avgEntryLagHours: null,
+    pctLoggedRealtime: null,
+    lateEditedEntries: 0,
+    flags: [],
+  });
 
   const byId = new Map<number, TechnicianRiskRow>();
   for (const r of closedRows) {
@@ -1760,46 +1803,36 @@ order by count(*) desc`;
     const resolved = num(r.resolved);
     const zero = num(r.zero_time_closes);
     const breach = num(r.sla_breach);
-    byId.set(id, {
-      agentId: id,
-      agent: String(r.agent ?? ""),
-      resolved,
-      zeroTimeCloses: zero,
-      zeroTimeCloseRate: rate(zero, resolved),
-      slaBreaches: breach,
-      resolutionSlaBreachRate: rate(breach, resolved),
-      aiCsatAvg: numOrNull(r.ai_csat),
-      openOwned: 0,
-      staleOwned: 0,
-      staleOwnedRate: null,
-      avgOpenAgeDays: null,
-      flags: [],
-    });
+    const row = blank(id, String(r.agent ?? ""));
+    row.resolved = resolved;
+    row.zeroTimeCloses = zero;
+    row.zeroTimeCloseRate = rate(zero, resolved);
+    row.slaBreaches = breach;
+    row.resolutionSlaBreachRate = rate(breach, resolved);
+    row.aiCsatAvg = numOrNull(r.ai_csat);
+    byId.set(id, row);
   }
   for (const r of ownedRows) {
     const id = num(r.agent_id);
     const openOwned = num(r.open_owned);
     const stale = num(r.stale_3d);
-    const existing = byId.get(id) ?? {
-      agentId: id,
-      agent: String(r.agent ?? ""),
-      resolved: 0,
-      zeroTimeCloses: 0,
-      zeroTimeCloseRate: null,
-      slaBreaches: 0,
-      resolutionSlaBreachRate: null,
-      aiCsatAvg: null,
-      openOwned: 0,
-      staleOwned: 0,
-      staleOwnedRate: null,
-      avgOpenAgeDays: null,
-      flags: [],
-    };
-    existing.openOwned = openOwned;
-    existing.staleOwned = stale;
-    existing.staleOwnedRate = rate(stale, openOwned);
-    existing.avgOpenAgeDays = numOrNull(r.avg_age_days);
-    byId.set(id, existing);
+    const row = byId.get(id) ?? blank(id, String(r.agent ?? ""));
+    row.openOwned = openOwned;
+    row.staleOwned = stale;
+    row.staleOwnedRate = rate(stale, openOwned);
+    row.avgOpenAgeDays = numOrNull(r.avg_age_days);
+    byId.set(id, row);
+  }
+  for (const r of latencyRows) {
+    const id = num(r.agent_id);
+    const entries = num(r.time_entries);
+    const realtime = num(r.realtime_1h);
+    const row = byId.get(id) ?? blank(id, String(r.agent ?? ""));
+    row.timeEntries = entries;
+    row.avgEntryLagHours = numOrNull(r.avg_lag_hrs);
+    row.pctLoggedRealtime = rate(realtime, entries);
+    row.lateEditedEntries = num(r.edited_1day_plus);
+    byId.set(id, row);
   }
 
   const technicians = Array.from(byId.values()).map((t) => {
@@ -1808,6 +1841,8 @@ order by count(*) desc`;
     if ((t.resolutionSlaBreachRate ?? 0) > 20 && t.resolved >= 5) flags.push("low-sla-attainment");
     if (t.staleOwned >= 5 && (t.staleOwnedRate ?? 0) >= 50) flags.push("stale-backlog");
     if (t.aiCsatAvg != null && t.aiCsatAvg < 5) flags.push("low-csat");
+    if (t.pctLoggedRealtime != null && t.pctLoggedRealtime < 60 && t.timeEntries >= 10)
+      flags.push("late-time-entry");
     return { ...t, flags };
   });
   technicians.sort((a, b) => b.resolved - a.resolved);
