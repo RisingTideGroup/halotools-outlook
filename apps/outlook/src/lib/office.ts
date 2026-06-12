@@ -287,12 +287,17 @@ export async function fetchAllAttachments(
  * Outlook embeds images (signature logos, pasted screenshots, etc.) as inline
  * MIME parts referenced by Content-ID. The HTML body contains src="cid:…"
  * attributes that are meaningless once extracted from the email. This function
- * resolves each one against Office.js's attachment list and substitutes a
- * self-contained data URI. References with no matching attachment are left
- * unchanged so the rest of the body is never broken by a single missing image.
+ * resolves each one and substitutes a self-contained data URI. References with
+ * no matching attachment are left unchanged so the rest of the body is never
+ * broken by a single missing image.
+ *
+ * Two resolution paths:
+ *  1. Synchronous — item.attachments (works in classic desktop Outlook Win/Mac).
+ *  2. REST fallback — getCallbackTokenAsync + Outlook REST API, required for OWA
+ *     and New Outlook for Windows where inline attachments are not surfaced
+ *     through the synchronous property.
  */
 export async function resolveInlineCidImages(html: string): Promise<string> {
-  // Collect all unique cid: values used in the body (double-quoted, as Outlook produces)
   const cids = new Set<string>();
   const cidRe = /src="cid:([^"]+)"/gi;
   let m: RegExpExecArray | null;
@@ -301,32 +306,45 @@ export async function resolveInlineCidImages(html: string): Promise<string> {
   }
   if (cids.size === 0) return html;
 
-  const inlineAtts = listAttachments().filter((a) => a.isInline);
+  // Normalise CID strings: strip angle brackets, lowercase.
+  // Office.js sometimes returns "<image002.png@01DC...>" while the HTML has no brackets.
+  const normalise = (id: string) => id.replace(/^<|>$/g, "").toLowerCase();
 
-  // Fetch each referenced attachment in parallel; failures leave the cid: in place.
-  const resolved = await Promise.all(
-    [...cids].map(async (cid): Promise<[string, string | null]> => {
-      const att = inlineAtts.find(
-        (a) => (a.contentId ?? "").toLowerCase() === cid.toLowerCase(),
-      );
-      if (!att) return [cid, null];
-      try {
-        const fetched = await fetchAttachmentContent(att);
-        return [cid, `data:${fetched.contentType};base64,${fetched.base64}`];
-      } catch {
-        return [cid, null];
-      }
-    }),
-  );
+  // Path 1: synchronous attachment list — available in classic desktop Outlook.
+  // OWA and New Outlook return [] here even for emails with inline images;
+  // in that case we fall through to the REST path below.
+  const attsWithCid = listAttachments().filter((a) => !!a.contentId);
 
-  const cidMap = new Map<string, string>(
-    resolved.filter((r): r is [string, string] => r[1] !== null),
-  );
+  let cidMap: Map<string, string>;
+
+  if (attsWithCid.length > 0) {
+    const resolved = await Promise.all(
+      [...cids].map(async (cid): Promise<[string, string | null]> => {
+        const att = attsWithCid.find(
+          (a) => normalise(a.contentId!) === normalise(cid),
+        );
+        if (!att) return [normalise(cid), null];
+        try {
+          const fetched = await fetchAttachmentContent(att);
+          return [normalise(cid), `data:${fetched.contentType};base64,${fetched.base64}`];
+        } catch {
+          return [normalise(cid), null];
+        }
+      }),
+    );
+    cidMap = new Map(resolved.filter((r): r is [string, string] => r[1] !== null));
+  } else {
+    // Path 2: OWA / New Outlook for Windows — item.attachments is empty even
+    // when the email has inline images. Fetch via Outlook REST API instead.
+    cidMap = await fetchCidMapViaRest(normalise);
+  }
+
   if (cidMap.size === 0) return html;
 
+  // Keys in cidMap are always normalised; direct lookup avoids repeated iteration.
   return html.replace(/src="cid:([^"]+)"/gi, (match, cid: string) => {
-    const key = [...cidMap.keys()].find((k) => k.toLowerCase() === cid.toLowerCase());
-    return key ? `src="${cidMap.get(key)}"` : match;
+    const dataUri = cidMap.get(normalise(cid));
+    return dataUri ? `src="${dataUri}"` : match;
   });
 }
 
@@ -364,6 +382,104 @@ export function domainOf(email: string): string {
 }
 
 // ---------- helpers ----------
+
+/** Wrap getCallbackTokenAsync (REST mode) in a Promise. */
+function getCallbackToken(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    Office.context.mailbox.getCallbackTokenAsync({ isRest: true }, (result) => {
+      if (result.status === Office.AsyncResultStatus.Succeeded) {
+        resolve(result.value);
+      } else {
+        reject(new Error(result.error?.message ?? "Failed to get callback token"));
+      }
+    });
+  });
+}
+
+/** Outlook REST API / Graph attachment shape.
+ *  REST v2 uses PascalCase; Graph (which REST now proxies) uses camelCase. */
+interface RestAttachment {
+  "@odata.type": string;
+  Id?: string;
+  id?: string;
+  ContentType?: string;
+  contentType?: string;
+  IsInline?: boolean;
+  isInline?: boolean;
+  ContentId?: string | null;
+  contentId?: string | null;
+  ContentBytes?: string;
+  contentBytes?: string;
+}
+
+/**
+ * Fetch inline attachment content via the Outlook REST API.
+ * Used as a fallback for OWA and New Outlook for Windows, where item.attachments
+ * does not surface inline images. The callback token is scoped to the current
+ * user's mailbox (ReadItem level), short-lived, and never stored.
+ */
+async function fetchCidMapViaRest(
+  normalise: (id: string) => string,
+): Promise<Map<string, string>> {
+  try {
+    const token = await getCallbackToken();
+    const restUrl = Office.context.mailbox.restUrl;
+    if (!restUrl) return new Map();
+
+    // itemRestId is the REST-encoded item ID — different base64 variant from the EWS itemId.
+    const itemRestId = (
+      Office.context.mailbox.item as unknown as { itemRestId?: string }
+    ).itemRestId;
+    if (!itemRestId) return new Map();
+
+    const listRes = await fetch(
+      `${restUrl}/v2.0/me/messages/${encodeURIComponent(itemRestId)}/attachments`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!listRes.ok) return new Map();
+
+    const { value: atts } = (await listRes.json()) as { value: RestAttachment[] };
+
+    const inlineAtts = atts.filter(
+      (a) =>
+        (a.IsInline ?? a.isInline) === true &&
+        !!(a.ContentId ?? a.contentId) &&
+        (a["@odata.type"] ?? "").toLowerCase().includes("fileattachment"),
+    );
+    if (inlineAtts.length === 0) return new Map();
+
+    const cidMap = new Map<string, string>();
+
+    await Promise.all(
+      inlineAtts.map(async (att) => {
+        const contentId = att.ContentId ?? att.contentId;
+        const id = att.Id ?? att.id;
+        const contentType = att.ContentType ?? att.contentType ?? "application/octet-stream";
+        let contentBytes = att.ContentBytes ?? att.contentBytes;
+
+        // Some REST responses omit ContentBytes on the list endpoint — fetch individually.
+        if (!contentBytes && id) {
+          const attRes = await fetch(
+            `${restUrl}/v2.0/me/messages/${encodeURIComponent(itemRestId)}/attachments/${id}`,
+            { headers: { Authorization: `Bearer ${token}` } },
+          );
+          if (attRes.ok) {
+            const d = (await attRes.json()) as RestAttachment;
+            contentBytes = d.ContentBytes ?? d.contentBytes;
+          }
+        }
+
+        if (contentBytes && contentId) {
+          cidMap.set(normalise(contentId), `data:${contentType};base64,${contentBytes}`);
+        }
+      }),
+    );
+
+    return cidMap;
+  } catch {
+    return new Map();
+  }
+}
 
 /** Derive a MIME type from the attachment filename extension.
  *  Office.AttachmentDetails.contentType is deprecated in newer @types/office-js;
