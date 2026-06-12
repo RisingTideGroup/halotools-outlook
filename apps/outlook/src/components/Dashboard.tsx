@@ -32,6 +32,7 @@ import {
   findClientByDomain,
   listOpenTicketsForClient,
   findTicketsForEmail,
+  findTicketBySubjectTag,
 } from "@iusehalo/halo-api";
 import { signOut } from "@iusehalo/halo-api";
 import { clearConfig, getConfig, getCachedClientCache } from "@iusehalo/halo-api";
@@ -146,13 +147,21 @@ export function Dashboard({ email, onSignedOut }: Props) {
           email.inReplyTo,
           ...email.references,
         ].filter((id): id is string => !!id);
-        if (threadIds.length > 0) {
-          findTicketsForEmail(threadIds)
-            .then((t) => !cancelled && setThreadTickets(t))
-            .catch(() => {
-              /* swallow — non-fatal */
-            });
-        }
+
+        // Run RFC Message-ID and subject-tag lookups in parallel; merge + dedup.
+        const rfcPromise: Promise<HaloTicket[]> = threadIds.length > 0
+          ? findTicketsForEmail(threadIds).catch(() => [])
+          : Promise.resolve([]);
+        const tagPromise: Promise<HaloTicket[]> = findTicketBySubjectTag(email.subject)
+          .then((t) => (t ? [t] : []))
+          .catch(() => []);
+
+        Promise.all([rfcPromise, tagPromise]).then(([rfc, tag]) => {
+          if (cancelled) return;
+          const seen = new Set<number>();
+          const merged = [...rfc, ...tag].filter((t) => !seen.has(t.id) && seen.add(t.id));
+          setThreadTickets(merged);
+        });
       } catch (e) {
         if (!cancelled) setError((e as Error).message);
       } finally {
