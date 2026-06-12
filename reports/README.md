@@ -53,7 +53,9 @@ view · contracts=`CONTRACTHEADER` · prepaid=`PREPAYHISTORY` (signed ledger) ·
 assets=`DEVICE` · opportunities are `FAULTS` of the Opportunity request type · categories
 = `category2` (denormalised `A>B>C` path); SLA state `'I'`=met / `'O'`=breached / `''`=none;
 CSAT = `faisatisfactionlevel` (AI 1–10); reopen = ACTIONS status transition out of `(8,9,20)`;
-reassignment = `ACTIONS.Actoutcome='Re-Assign'`.
+reassignment = `ACTIONS.Actoutcome='Re-Assign'`. Audit trail = `AUDIT` (`AUnum`=editor,
+`ADate`=when, `atablename`+`apkid1`/`apkid2` identify the changed row — for actions
+`apkid1`=faultid, `apkid2`=actionnumber; filter the editor's `uisapiagent` to drop bots).
 
 ## Catalogue
 
@@ -92,6 +94,7 @@ reassignment = `ACTIONS.Actoutcome='Re-Assign'`.
 | `time-entry-hygiene.sql` | % of closes with **zero time logged**; closed-with-no-notes |
 | `time-entry-round-number-gaming.sql` | Share of time entries on round values (padding signal) |
 | `time-entry-latency.sql` | Real-time logging discipline: lag between work date and entry, % logged within 1h, back-edits >1 day later |
+| `time-entry-retroactive-edits.sql` | Audit-trail: which **real agents** modify time-carrying actions >1 day after creation (bots filtered via editor `uisapiagent`) |
 | `utilisation-vs-target.sql` | Logged & billable hours vs configured target (REST `/Timesheet` for authoritative) |
 | `monthly-throughput-trend.sql` | Per-tech monthly resolved/hours/touched (decline detector) |
 | `after-hours-work-pattern.sql` | Business-hours vs after-hours action split (timezone caveat) |
