@@ -615,3 +615,125 @@ export interface MspKpis {
   mrrPerSeat: number;
   utilization?: UtilizationSnapshot;
 }
+
+// ---------- Service-delivery KPIs (SQL-backed) ----------
+
+/** Which tickets a service-delivery query counts.
+ *  - `reactive`: excludes projects + opportunities (REQUESTTYPE.RTIsProject / RTIsOpportunity).
+ *  - `all`: every non-deleted, non-merged ticket regardless of type. */
+export type TicketScope = "reactive" | "all";
+
+/** Window + scope echoed back on every service-delivery snapshot. */
+export interface ServiceWindow {
+  startdate: string;
+  enddate: string;
+  scope: TicketScope;
+  clientId?: number;
+}
+
+/** SLA attainment pair. `attainmentPct` = met / (met + breached) × 100; null when no
+ *  ticket in the cohort had an SLA target (Halo state '' = no SLA applies). */
+export interface SlaAttainment {
+  met: number;
+  breached: number;
+  attainmentPct: number | null;
+}
+
+/** CSAT block. `ai` is the AI-derived satisfaction (faisatisfactionlevel, ~1–10) — the
+ *  only signal with real coverage in most tenants. `native` is the built-in survey score
+ *  (SatisfactionLevel), usually sparse until CSAT surveys are rolled out. */
+export interface CsatBlock {
+  ai: { avg: number | null; responses: number; scale: string };
+  native: { avg: number | null; responses: number };
+}
+
+/** One-shot service-desk health snapshot for a window.
+ *  Cohorts (documented because they differ by metric):
+ *   - inflow / firstResponseSla / csat are measured on tickets CREATED in the window.
+ *   - outflow / resolutionSla / meanTimeToResolveHours / firstTimeFix are measured on
+ *     tickets RESOLVED (cleared) in the window.
+ *   - openBacklogNow / breachingNow are point-in-time (as of query time). */
+export interface ServiceDeskHealth {
+  window: ServiceWindow;
+  inflow: number;
+  outflow: number;
+  netBacklogChange: number;
+  openBacklogNow: number;
+  breachingNow: number;
+  resolvedCohort: number;
+  firstResponseSla: SlaAttainment;
+  resolutionSla: SlaAttainment;
+  meanTimeToResolveHours: number | null;
+  firstTimeFixCount: number;
+  firstTimeFixRate: number | null;
+  csat: CsatBlock;
+}
+
+/** Per-technician performance row (resolved-in-window cohort, grouped by the agent who
+ *  closed the ticket). `hoursLogged` / `hoursBillable` come from ACTIONS authored by the
+ *  agent in the window across all ticket types, so they reflect total effort, not just the
+ *  reactive tickets counted in `resolved`. */
+export interface TechnicianScorecardRow {
+  agentId: number;
+  agent: string;
+  resolved: number;
+  meanTimeToResolveHours: number | null;
+  resolutionSla: SlaAttainment;
+  firstResponseSla: SlaAttainment;
+  firstTimeFixCount: number;
+  firstTimeFixRate: number | null;
+  aiCsatAvg: number | null;
+  csatResponses: number;
+  hoursLogged: number;
+  hoursBillable: number;
+}
+
+export interface TechnicianScorecard {
+  window: ServiceWindow;
+  technicians: TechnicianScorecardRow[];
+}
+
+/** Per-client service-health row. Surfaces at-risk accounts (high volume + low SLA / CSAT). */
+export interface ClientHealthRow {
+  clientId: number;
+  client: string;
+  created: number;
+  resolved: number;
+  openNow: number;
+  resolutionSla: SlaAttainment;
+  firstResponseSla: SlaAttainment;
+  meanTimeToResolveHours: number | null;
+  aiCsatAvg: number | null;
+  csatResponses: number;
+}
+
+export interface ClientHealthScorecard {
+  window: ServiceWindow;
+  clients: ClientHealthRow[];
+}
+
+/** Point-in-time open-ticket backlog with aging + SLA-at-risk counts. */
+export interface TicketBacklog {
+  scope: TicketScope;
+  clientId?: number;
+  openTotal: number;
+  breachedNow: number;
+  dueWithin24h: number;
+  aging: {
+    lessThan1Day: number;
+    oneToThreeDays: number;
+    threeToSevenDays: number;
+    sevenToThirtyDays: number;
+    overThirtyDays: number;
+  };
+  oldest: {
+    ticketId: number;
+    client: string;
+    agent: string | null;
+    status: string;
+    priority: number;
+    ageDays: number;
+    fixSlaState: string;
+    firstResponseState: string;
+  }[];
+}

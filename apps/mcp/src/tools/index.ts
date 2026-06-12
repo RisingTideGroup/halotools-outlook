@@ -21,6 +21,10 @@ import { registerGetTechnicianUtilizationSnapshot } from "./getTechnicianUtiliza
 import { registerGetRevenuePerTechSnapshot } from "./getRevenuePerTechSnapshot.js";
 import { registerGetMrrPerSeatSnapshot } from "./getMrrPerSeatSnapshot.js";
 import { registerGetMspKpis } from "./getMspKpis.js";
+import { registerGetServiceDeskHealth } from "./getServiceDeskHealth.js";
+import { registerGetTechnicianScorecard } from "./getTechnicianScorecard.js";
+import { registerGetClientHealthScorecard } from "./getClientHealthScorecard.js";
+import { registerGetTicketBacklog } from "./getTicketBacklog.js";
 
 /** Map of tool name → register function so suppression can decide per-tool
  *  whether to wire it up. The order here defines the order the agent sees
@@ -48,6 +52,12 @@ const TOOL_REGISTRY: Array<{ name: string; register: (s: McpServer) => void }> =
   { name: "getRevenuePerTechSnapshot", register: registerGetRevenuePerTechSnapshot },
   { name: "getMrrPerSeatSnapshot", register: registerGetMrrPerSeatSnapshot },
   { name: "getMspKpis", register: registerGetMspKpis },
+
+  // Analytics — service-delivery KPIs (SQL-backed)
+  { name: "getServiceDeskHealth", register: registerGetServiceDeskHealth },
+  { name: "getTechnicianScorecard", register: registerGetTechnicianScorecard },
+  { name: "getClientHealthScorecard", register: registerGetClientHealthScorecard },
+  { name: "getTicketBacklog", register: registerGetTicketBacklog },
 
   // Database access + REST escape hatch
   { name: "listReports", register: registerListReports },

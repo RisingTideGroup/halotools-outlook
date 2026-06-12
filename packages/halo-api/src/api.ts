@@ -32,6 +32,14 @@ import type {
   MrrSnapshot,
   UtilizationSnapshot,
   MspKpis,
+  TicketScope,
+  SlaAttainment,
+  ServiceDeskHealth,
+  TechnicianScorecard,
+  TechnicianScorecardRow,
+  ClientHealthScorecard,
+  ClientHealthRow,
+  TicketBacklog,
 } from "./types.js";
 
 class HaloApiError extends Error {
@@ -1268,6 +1276,345 @@ export async function listReports(): Promise<unknown[]> {
     if (Array.isArray(obj.reports)) return obj.reports as unknown[];
   }
   return [];
+}
+
+// ---------- Service-delivery KPIs (SQL-backed) ----------
+//
+// These compose Halo's Report Center (runReportSql) into canonical MSP
+// service-delivery metrics so callers don't have to re-derive the schema each
+// time. Schema idioms used throughout (Halo's 25-year-old internal naming):
+//   FAULTS            = tickets. faultid = ticket number.
+//   FAULTS.areaint    -> AREA.aarea           (the client/company; aareadesc = name)
+//   FAULTS.assignedtoint / clearwhoint -> UNAME.unum  (agent; uname = name)
+//   FAULTS.status     -> TSTATUS.Tstatus      (tstatusdesc = label; TstatusType 0 = open)
+//   FAULTS.RequestTypeNew -> REQUESTTYPE.RTid (RTIsProject / RTIsOpportunity flags)
+//   Slastate / Fslafirstresponsestate: 'I' = in SLA (met), 'O' = out (breached), '' = no SLA
+//   datecleared empty (NULL or < 1900) = ticket still open
+//   fdeleted = fmergedintofaultid           = the "not deleted AND not merged" idiom
+//   dateoccured is the real ticket-open timestamp — NOT datecreated, which is a row
+//     metadata stamp that post-dates clearance on ~95% of tickets (negative durations).
+//   cleartime is Halo's working-DAYS SLA duration; we report wall-clock MTTR via
+//     DATEDIFF(dateoccured -> datecleared) instead, which is intuitive and never negative.
+//   faisatisfactionlevel = AI CSAT (~1–10); SatisfactionLevel = native survey (usually sparse)
+
+/** Run a SELECT and return its result rows as plain objects, throwing on a
+ *  Report Center load error. Report cell values come back as strings. */
+async function reportRows(sql: string): Promise<Record<string, unknown>[]> {
+  const res = (await runReportSql(sql)) as {
+    report?: { loaded?: boolean; load_error?: string; rows?: Record<string, unknown>[] };
+  };
+  const report = res?.report;
+  if (report?.load_error) {
+    throw new HaloApiError(400, `Report SQL failed: ${report.load_error}`);
+  }
+  return report?.rows ?? [];
+}
+
+function num(v: unknown): number {
+  const n = typeof v === "number" ? v : parseFloat(String(v ?? ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Coerce to a rounded number, or null when the source value is absent (Halo
+ *  returns null/"" for AVG over an empty cohort). */
+function numOrNull(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = parseFloat(String(v));
+  return Number.isFinite(n) ? round2(n) : null;
+}
+
+function attainment(met: unknown, breached: unknown): SlaAttainment {
+  const m = num(met);
+  const b = num(breached);
+  const denom = m + b;
+  return { met: m, breached: b, attainmentPct: denom > 0 ? round2((m / denom) * 100) : null };
+}
+
+function rate(part: number, whole: number): number | null {
+  return whole > 0 ? round2((part / whole) * 100) : null;
+}
+
+/** Day after `end` (YYYY-MM-DD) so window comparisons can use an exclusive `<`
+ *  upper bound and include the whole final day. */
+function exclusiveEnd(end: string): string {
+  const d = new Date(`${end}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+/** SQL fragments shared by the windowed service-delivery queries. */
+function deliverySql(start: string, end: string, scope: TicketScope, clientId?: number) {
+  const ex = exclusiveEnd(end);
+  const join = scope === "reactive" ? "join requesttype rt on f.RequestTypeNew = rt.RTid" : "";
+  const filters = [
+    "f.fdeleted = f.fmergedintofaultid",
+    scope === "reactive" ? "rt.RTIsProject = 0 and rt.RTIsOpportunity = 0" : "",
+    clientId != null ? `f.areaint = ${Math.trunc(clientId)}` : "",
+  ]
+    .filter(Boolean)
+    .join(" and ");
+  return {
+    join,
+    filters,
+    createdIn: `f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`,
+    clearedIn: `f.datecleared >= '${start}' and f.datecleared < '${ex}'`,
+    open: `(f.datecleared is null or f.datecleared < '1900-01-01')`,
+  };
+}
+
+/**
+ * One-shot service-desk health snapshot for a window (defaults to trailing 30
+ * days). Volume in/out, current open backlog + live breaches, first-response &
+ * resolution SLA attainment, mean time to resolve, first-time-fix rate, and
+ * CSAT (AI + native). Optionally scoped to a single client. See ServiceDeskHealth
+ * for which cohort each metric is measured on.
+ */
+export async function getServiceDeskHealth(
+  startdate?: string,
+  enddate?: string,
+  scope: TicketScope = "reactive",
+  clientId?: number,
+): Promise<ServiceDeskHealth> {
+  const { start, end } = resolveWindow(startdate, enddate, 30);
+  const s = deliverySql(start, end, scope, clientId);
+  const sql = `select
+  sum(case when ${s.createdIn} then 1 else 0 end) as inflow,
+  sum(case when ${s.clearedIn} then 1 else 0 end) as outflow,
+  sum(case when ${s.open} then 1 else 0 end) as open_now,
+  sum(case when ${s.open} and f.Slastate = 'O' then 1 else 0 end) as breaching_now,
+  sum(case when ${s.createdIn} and f.Fslafirstresponsestate = 'I' then 1 else 0 end) as frt_met,
+  sum(case when ${s.createdIn} and f.Fslafirstresponsestate = 'O' then 1 else 0 end) as frt_breach,
+  sum(case when ${s.clearedIn} and f.Slastate = 'I' then 1 else 0 end) as fix_met,
+  sum(case when ${s.clearedIn} and f.Slastate = 'O' then 1 else 0 end) as fix_breach,
+  avg(case when ${s.clearedIn} then datediff(minute, f.dateoccured, f.datecleared) / 60.0 end) as mttr_hours,
+  sum(case when ${s.clearedIn} and f.fFirstTimeFix = 1 then 1 else 0 end) as ftf,
+  avg(case when ${s.createdIn} and f.faisatisfactionlevel > 0 then cast(f.faisatisfactionlevel as float) end) as ai_csat,
+  sum(case when ${s.createdIn} and f.faisatisfactionlevel > 0 then 1 else 0 end) as ai_csat_n,
+  avg(case when ${s.createdIn} and f.SatisfactionLevel > 0 then cast(f.SatisfactionLevel as float) end) as nat_csat,
+  sum(case when ${s.createdIn} and f.SatisfactionLevel > 0 then 1 else 0 end) as nat_csat_n
+from faults f
+${s.join}
+where ${s.filters} and ((${s.createdIn}) or (${s.clearedIn}) or ${s.open})`;
+
+  const row = (await reportRows(sql))[0] ?? {};
+  const inflow = num(row.inflow);
+  const outflow = num(row.outflow);
+  const ftf = num(row.ftf);
+  return {
+    window: { startdate: start, enddate: end, scope, clientId },
+    inflow,
+    outflow,
+    netBacklogChange: inflow - outflow,
+    openBacklogNow: num(row.open_now),
+    breachingNow: num(row.breaching_now),
+    resolvedCohort: outflow,
+    firstResponseSla: attainment(row.frt_met, row.frt_breach),
+    resolutionSla: attainment(row.fix_met, row.fix_breach),
+    meanTimeToResolveHours: numOrNull(row.mttr_hours),
+    firstTimeFixCount: ftf,
+    firstTimeFixRate: rate(ftf, outflow),
+    csat: {
+      ai: { avg: numOrNull(row.ai_csat), responses: num(row.ai_csat_n), scale: "1-10 (AI-derived)" },
+      native: { avg: numOrNull(row.nat_csat), responses: num(row.nat_csat_n) },
+    },
+  };
+}
+
+/**
+ * Per-technician performance scorecard for a window (defaults to trailing 30
+ * days), grouped by the agent who closed each resolved ticket. Returns tickets
+ * resolved, mean time to resolve, SLA attainment, first-time-fix, AI CSAT, and
+ * hours logged / billable. Sorted by tickets resolved, capped at `limit` (25).
+ */
+export async function getTechnicianScorecard(
+  startdate?: string,
+  enddate?: string,
+  scope: TicketScope = "reactive",
+  limit = 25,
+): Promise<TechnicianScorecard> {
+  const { start, end } = resolveWindow(startdate, enddate, 30);
+  const ex = exclusiveEnd(end);
+  const s = deliverySql(start, end, scope);
+  const top = Math.max(1, Math.trunc(limit));
+  const sql = `select top ${top}
+  u.unum as agent_id,
+  u.uname as agent,
+  count(*) as resolved,
+  avg(datediff(minute, f.dateoccured, f.datecleared) / 60.0) as mttr_hours,
+  sum(case when f.Slastate = 'I' then 1 else 0 end) as fix_met,
+  sum(case when f.Slastate = 'O' then 1 else 0 end) as fix_breach,
+  sum(case when f.Fslafirstresponsestate = 'I' then 1 else 0 end) as frt_met,
+  sum(case when f.Fslafirstresponsestate = 'O' then 1 else 0 end) as frt_breach,
+  sum(case when f.fFirstTimeFix = 1 then 1 else 0 end) as ftf,
+  avg(case when f.faisatisfactionlevel > 0 then cast(f.faisatisfactionlevel as float) end) as ai_csat,
+  sum(case when f.faisatisfactionlevel > 0 then 1 else 0 end) as csat_n,
+  max(act.hrs_logged) as hrs_logged,
+  max(act.hrs_billable) as hrs_billable
+from faults f
+join uname u on f.clearwhoint = u.unum
+${s.join}
+left join (
+  select whoagentid,
+    sum(timetaken) as hrs_logged,
+    sum(actionchargehours + actionnonchargehours + actionprepayhours) as hrs_billable
+  from actions
+  where ActionDateCreated >= '${start}' and ActionDateCreated < '${ex}'
+  group by whoagentid
+) act on act.whoagentid = f.clearwhoint
+where ${s.filters} and (${s.clearedIn})
+group by u.unum, u.uname
+order by count(*) desc`;
+
+  const rows = await reportRows(sql);
+  const technicians: TechnicianScorecardRow[] = rows.map((r) => {
+    const resolved = num(r.resolved);
+    const ftf = num(r.ftf);
+    return {
+      agentId: num(r.agent_id),
+      agent: String(r.agent ?? ""),
+      resolved,
+      meanTimeToResolveHours: numOrNull(r.mttr_hours),
+      resolutionSla: attainment(r.fix_met, r.fix_breach),
+      firstResponseSla: attainment(r.frt_met, r.frt_breach),
+      firstTimeFixCount: ftf,
+      firstTimeFixRate: rate(ftf, resolved),
+      aiCsatAvg: numOrNull(r.ai_csat),
+      csatResponses: num(r.csat_n),
+      hoursLogged: round2(num(r.hrs_logged)),
+      hoursBillable: round2(num(r.hrs_billable)),
+    };
+  });
+  return { window: { startdate: start, enddate: end, scope }, technicians };
+}
+
+/**
+ * Per-client service-health scorecard for a window (defaults to trailing 30
+ * days). Ticket volume in/out, current open count, SLA attainment, mean time to
+ * resolve, and AI CSAT — sorted by tickets created, capped at `limit` (default
+ * 50). Use to spot at-risk accounts (high volume + low SLA / CSAT).
+ */
+export async function getClientHealthScorecard(
+  startdate?: string,
+  enddate?: string,
+  scope: TicketScope = "reactive",
+  limit = 50,
+): Promise<ClientHealthScorecard> {
+  const { start, end } = resolveWindow(startdate, enddate, 30);
+  const s = deliverySql(start, end, scope);
+  const top = Math.max(1, Math.trunc(limit));
+  const sql = `select top ${top}
+  a.aarea as client_id,
+  a.aareadesc as client,
+  sum(case when ${s.createdIn} then 1 else 0 end) as created,
+  sum(case when ${s.clearedIn} then 1 else 0 end) as resolved,
+  sum(case when ${s.open} then 1 else 0 end) as open_now,
+  sum(case when ${s.clearedIn} and f.Slastate = 'I' then 1 else 0 end) as fix_met,
+  sum(case when ${s.clearedIn} and f.Slastate = 'O' then 1 else 0 end) as fix_breach,
+  sum(case when ${s.createdIn} and f.Fslafirstresponsestate = 'I' then 1 else 0 end) as frt_met,
+  sum(case when ${s.createdIn} and f.Fslafirstresponsestate = 'O' then 1 else 0 end) as frt_breach,
+  avg(case when ${s.clearedIn} then datediff(minute, f.dateoccured, f.datecleared) / 60.0 end) as mttr_hours,
+  avg(case when ${s.createdIn} and f.faisatisfactionlevel > 0 then cast(f.faisatisfactionlevel as float) end) as ai_csat,
+  sum(case when ${s.createdIn} and f.faisatisfactionlevel > 0 then 1 else 0 end) as csat_n
+from faults f
+join area a on a.aarea = f.areaint
+${s.join}
+where ${s.filters} and ((${s.createdIn}) or (${s.clearedIn}) or ${s.open})
+group by a.aarea, a.aareadesc
+order by sum(case when ${s.createdIn} then 1 else 0 end) desc`;
+
+  const rows = await reportRows(sql);
+  const clients: ClientHealthRow[] = rows.map((r) => ({
+    clientId: num(r.client_id),
+    client: String(r.client ?? ""),
+    created: num(r.created),
+    resolved: num(r.resolved),
+    openNow: num(r.open_now),
+    resolutionSla: attainment(r.fix_met, r.fix_breach),
+    firstResponseSla: attainment(r.frt_met, r.frt_breach),
+    meanTimeToResolveHours: numOrNull(r.mttr_hours),
+    aiCsatAvg: numOrNull(r.ai_csat),
+    csatResponses: num(r.csat_n),
+  }));
+  return { window: { startdate: start, enddate: end, scope }, clients };
+}
+
+/**
+ * Point-in-time open-ticket backlog: total open, aging buckets, tickets already
+ * breaching their fix SLA, tickets due within 24h, and the oldest open tickets.
+ * Optionally scoped to a single client. Not windowed — reflects the queue right
+ * now. `scope` defaults to reactive (excludes projects/opportunities).
+ */
+export async function getTicketBacklog(
+  scope: TicketScope = "reactive",
+  clientId?: number,
+): Promise<TicketBacklog> {
+  const join = scope === "reactive" ? "join requesttype rt on f.RequestTypeNew = rt.RTid" : "";
+  const filters = [
+    "f.fdeleted = f.fmergedintofaultid",
+    "(f.datecleared is null or f.datecleared < '1900-01-01')",
+    scope === "reactive" ? "rt.RTIsProject = 0 and rt.RTIsOpportunity = 0" : "",
+    clientId != null ? `f.areaint = ${Math.trunc(clientId)}` : "",
+  ]
+    .filter(Boolean)
+    .join(" and ");
+  const age = "datediff(day, f.dateoccured, getdate())";
+
+  const aggSql = `select
+  count(*) as open_total,
+  sum(case when f.Slastate = 'O' then 1 else 0 end) as breached_now,
+  sum(case when f.Slastate <> 'O' and f.fixbydate > '1900-01-01' and f.fixbydate < dateadd(hour, 24, getdate()) then 1 else 0 end) as due_24h,
+  sum(case when ${age} < 1 then 1 else 0 end) as a0,
+  sum(case when ${age} >= 1 and ${age} < 3 then 1 else 0 end) as a1,
+  sum(case when ${age} >= 3 and ${age} < 7 then 1 else 0 end) as a2,
+  sum(case when ${age} >= 7 and ${age} < 30 then 1 else 0 end) as a3,
+  sum(case when ${age} >= 30 then 1 else 0 end) as a4
+from faults f
+${join}
+where ${filters}`;
+
+  const oldestSql = `select top 15
+  f.faultid as ticket_id,
+  a.aareadesc as client,
+  u.uname as agent,
+  s.tstatusdesc as status,
+  f.seriousness as priority,
+  ${age} as age_days,
+  f.Slastate as fix_sla_state,
+  f.Fslafirstresponsestate as frt_state
+from faults f
+join area a on a.aarea = f.areaint
+left join uname u on f.assignedtoint = u.unum
+join tstatus s on f.status = s.Tstatus
+${join}
+where ${filters}
+order by f.dateoccured asc`;
+
+  const [agg, oldest] = await Promise.all([reportRows(aggSql), reportRows(oldestSql)]);
+  const a = agg[0] ?? {};
+  return {
+    scope,
+    clientId,
+    openTotal: num(a.open_total),
+    breachedNow: num(a.breached_now),
+    dueWithin24h: num(a.due_24h),
+    aging: {
+      lessThan1Day: num(a.a0),
+      oneToThreeDays: num(a.a1),
+      threeToSevenDays: num(a.a2),
+      sevenToThirtyDays: num(a.a3),
+      overThirtyDays: num(a.a4),
+    },
+    oldest: oldest.map((r) => ({
+      ticketId: num(r.ticket_id),
+      client: String(r.client ?? ""),
+      agent: r.agent ? String(r.agent) : null,
+      status: String(r.status ?? ""),
+      priority: num(r.priority),
+      ageDays: num(r.age_days),
+      fixSlaState: String(r.fix_sla_state ?? ""),
+      firstResponseState: String(r.frt_state ?? ""),
+    })),
+  };
 }
 
 export { HaloApiError };
