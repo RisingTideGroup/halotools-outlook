@@ -70,8 +70,32 @@ export function registerRunSql(server: McpServer): void {
     async ({ sql, save }) => {
       const res = await runReportSql(sql, save ? { save } : undefined);
       return {
-        content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+        content: [{ type: "text", text: JSON.stringify(trimRunSqlResponse(res), null, 2) }],
       };
     },
   );
+}
+
+/**
+ * Halo's `/api/Report` response wraps the actual data in a `report` object
+ * alongside a `table_html` field that re-renders the rows as a styled HTML
+ * table — easily tens of KB per query, blows the agent's context window for
+ * any non-trivial result set.
+ *
+ * Drop everything except `report`, and drop `report.table_html` within that.
+ * Preserves the array shape for batch queries.
+ */
+function trimRunSqlResponse(res: unknown): unknown {
+  if (Array.isArray(res)) return res.map(trimOne);
+  return trimOne(res);
+}
+
+function trimOne(item: unknown): unknown {
+  if (!item || typeof item !== "object") return item;
+  const report = (item as Record<string, unknown>).report;
+  if (!report || typeof report !== "object") return null;
+  const { table_html: _drop, ...rest } = report as Record<string, unknown> & {
+    table_html?: unknown;
+  };
+  return rest;
 }
