@@ -198,6 +198,7 @@ export function QuickImportBanner({
         user_id: contact?.id,
         actionby_user_id: contact?.id,
         agent_id: undefined,
+        who: email.senderName || email.senderEmail,
         internetmessageid: email.internetMessageId,
         inreplyto: email.inReplyTo,
         references: email.references.length ? email.references.join(" ") : undefined,
