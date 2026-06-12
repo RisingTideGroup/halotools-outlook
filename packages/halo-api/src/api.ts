@@ -548,6 +548,7 @@ export async function getControl(force = false): Promise<HaloControl> {
   if (hit && !force) return hit;
   const res = await call<HaloControl>("/Control");
   _controlCache.set(key, res);
+  writeControlSnapshot(res);
   return res;
 }
 
@@ -603,6 +604,22 @@ export async function getClientCache(force = false): Promise<HaloClientCache> {
  * Trimmed to just the fields the on-send handler needs.
  */
 const AGENT_SNAPSHOT_KEY = "halo.agentSnapshot.v1";
+const CONTROL_SNAPSHOT_KEY = "halo.controlSnapshot.v1";
+
+function writeControlSnapshot(control: HaloControl): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      CONTROL_SNAPSHOT_KEY,
+      JSON.stringify({
+        email_start_tag: control.email_start_tag ?? "",
+        email_end_tag: control.email_end_tag ?? "",
+      }),
+    );
+  } catch {
+    /* swallow — quota, private mode, etc. */
+  }
+}
 
 interface AgentSnapshot {
   id: number;

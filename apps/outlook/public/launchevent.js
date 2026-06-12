@@ -32,6 +32,7 @@
   var CHARGE_RATE_PROP = "haloComposeChargeRateId";
   var DIAG_LOG_KEY = "halo.diagLog.v1";
   var DEFAULTS_KEY = "halo.defaults.v1";
+  var CONTROL_SNAPSHOT_KEY = "halo.controlSnapshot.v1";
   // Shorter per-request budget for the auto-lookup path so that two sequential
   // calls (user search → ticket list) still finish well inside SAFETY_MS.
   var AUTO_LOOKUP_FETCH_MS = 1500;
@@ -337,6 +338,30 @@
         resolve([]);
       }
     });
+  }
+
+  // Read the control snapshot the task pane wrote after loading /api/Control.
+  // Synchronous, never throws — falls through to {} when not yet written.
+  function getControlSnapshot() {
+    try {
+      var raw = window.localStorage.getItem(CONTROL_SNAPSHOT_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) { return {}; }
+  }
+
+  // Try to extract a Halo ticket ID from an email subject using the configured
+  // email start/end tags (e.g. "[" and "]" wrapping the ticket number).
+  // Reads from the control snapshot — returns a number or null.
+  function extractTicketIdFromSubject(subject) {
+    if (!subject) return null;
+    var snap = getControlSnapshot();
+    var start = snap.email_start_tag;
+    var end = snap.email_end_tag;
+    if (!start || !end) return null;
+    var escStart = start.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    var escEnd   = end.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    var m = new RegExp(escStart + "(\\d+)" + escEnd).exec(subject);
+    return m ? Number(m[1]) : null;
   }
 
   // Read the agent snapshot the task pane wrote after its ClientCache load.
@@ -775,40 +800,55 @@
           finish();
           return;
         }
-        // Auto-import path: resolve recipients to a single open ticket.
+        // Auto-import path: subject-tag match first (fast, unambiguous for
+        // replies to ticket emails), then fall back to recipient lookup.
         stage = "autoLookup";
         logEvent("info", "stage → autoLookup");
-        readRecipientsField(Office.context.mailbox.item.to).then(function (toEmails) {
-          return autoFindTicketForRecipients(toEmails).then(function (foundId) {
-            if (!foundId) {
-              logEvent("info", "auto-lookup: no unique match, skipping");
-              clearTimeout(safety);
-              finish();
-              return;
-            }
-            logEvent("info", "auto-lookup: matched ticket", { ticketId: foundId });
-            stage = "readItem";
-            return Promise.all([
-              readBody(),
-              readSubject(),
-              Promise.resolve(toEmails),
-              readRecipientsField(Office.context.mailbox.item.cc),
-            ]).then(function (parts) {
-              var data = {
-                body: parts[0],
-                subject: parts[1],
-                to: parts[2],
-                cc: parts[3],
-                timeSeconds: 0,
-                chargeRateId: 0,
-              };
-              stage = "appendToHalo";
-              logEvent("info", "stage → appendToHalo (auto)", { ticketId: foundId });
-              return appendToHalo(foundId, data);
-            }).then(function () {
-              clearTimeout(safety);
-              finish();
+        readSubject().then(function (subject) {
+          var tagId = extractTicketIdFromSubject(subject);
+          if (tagId) {
+            logEvent("info", "auto-lookup: subject-tag match", { ticketId: tagId });
+            return Promise.resolve({ foundId: tagId, subject: subject, toEmails: null });
+          }
+          // No subject tag — fall back to recipient lookup (requires unique match).
+          return readRecipientsField(Office.context.mailbox.item.to)
+            .then(function (toEmails) {
+              return autoFindTicketForRecipients(toEmails).then(function (foundId) {
+                return { foundId: foundId, subject: subject, toEmails: toEmails };
+              });
             });
+        }).then(function (result) {
+          if (!result.foundId) {
+            logEvent("info", "auto-lookup: no match, skipping");
+            clearTimeout(safety);
+            finish();
+            return;
+          }
+          logEvent("info", "auto-lookup: matched ticket", { ticketId: result.foundId });
+          stage = "readItem";
+          var toPromise = result.toEmails
+            ? Promise.resolve(result.toEmails)
+            : readRecipientsField(Office.context.mailbox.item.to);
+          return Promise.all([
+            readBody(),
+            Promise.resolve(result.subject),
+            toPromise,
+            readRecipientsField(Office.context.mailbox.item.cc),
+          ]).then(function (parts) {
+            var data = {
+              body: parts[0],
+              subject: parts[1],
+              to: parts[2],
+              cc: parts[3],
+              timeSeconds: 0,
+              chargeRateId: 0,
+            };
+            stage = "appendToHalo";
+            logEvent("info", "stage → appendToHalo (auto)", { ticketId: result.foundId });
+            return appendToHalo(result.foundId, data);
+          }).then(function () {
+            clearTimeout(safety);
+            finish();
           });
         }).catch(function (err) {
           clearTimeout(safety);
