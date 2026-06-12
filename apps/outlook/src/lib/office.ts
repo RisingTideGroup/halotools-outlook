@@ -248,7 +248,7 @@ function fetchAttachmentContent(att: Office.AttachmentDetails): Promise<FetchedA
         }
         resolve({
           filename: sanitizeFilename(att.name),
-          contentType: att.contentType,
+          contentType: contentTypeFor(att),
           base64: c.content,
           size: att.size,
           isInline: att.isInline,
@@ -277,6 +277,57 @@ export async function fetchAllAttachments(
     }
   }
   return { attachments, errors };
+}
+
+/**
+ * Replace cid: image references in an HTML body with inline base64 data URIs
+ * so that Halo (and any other consumer) can render them without access to the
+ * original MIME structure.
+ *
+ * Outlook embeds images (signature logos, pasted screenshots, etc.) as inline
+ * MIME parts referenced by Content-ID. The HTML body contains src="cid:…"
+ * attributes that are meaningless once extracted from the email. This function
+ * resolves each one against Office.js's attachment list and substitutes a
+ * self-contained data URI. References with no matching attachment are left
+ * unchanged so the rest of the body is never broken by a single missing image.
+ */
+export async function resolveInlineCidImages(html: string): Promise<string> {
+  // Collect all unique cid: values used in the body (double-quoted, as Outlook produces)
+  const cids = new Set<string>();
+  const cidRe = /src="cid:([^"]+)"/gi;
+  let m: RegExpExecArray | null;
+  while ((m = cidRe.exec(html)) !== null) {
+    cids.add(m[1]);
+  }
+  if (cids.size === 0) return html;
+
+  const inlineAtts = listAttachments().filter((a) => a.isInline);
+
+  // Fetch each referenced attachment in parallel; failures leave the cid: in place.
+  const resolved = await Promise.all(
+    [...cids].map(async (cid): Promise<[string, string | null]> => {
+      const att = inlineAtts.find(
+        (a) => (a.contentId ?? "").toLowerCase() === cid.toLowerCase(),
+      );
+      if (!att) return [cid, null];
+      try {
+        const fetched = await fetchAttachmentContent(att);
+        return [cid, `data:${fetched.contentType};base64,${fetched.base64}`];
+      } catch {
+        return [cid, null];
+      }
+    }),
+  );
+
+  const cidMap = new Map<string, string>(
+    resolved.filter((r): r is [string, string] => r[1] !== null),
+  );
+  if (cidMap.size === 0) return html;
+
+  return html.replace(/src="cid:([^"]+)"/gi, (match, cid: string) => {
+    const key = [...cidMap.keys()].find((k) => k.toLowerCase() === cid.toLowerCase());
+    return key ? `src="${cidMap.get(key)}"` : match;
+  });
 }
 
 /** Get the email address of the current Outlook user. */
@@ -313,6 +364,38 @@ export function domainOf(email: string): string {
 }
 
 // ---------- helpers ----------
+
+/** Derive a MIME type from the attachment filename extension.
+ *  Office.AttachmentDetails.contentType is deprecated in newer @types/office-js;
+ *  this covers the common cases and falls back to the deprecated field (via cast)
+ *  for anything not listed, rather than losing the type information entirely. */
+function contentTypeFor(att: Office.AttachmentDetails): string {
+  const ext = att.name.split(".").pop()?.toLowerCase() ?? "";
+  const byExt: Record<string, string> = {
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    svg: "image/svg+xml",
+    webp: "image/webp",
+    bmp: "image/bmp",
+    tif: "image/tiff",
+    tiff: "image/tiff",
+    ico: "image/x-icon",
+    pdf: "application/pdf",
+    txt: "text/plain",
+    csv: "text/csv",
+    doc: "application/msword",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xls: "application/vnd.ms-excel",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    zip: "application/zip",
+    eml: "message/rfc822",
+  };
+  return byExt[ext]
+    ?? (att as unknown as Record<string, string>).contentType
+    ?? "application/octet-stream";
+}
 
 function sanitizeFilename(name: string): string {
   return name

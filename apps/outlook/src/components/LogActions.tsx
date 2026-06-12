@@ -40,6 +40,7 @@ import {
   getCurrentUserEmail,
   getItemImportance,
   formatHaloDate,
+  resolveInlineCidImages,
   type EmailContext,
   type FetchedAttachment,
 } from "../lib/office";
@@ -175,7 +176,7 @@ export function QuickImportBanner({
     setStatus("busy");
     setErrorMsg(undefined);
     try {
-      const html = await getBody("html");
+      const html = await resolveInlineCidImages(await getBody("html"));
       const defaults = getDefaults();
       let attachments: HaloAttachmentInline[] = [];
       const rawAttachments = listAttachments().filter((a) => !a.isInline);
@@ -371,10 +372,7 @@ function AppendDialog({
     if (!selectedId) return;
     setBusy(true);
     try {
-      // sanitizeOutlookHtml strips MSO conditional comments, <o:p> tags,
-      // class="MsoNormal" margins, and runs of empty paragraphs — without
-      // this, the recorded action renders with huge vertical gaps in Halo.
-      const html = sanitizeOutlookHtml(await getBody("html"));
+      const html = await resolveInlineCidImages(sanitizeOutlookHtml(await getBody("html")));
       let attachments: HaloAttachmentInline[] = [];
       let attachWarning: string | undefined;
       if (includeAttachments && attachmentCount > 0) {
