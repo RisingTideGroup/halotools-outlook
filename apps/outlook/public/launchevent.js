@@ -302,6 +302,20 @@
     return top;
   }
 
+  // Mirror of formatHaloDate + getItemImportance in apps/outlook/src/lib/office.ts —
+  // keep in sync if either is touched.
+  function formatHaloDate(d) {
+    var dt = d ? new Date(d) : new Date();
+    return dt.toISOString().replace(/Z$/, "");
+  }
+  function getItemImportance() {
+    try {
+      var imp = Office.context.mailbox.item && Office.context.mailbox.item.importance;
+      if (typeof imp === "string" && imp) return imp.toLowerCase();
+    } catch (e) { /* swallow */ }
+    return "normal";
+  }
+
   function htmlToText(html) {
     if (!html) return "";
     return html
@@ -351,6 +365,7 @@
       // gets only the topmost reply; emailbody_html below keeps the full body
       // including the quoted thread.
       var detailsHtml = extractTopReply(cleanedBody);
+      var detailsPlain = htmlToText(detailsHtml);
 
       var payload = [{
         summary: pending.summary,
@@ -359,9 +374,23 @@
         emailfrom: senderName || senderEmail,
         emailfromname: senderName,
         emailfromaddress: senderEmail,
+        // On-send is always outbound: emailto is the recipient (customer).
         emailto: (data.to || []).join("; "),
         emailcc: (data.cc || []).join("; "),
-        emailsubject: data.subject,
+        // Canonical Halo subject — replaces legacy emailsubject.
+        emailsubjectnew: data.subject,
+        emailimportance: getItemImportance(),
+        dateemailed: formatHaloDate(new Date()),
+        outcome_id: 0,
+        // Outbound by construction (on-send fires while the agent is sending).
+        _isuserupdate: false,
+        // Halo's note (plaintext) + note_html (HTML) convention. Both required.
+        note: detailsPlain,
+        note_html: detailsHtml,
+        // Action-author triplet — agent attribution on outbound.
+        who: agent.name || "",
+        who_agentid: agent.id || -1,
+        who_type: 1,
         mailentryid: mailentryid || undefined,
         emaildirection: "O",
         email_status: 2,
@@ -436,21 +465,35 @@
       // Sanitize first so all downstream patterns see the cleaned HTML.
       var cleanedBody = sanitizeOutlookHtml(data.body || "");
       var noteHtml = stripSignature(extractTopReply(cleanedBody), agent.signature);
+      var notePlain = htmlToText(noteHtml);
       var payload = [{
         ticket_id: Number(ticketId),
         outcome: "Outgoing Email",
-        note: noteHtml,
+        outcome_id: 0,
+        // Outbound by construction.
+        _isuserupdate: false,
+        // Halo's note (plaintext) + note_html (HTML) convention. Both required.
+        note: notePlain,
+        note_html: noteHtml,
         // Literal Halo column for the Email-tab filter; on-send is never internal.
         actionhide: 0,
         emailfrom: senderName || senderEmail,
         emailfromname: senderName,
         emailfromaddress: senderEmail,
+        // Outbound: emailto is the recipient (the customer).
         emailto: (data.to || []).join("; "),
         emailcc: (data.cc || []).join("; "),
-        emailsubject: data.subject,
+        // Canonical Halo subject — replaces legacy emailsubject.
+        emailsubjectnew: data.subject,
+        emailimportance: getItemImportance(),
+        dateemailed: formatHaloDate(new Date()),
         // Agent attribution — use the cached Halo agent id when available,
         // 0 as a marker for "Halo, attribute to API caller" otherwise.
         agent_id: agent.id || 0,
+        // Action-author triplet — agent on outbound (who_type=1).
+        who: agent.name || "",
+        who_agentid: agent.id || -1,
+        who_type: 1,
         mailentryid: mailentryid || undefined,
         // Direction + delivered-status guard matches Halo's native intake.
         emaildirection: "O",
