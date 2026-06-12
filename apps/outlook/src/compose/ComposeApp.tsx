@@ -57,6 +57,7 @@ import {
   listTicketTypes,
   ticketTypesForAgentCreate,
   getChargeRates,
+  getClientCache,
   type TenantConfig,
   type HaloUser,
   type HaloClient,
@@ -251,10 +252,13 @@ export function ComposeApp() {
   const styles = useStyles();
   const [phase, setPhase] = useState<Phase>("loading");
 
-  const refreshPhase = useCallback(() => {
-    if (!getConfig()) setPhase("needs-config");
-    else if (!isAuthenticated()) setPhase("needs-auth");
-    else setPhase("ready");
+  const refreshPhase = useCallback(async () => {
+    if (!getConfig()) { setPhase("needs-config"); return; }
+    if (!isAuthenticated()) { setPhase("needs-auth"); return; }
+    // Warm ClientCache before rendering the ready UI so synchronous reads like
+    // getChargeRates() find data already in the cache when sections mount.
+    try { await getClientCache(); } catch { /* non-fatal; charge rates degrade to No Charge */ }
+    setPhase("ready");
   }, []);
 
   useEffect(() => {
