@@ -1206,27 +1206,55 @@ export async function getMspKpis(
  * full body as opaque and let the MCP tool surface it whole.
  */
 export interface RunSqlOptions {
-  /** Persist as a saved report instead of running inline. */
+  /** Persist as a saved report instead of running inline. Only meaningful for
+   *  a single SQL statement — ignored when an array is passed. */
   save?: { name: string; folder_id?: number };
 }
 
+/**
+ * Run one or more SQL statements through Halo's Report Center.
+ *
+ * Halo's `/api/Report` endpoint always expects an array body — even for a
+ * single report — and returns an array of one result per query in the same
+ * order. Pass a string for the common single-query case (we'll return the
+ * single result unwrapped) or pass an array of strings to run several in
+ * parallel server-side and get the full array back.
+ *
+ * Batching is useful when an agent needs several uncorrelated datasets at
+ * once — e.g. "MRR rollup AND top 10 overdue tickets AND license expiry list"
+ * — and a single SQL JOIN can't express them. One HTTP round-trip, all
+ * results back together.
+ */
 export async function runReportSql(
-  sql: string,
+  sql: string | string[],
   opts: RunSqlOptions = {},
 ): Promise<unknown> {
-  const body: Record<string, unknown> = { sql };
-  if (opts.save) {
-    body.name = opts.save.name;
-    if (opts.save.folder_id != null) body.folder_id = opts.save.folder_id;
-  } else {
-    body._loadreportonly = true;
-  }
-  // Halo's /Report endpoint accepts an array body for batch ops; single-object
-  // bodies work too. We send a single object — matches the inline-execute idiom.
-  return call<unknown>("/Report", {
+  const queries = Array.isArray(sql) ? sql : [sql];
+  const isBatch = Array.isArray(sql);
+
+  const body = queries.map((q, idx) => {
+    const item: Record<string, unknown> = { sql: q };
+    if (opts.save && !isBatch && idx === 0) {
+      item.name = opts.save.name;
+      if (opts.save.folder_id != null) item.folder_id = opts.save.folder_id;
+    } else {
+      item._loadreportonly = true;
+    }
+    return item;
+  });
+
+  const res = await call<unknown>("/Report", {
     method: "POST",
     body: JSON.stringify(body),
   });
+
+  // Halo returns an array of results in the same order as the request. For
+  // single-query input, unwrap to the lone result so callers don't have to
+  // deal with the array.
+  if (!isBatch && Array.isArray(res) && res.length > 0) {
+    return res[0];
+  }
+  return res;
 }
 
 /** List existing saved reports — names, ids, folder placement.
