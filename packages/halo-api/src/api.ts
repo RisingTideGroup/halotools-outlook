@@ -1868,11 +1868,15 @@ order by count(*) desc`;
 // FaultVectorScore) into recurring-problem / duplicate / per-ticket-neighbour
 // insights. Schema idioms (in addition to the service-delivery ones above):
 //   FaultVectorScore.FVSfaultid          -> the source ticket (FAULTS.faultid)
-//   FaultVectorScore.FVSSimiliarfaultid  -> a similar ticket (always a real FAULTS.faultid)
+//   FaultVectorScore.FVSSimiliarfaultid  -> the matched item; a TICKET id when FVSuse=0,
+//                                            a KB-article id (KBENTRY.id) when FVSuse=1.
 //   FaultVectorScore.FVSScore            -> cosine similarity (~0.62–1.0)
 //   FaultVectorScore.fvsSearchMethod     -> embedding method; we ONLY trust method 1.
+//   FaultVectorScore.FVSuse              -> match TYPE: 0 = ticket↔ticket, 1 = ticket↔KB.
+//     (KB ids 1..N collide with low faultids, so without this split a KB match looks
+//      like an unrelated old ticket — the trap that hides KB matches.)
 //
-// CRITICAL: always filter `fvsSearchMethod = 1`. Other methods are stale /
+// CRITICAL: always filter `fvsSearchMethod = 1 AND FVSuse = 0` for ticket↔ticket. Other methods are stale /
 // garbage (method '' scores unrelated tickets at 1.0). The graph is directional
 // (source -> similar); for clustering we treat edges as undirected.
 
@@ -1951,7 +1955,7 @@ export async function getRecurringProblemClusters(
   // Shared edge predicate: method 1, score gate, both endpoints reactive +
   // NOT_STUB + non-noise + in-window on dateoccured.
   const edgeWhere =
-    `v.fvsSearchMethod = 1 and v.FVSScore >= ${ms}` +
+    `v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSScore >= ${ms}` +
     ` and rta.RTIsProject = 0 and rta.RTIsOpportunity = 0 and rtb.RTIsProject = 0 and rtb.RTIsOpportunity = 0` +
     ` and (fa.datecleared > fa.dateoccured or fa.datecleared is null or fa.datecleared < '1900-01-01')` +
     ` and (fb.datecleared > fb.dateoccured or fb.datecleared is null or fb.datecleared < '1900-01-01')` +
@@ -2029,7 +2033,7 @@ export async function getDuplicateTickets(
   const ms = Number.isFinite(minScore) ? minScore : 0.9;
   const rtJoin = scope === "reactive" ? "join requesttype rto on o.RequestTypeNew = rto.RTid" : "";
   const reactive = scope === "reactive" ? "and rto.RTIsProject = 0 and rto.RTIsOpportunity = 0" : "";
-  const edgeWhere = `v.fvsSearchMethod = 1 and v.FVSScore >= ${ms}`;
+  const edgeWhere = `v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSScore >= ${ms}`;
 
   const sql = `select top ${top}
   o.faultid as open_ticket_id,
@@ -2118,7 +2122,7 @@ from (
       from FaultVectorScore v
       join faults fa on fa.faultid = v.FVSfaultid join requesttype rta on fa.RequestTypeNew = rta.RTid
       join faults fb on fb.faultid = v.FVSSimiliarfaultid join requesttype rtb on fb.RequestTypeNew = rtb.RTid
-      where v.fvsSearchMethod = 1 and v.FVSScore >= ${ms} and v.FVSfaultid < v.FVSSimiliarfaultid
+      where v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSScore >= ${ms} and v.FVSfaultid < v.FVSSimiliarfaultid
         and fa.areaint = fb.areaint
         and rta.RTIsProject = 0 and rta.RTIsOpportunity = 0 and rtb.RTIsProject = 0 and rtb.RTIsOpportunity = 0
         and fa.dateoccured >= '${start}' and fa.dateoccured < '${ex}'
@@ -2175,9 +2179,9 @@ export async function getSimilarTicketInsights(
   f.category2 as category2,
   try_convert(float, nullif(f.faisatisfactionlevel, '')) as csat
 from (
-  select v.FVSSimiliarfaultid as faultid, v.FVSScore as score from FaultVectorScore v where v.fvsSearchMethod = 1 and v.FVSfaultid = ${id} and v.FVSScore >= 0.8
+  select v.FVSSimiliarfaultid as faultid, v.FVSScore as score from FaultVectorScore v where v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSfaultid = ${id} and v.FVSScore >= 0.8
   union all
-  select v.FVSfaultid as faultid, v.FVSScore as score from FaultVectorScore v where v.fvsSearchMethod = 1 and v.FVSSimiliarfaultid = ${id} and v.FVSScore >= 0.8
+  select v.FVSfaultid as faultid, v.FVSScore as score from FaultVectorScore v where v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSSimiliarfaultid = ${id} and v.FVSScore >= 0.8
 ) n
 join faults f on f.faultid = n.faultid
 left join uname u on f.clearwhoint = u.unum
