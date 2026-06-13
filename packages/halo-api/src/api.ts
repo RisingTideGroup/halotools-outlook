@@ -50,6 +50,7 @@ import type {
   ClientDejaVu,
   ClientDejaVuRow,
   SimilarTicketInsights,
+  KnowledgeGaps,
   SimilarTicketNeighbour,
 } from "./types.js";
 
@@ -2237,6 +2238,103 @@ order by n.score desc`;
       predictedCategory,
       suggestedResolvers,
     },
+  };
+}
+
+/**
+ * Knowledge-base gap analysis from the ticket↔KB embedding matches
+ * (FaultVectorScore where FVSuse=1, the KB-article side; FVSSimiliarfaultid is a
+ * KBENTRY.id). For a window (default trailing 365 days) of reactive, non-stub,
+ * noise-filtered tickets: KB coverage (how many tickets have a match at/above
+ * `matchThreshold`), the most-matched KB articles, and the highest-effort
+ * uncovered tickets — the articles worth writing first. Requires KB embeddings
+ * to be enabled in Halo; returns zeroed coverage with no rows if absent.
+ */
+export async function getKnowledgeGaps(
+  startdate?: string,
+  enddate?: string,
+  matchThreshold = 0.8,
+  limit = 20,
+): Promise<KnowledgeGaps> {
+  const { start, end } = resolveWindow(startdate, enddate, 365);
+  const ex = exclusiveEnd(end);
+  const th = Number.isFinite(matchThreshold) ? matchThreshold : 0.8;
+  const top = Math.max(1, Math.trunc(limit));
+  const base =
+    `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)` +
+    ` and rt.RTIsProject = 0 and rt.RTIsOpportunity = 0` +
+    ` and (f.datecleared > f.dateoccured or f.datecleared is null or f.datecleared < '1900-01-01')` +
+    ` and f.dateoccured >= '${start}' and f.dateoccured < '${ex}' and ${noiseFilter("f")}`;
+  const kbJoin =
+    `left join (select FVSfaultid, max(FVSScore) as best_kb from FaultVectorScore where FVSuse = 1 group by FVSfaultid) kb on kb.FVSfaultid = f.faultid`;
+
+  const coverageSql = `select
+  count(*) as tickets,
+  sum(case when kb.best_kb >= ${th} then 1 else 0 end) as covered,
+  cast(avg(kb.best_kb) as decimal(6,4)) as avg_best
+from faults f
+join requesttype rt on f.requesttypenew = rt.RTid
+${kbJoin}
+where ${base}`;
+
+  const topKbSql = `select top ${top}
+  k.id as kb_id,
+  max(cast(k.description as nvarchar(160))) as title,
+  count(distinct fvs.FVSfaultid) as tickets_matched,
+  cast(avg(fvs.FVSScore) as decimal(6,4)) as avg_score
+from FaultVectorScore fvs
+join KBENTRY k on k.id = fvs.FVSSimiliarfaultid
+join faults f on f.faultid = fvs.FVSfaultid
+join requesttype rt on f.requesttypenew = rt.RTid
+where fvs.FVSuse = 1 and fvs.FVSScore >= ${th} and ${base}
+group by k.id
+order by count(distinct fvs.FVSfaultid) desc`;
+
+  const gapSql = `select top ${top}
+  f.faultid,
+  left(cast(f.Symptom as nvarchar(140)), 140) as summary,
+  a.aareadesc as client,
+  cast(coalesce(h.hrs, 0) as decimal(12,2)) as hours_logged,
+  cast(kb.best_kb as decimal(6,4)) as best_kb
+from faults f
+join requesttype rt on f.requesttypenew = rt.RTid
+left join area a on a.aarea = f.areaint
+left join (select faultid, sum(timetaken) as hrs from actions group by faultid) h on h.faultid = f.faultid
+${kbJoin}
+where ${base} and (kb.best_kb is null or kb.best_kb < ${th})
+order by coalesce(h.hrs, 0) desc`;
+
+  const [covRows, kbRows, gapRows] = await Promise.all([
+    reportRows(coverageSql),
+    reportRows(topKbSql),
+    reportRows(gapSql),
+  ]);
+
+  const cov = covRows[0] ?? {};
+  const tickets = num(cov.tickets);
+  const covered = num(cov.covered);
+  return {
+    window: { startdate: start, enddate: end, scope: "reactive" },
+    matchThreshold: th,
+    coverage: {
+      tickets,
+      withKbMatch: covered,
+      coveragePct: rate(covered, tickets),
+      avgBestScore: numOrNull(cov.avg_best),
+    },
+    topKbArticles: kbRows.map((r) => ({
+      kbId: num(r.kb_id),
+      title: String(r.title ?? "").trim(),
+      ticketsMatched: num(r.tickets_matched),
+      avgScore: numOrNull(r.avg_score),
+    })),
+    gapCandidates: gapRows.map((r) => ({
+      faultId: num(r.faultid),
+      summary: String(r.summary ?? "").trim(),
+      client: String(r.client ?? ""),
+      hoursLogged: round2(num(r.hours_logged)),
+      bestKbScore: numOrNull(r.best_kb),
+    })),
   };
 }
 

@@ -31,6 +31,7 @@ import { registerGetRecurringProblemClusters } from "./getRecurringProblemCluste
 import { registerGetDuplicateTickets } from "./getDuplicateTickets.js";
 import { registerGetClientDejaVu } from "./getClientDejaVu.js";
 import { registerGetSimilarTicketInsights } from "./getSimilarTicketInsights.js";
+import { registerGetKnowledgeGaps } from "./getKnowledgeGaps.js";
 
 /** Map of tool name → register function so suppression can decide per-tool
  *  whether to wire it up. The order here defines the order the agent sees
@@ -72,6 +73,7 @@ const TOOL_REGISTRY: Array<{ name: string; register: (s: McpServer) => void }> =
   { name: "getDuplicateTickets", register: registerGetDuplicateTickets },
   { name: "getClientDejaVu", register: registerGetClientDejaVu },
   { name: "getSimilarTicketInsights", register: registerGetSimilarTicketInsights },
+  { name: "getKnowledgeGaps", register: registerGetKnowledgeGaps },
 
   // Database access + REST escape hatch
   { name: "listReports", register: registerListReports },

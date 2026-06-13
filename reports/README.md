@@ -126,6 +126,8 @@ AI assistant doesn't have to write SQL:
 - **`getClientHealthScorecard`** — per-client volume, SLA, MTTR, CSAT.
 - **`getCategoryInsights`** — uncategorised %, top categories, recurring-problem candidates.
 - **`getTicketBacklog`** — point-in-time aging + SLA-at-risk + oldest tickets.
+- **`getRecurringProblemClusters` / `getDuplicateTickets` / `getClientDejaVu` / `getSimilarTicketInsights`** — ticket-similarity tools on the embedding graph (`FaultVectorScore`, `fvsSearchMethod=1 AND FVSuse=0` = ticket↔ticket).
+- **`getKnowledgeGaps`** — KB coverage + most-matched articles + highest-effort uncovered tickets, from ticket↔KB embedding matches (`FVSuse=1`). Requires KB embeddings enabled in Halo.
 
 Plus financial tools already in the server: `getMrrSnapshot`, `getMspKpis`,
 `getRevenuePerTechSnapshot`, `getMrrPerSeatSnapshot`, `getTechnicianUtilizationSnapshot`.

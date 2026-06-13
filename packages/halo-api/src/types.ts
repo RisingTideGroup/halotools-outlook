@@ -872,3 +872,28 @@ export interface SimilarTicketInsights {
     suggestedResolvers: { agentId: number; agent: string; neighbourCount: number }[];
   };
 }
+
+/** Knowledge-base gap analysis from the ticket↔KB embedding matches
+ *  (FaultVectorScore.FVSuse=1). Surfaces how much of the reactive ticket volume
+ *  has a matching KB article, the most-matched articles, and the highest-effort
+ *  tickets with no KB match (= the articles worth writing first). */
+export interface KnowledgeGaps {
+  window: ServiceWindow;
+  matchThreshold: number;
+  coverage: {
+    tickets: number;
+    withKbMatch: number;
+    coveragePct: number | null;
+    avgBestScore: number | null;
+  };
+  /** KB articles ranked by how many tickets match them — the workhorse articles. */
+  topKbArticles: { kbId: number; title: string; ticketsMatched: number; avgScore: number | null }[];
+  /** Uncovered tickets (no KB match at/above threshold) ranked by hours logged. */
+  gapCandidates: {
+    faultId: number;
+    summary: string;
+    client: string;
+    hoursLogged: number;
+    bestKbScore: number | null;
+  }[];
+}
