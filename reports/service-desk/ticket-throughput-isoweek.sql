@@ -12,6 +12,10 @@ NOTES:
     belong to the prior/next ISO year, so yr_wk uses calendar YEAR for a stable,
     roughly-correct sort label. Good enough for trend reading.
   - dateoccured = real open time; datecleared >= '1900-01-01' = actually cleared.
+  - STUB FILTER: instant-closed "Quick Time" stubs (datecleared = dateoccured) are
+    time-log rows, not real lifecycle tickets (~90% of the cleared reactive set). They
+    are excluded from BOTH the created and resolved counts so the cadence numbers
+    reflect genuine tickets. Predicate keeps real closed + all open tickets.
 */
 SELECT
   m.cal_year                                            AS yr,
@@ -28,6 +32,7 @@ FROM (
   WHERE f.fdeleted = f.fmergedintofaultid
     AND rt.RTIsProject = 0 AND rt.RTIsOpportunity = 0
     AND f.dateoccured >= '2026-01-01'  /* EDIT: window start */
+    AND (f.datecleared > f.dateoccured OR f.datecleared IS NULL OR f.datecleared < '1900-01-01')  /* stub filter: drop instant-closed Quick Time stubs */
   UNION ALL
   SELECT YEAR(f.datecleared), DATEPART(ISO_WEEK, f.datecleared), 0, 1
   FROM FAULTS f
@@ -35,5 +40,6 @@ FROM (
   WHERE f.fdeleted = f.fmergedintofaultid
     AND rt.RTIsProject = 0 AND rt.RTIsOpportunity = 0
     AND f.datecleared >= '2026-01-01'  /* EDIT: window start */
+    AND f.datecleared > f.dateoccured  /* stub filter: drop instant-closed Quick Time stubs (resolved branch only sees cleared tickets) */
 ) m
 GROUP BY m.cal_year, m.iso_week

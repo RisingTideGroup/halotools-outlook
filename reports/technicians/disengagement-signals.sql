@@ -19,6 +19,10 @@ NOTES:
    days old -- the "sitting untouched / hoarding" signal.
  - "resolved" lives in its own correlated subquery on purpose: combining the
    outer u.Unum with f.Faultid inside one aggregate is rejected by SQL Server.
+ - STUB FILTER: the "resolved" count drops instant-closed "Quick Time" stubs
+   (datecleared = dateoccured) via datecleared > dateoccured, so it reflects genuine
+   lifecycle closes. The filter applies ONLY to the resolved subquery - hrs_logged and
+   after_hours_pct (the time columns) deliberately keep Quick Time time as real work.
  - after_hours_pct denominator and numerator both range over ALL of the tech's
    actions in the window, so the percentage is well-formed (0-100).
  - CAVEATS on reading this as "lazy":
@@ -52,6 +56,7 @@ OUTER APPLY (
       AND fr.datecleared >= '2026-05-01'   /* EDIT: window start (inclusive) */
       AND fr.datecleared <  '2026-06-01'   /* EDIT: window end   (exclusive) */
       AND fr.datecleared > '1900-01-01'
+      AND fr.datecleared > fr.dateoccured  /* stub filter: drop instant-closed Quick Time stubs from the resolved count only */
       AND COALESCE(fr.FDeleted,0)=0 AND COALESCE(fr.FMergedIntoFaultid,0)=0
 ) r
 OUTER APPLY (

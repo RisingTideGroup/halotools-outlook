@@ -19,8 +19,12 @@ PARAMS:
   /* EDIT: closed status ids */ (8,9) - the Resolved/Closed status IDs in TSTATUS.
   /* EDIT: window start */ '2025-01-01' on dateoccured.
 NOTES:
-  - "resolved_tickets" denominator = reactive tickets that have a clear date in the
-    window (datecleared >= '1900-01-01'); reopened is the subset of those.
+  - "resolved_tickets" denominator = reactive tickets genuinely closed in the window
+    (datecleared > dateoccured); reopened is the subset of those.
+  - STUB FILTER: instant-closed "Quick Time" stubs (datecleared = dateoccured) are
+    time-log rows, not real lifecycle closes (~90% of the cleared reactive set), so
+    they are excluded from the resolved denominator via datecleared > dateoccured
+    (this replaces the old bare datecleared >= '1900-01-01' guard, which counted them).
 */
 SELECT
   FORMAT(f.dateoccured, 'yyyy-MM') AS ym,
@@ -39,6 +43,6 @@ LEFT JOIN (
 ) ro ON ro.faultid = f.faultid
 WHERE f.fdeleted = f.fmergedintofaultid
   AND rt.RTIsProject = 0 AND rt.RTIsOpportunity = 0
-  AND f.datecleared >= '1900-01-01'
+  AND f.datecleared > f.dateoccured  /* stub filter: genuinely closed only, drops instant-closed Quick Time stubs */
   AND f.dateoccured >= '2025-01-01'  /* EDIT: window start */
 GROUP BY FORMAT(f.dateoccured, 'yyyy-MM')

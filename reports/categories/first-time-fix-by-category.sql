@@ -16,7 +16,11 @@ PARAMS:
   /* EDIT: closed status ids */ (8,9).
 NOTES:
   - Uncategorised tickets (blank category2) are grouped as '(uncategorised)'.
-  - Only resolved tickets count (datecleared >= '1900-01-01').
+  - Only genuinely resolved tickets count (datecleared in window AND datecleared > dateoccured).
+  - STUB FILTER: instant-closed "Quick Time" stubs (datecleared = dateoccured) are
+    time-log rows, not real lifecycle closes (~90% of the cleared reactive set). They
+    are trivially "first-time fixes" (never reopened/reassigned) and would massively
+    inflate the FTF rate, so they are excluded via datecleared > dateoccured.
 */
 SELECT TOP 50
   CASE WHEN LTRIM(RTRIM(ISNULL(f.category2,''))) = '' THEN '(uncategorised)' ELSE f.category2 END AS category,
@@ -36,6 +40,7 @@ LEFT JOIN (
 WHERE f.fdeleted = f.fmergedintofaultid
   AND rt.RTIsProject = 0 AND rt.RTIsOpportunity = 0
   AND f.datecleared >= '2025-01-01'  /* EDIT: window start */
+  AND f.datecleared > f.dateoccured  /* stub filter: drop instant-closed Quick Time stubs */
 GROUP BY CASE WHEN LTRIM(RTRIM(ISNULL(f.category2,''))) = '' THEN '(uncategorised)' ELSE f.category2 END
 HAVING COUNT(*) >= 10  /* EDIT: min resolved for a stable rate */
 ORDER BY resolved DESC

@@ -25,6 +25,11 @@ NOTES:
    both shown. The PERCENTILE_CONT window is constant within a tech, so MAX()
    simply lifts it through the GROUP BY.
  - Excludes deleted/merged tickets and bot agents (COALESCE(uisapiagent,0)=0).
+ - STUB FILTER: instant-closed "Quick Time" stubs (datecleared = dateoccured) are
+   time-log rows, not real lifecycle tickets (~90% of the cleared reactive set), and
+   they drag median/avg resolution time to ~0 and inflate the resolved count. They are
+   excluded via datecleared > dateoccured. This whole report is lifecycle (reopen, SLA,
+   MTTR) with no hours columns, so the filter applies to the entire population.
 */
 SELECT TOP 1000
     q.tech,
@@ -61,6 +66,7 @@ FROM (
     WHERE f.datecleared >= '2026-03-01'   /* EDIT: window start (inclusive) */
       AND f.datecleared <  '2026-06-01'   /* EDIT: window end   (exclusive) */
       AND f.dateoccured > '1900-01-01'
+      AND f.datecleared > f.dateoccured   /* stub filter: drop instant-closed Quick Time stubs */
       AND COALESCE(f.FDeleted,0) = 0
       AND COALESCE(f.FMergedIntoFaultid,0) = 0
       AND COALESCE(u.uisapiagent,0) = 0

@@ -11,6 +11,9 @@ NOTES:
     cohort raised that month. Slastate finalises once a ticket clears, so the most
     recent month is partial until its open tickets resolve.
   - Slastate: 'I' met, 'O' breached, ''/NULL excluded.
+  - STUB FILTER: instant-closed "Quick Time" stubs (datecleared = dateoccured) are
+    time-log rows, not real lifecycle tickets, so they are excluded from this
+    SLA-attainment count. Keeps real closed + all open tickets.
 */
 SELECT
   FORMAT(f.dateoccured, 'yyyy-MM') AS ym,
@@ -24,4 +27,5 @@ JOIN REQUESTTYPE rt ON rt.RTid = f.requesttypenew
 WHERE f.fdeleted = f.fmergedintofaultid
   AND rt.RTIsProject = 0 AND rt.RTIsOpportunity = 0
   AND f.dateoccured >= '2025-01-01'  /* EDIT: window start */
+  AND (f.datecleared > f.dateoccured OR f.datecleared IS NULL OR f.datecleared < '1900-01-01')  /* stub filter: drop instant-closed Quick Time stubs */
 GROUP BY FORMAT(f.dateoccured, 'yyyy-MM')

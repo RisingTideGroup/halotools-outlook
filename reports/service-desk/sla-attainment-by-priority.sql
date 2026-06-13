@@ -11,6 +11,10 @@ NOTES:
   - Priority lives in faults.seriousness (raw int). Lower usually = higher urgency;
     label mapping left raw so it stays MSP-agnostic.
   - pct_met is over (met + breached), i.e. only SLA-bearing tickets.
+  - STUB FILTER: instant-closed "Quick Time" stubs (datecleared = dateoccured) are
+    time-log rows, not real lifecycle tickets (~90% of the cleared reactive set), so
+    they are excluded from this SLA-attainment count. Predicate keeps real closed
+    tickets and all open tickets, drops instant-closed stubs.
 */
 SELECT
   f.seriousness AS priority,
@@ -24,4 +28,5 @@ JOIN REQUESTTYPE rt ON rt.RTid = f.requesttypenew
 WHERE f.fdeleted = f.fmergedintofaultid
   AND rt.RTIsProject = 0 AND rt.RTIsOpportunity = 0
   AND f.dateoccured >= '2025-01-01'  /* EDIT: window start */
+  AND (f.datecleared > f.dateoccured OR f.datecleared IS NULL OR f.datecleared < '1900-01-01')  /* stub filter: drop instant-closed Quick Time stubs */
 GROUP BY f.seriousness

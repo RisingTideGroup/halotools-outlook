@@ -11,6 +11,9 @@ NOTES:
   - category2 is the primary category field; blank -> '(uncategorised)'.
   - Because category2 is sparsely filled on reactive tickets here, most SLA-bearing
     rows will land in '(uncategorised)' - that itself is the finding.
+  - STUB FILTER: instant-closed "Quick Time" stubs (datecleared = dateoccured) are
+    time-log rows, not real lifecycle tickets, so they are excluded from this
+    SLA-attainment count. Keeps real closed + all open tickets.
 */
 SELECT TOP 50
   CASE WHEN LTRIM(RTRIM(ISNULL(f.category2,''))) = '' THEN '(uncategorised)' ELSE f.category2 END AS category,
@@ -24,6 +27,7 @@ JOIN REQUESTTYPE rt ON rt.RTid = f.requesttypenew
 WHERE f.fdeleted = f.fmergedintofaultid
   AND rt.RTIsProject = 0 AND rt.RTIsOpportunity = 0
   AND f.dateoccured >= '2025-01-01'  /* EDIT: window start */
+  AND (f.datecleared > f.dateoccured OR f.datecleared IS NULL OR f.datecleared < '1900-01-01')  /* stub filter: drop instant-closed Quick Time stubs */
 GROUP BY CASE WHEN LTRIM(RTRIM(ISNULL(f.category2,''))) = '' THEN '(uncategorised)' ELSE f.category2 END
 HAVING SUM(CASE WHEN f.Slastate IN ('I','O') THEN 1 ELSE 0 END) >= 5  /* EDIT: min SLA tickets */
 ORDER BY pct_met ASC

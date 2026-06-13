@@ -11,6 +11,9 @@ NOTES:
   - Slastate: 'I' met, 'O' breached, ''/NULL no SLA (excluded from rate).
   - Client = AREA (area.aareadesc), joined area.aarea = faults.areaint.
   - Ordered by pct_met ascending so the worst attainment is at the top.
+  - STUB FILTER: instant-closed "Quick Time" stubs (datecleared = dateoccured) are
+    time-log rows, not real lifecycle tickets, so they are excluded from this
+    SLA-attainment count. Keeps real closed + all open tickets.
 */
 SELECT TOP 100
   ar.aareadesc AS client,
@@ -25,6 +28,7 @@ JOIN AREA ar ON ar.aarea = f.areaint
 WHERE f.fdeleted = f.fmergedintofaultid
   AND rt.RTIsProject = 0 AND rt.RTIsOpportunity = 0
   AND f.dateoccured >= '2025-01-01'  /* EDIT: window start */
+  AND (f.datecleared > f.dateoccured OR f.datecleared IS NULL OR f.datecleared < '1900-01-01')  /* stub filter: drop instant-closed Quick Time stubs */
 GROUP BY ar.aareadesc
 HAVING SUM(CASE WHEN f.Slastate IN ('I','O') THEN 1 ELSE 0 END) >= 5  /* EDIT: min SLA tickets */
 ORDER BY pct_met ASC

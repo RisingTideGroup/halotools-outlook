@@ -18,11 +18,16 @@ NOTES:
    so shared tickets don't double-count the closer's hours.
  - Excludes bot agents and deleted/merged tickets. datecleared > sentinel ensures
    only genuinely closed tickets count.
+ - STUB FILTER: "resolved" is a conditional count (datecleared > dateoccured) so
+   instant-closed "Quick Time" stubs - time-log rows, ~90% of the cleared reactive set -
+   do NOT inflate the resolved lifecycle count. They are deliberately KEPT in the row
+   population so their logged hours still flow into hrs_logged (legitimate work) and
+   into tickets_touched (an activity measure). Only the resolved column is stub-filtered.
 */
 SELECT TOP 1000
     u.uname                                                AS tech,
     CONVERT(char(7), f.datecleared, 126)                   AS ym,
-    COUNT(*)                                               AS resolved,
+    SUM(CASE WHEN f.datecleared > f.dateoccured THEN 1 ELSE 0 END)  AS resolved,  /* stub filter: instant-closed Quick Time stubs excluded from the resolved count only */
     CAST(SUM(ISNULL(t.hrs,0)) AS decimal(12,1))            AS hrs_logged,
     COUNT(DISTINCT f.Faultid)                              AS tickets_touched
 FROM FAULTS f

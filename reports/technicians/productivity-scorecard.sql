@@ -11,7 +11,12 @@ PARAMS:       @from / @to date window  -- EDIT the two date literals below.
 NOTES:
  - Tech = UNAME (uname.unum = whoagentid on the action; clearwhoint on the fault).
  - "resolved" counts tickets this tech closed (Clearwhoint) in the window,
-   identified by datecleared being set (> '1900-01-01').
+   identified by datecleared being set AND datecleared > dateoccured. The
+   datecleared > dateoccured stub filter drops instant-closed "Quick Time" stubs
+   (~90% of the cleared reactive set) so the resolved count reflects genuine
+   lifecycle closes. NOTE: the stub filter applies ONLY to the resolved count -
+   the hours columns (hrs_logged / billable / nonbillable) deliberately include
+   Quick Time time, which is legitimately logged work.
  - Bot/automation agents are excluded via COALESCE(uisapiagent,0)=0. IMPORTANT:
    in this schema uisapiagent is NULL/empty for real techs and only True for
    bots, so a plain "= 0" test wrongly excludes everyone -- always COALESCE.
@@ -26,6 +31,7 @@ SELECT TOP 1000
     COUNT(DISTINCT CASE WHEN f.Clearwhoint = u.Unum
                          AND f.datecleared IS NOT NULL
                          AND f.datecleared > '1900-01-01'
+                         AND f.datecleared > f.dateoccured  /* stub filter: drop instant-closed Quick Time stubs from the resolved count only */
                         THEN f.Faultid END)                          AS resolved,
     COUNT(*)                                                         AS actions_logged,
     COUNT(DISTINCT a.Faultid)                                        AS tickets_touched,

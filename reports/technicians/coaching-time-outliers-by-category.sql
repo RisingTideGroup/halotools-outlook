@@ -20,6 +20,10 @@ NOTES:
  - Compares like-for-like: a tech is only "slow" relative to the SAME category's
    team median, so category mix differences don't create false positives.
  - tickets = how many the tech resolved in that category (evidence weight).
+ - STUB FILTER: instant-closed "Quick Time" stubs (datecleared = dateoccured) are
+   time-log rows with ~0 resolution span, not real lifecycle tickets; they would
+   collapse the medians. Excluded via datecleared > dateoccured in BOTH inner queries
+   (keep the two in sync). This is a pure resolution-time report, no hours columns.
  - Bot agents and deleted/merged tickets excluded.
  - To focus on reactive support only, add to BOTH inner queries:
      JOIN REQUESTTYPE rt ON rt.RTid = f.Requesttype
@@ -49,6 +53,7 @@ FROM (
         WHERE f.datecleared >= '2026-03-01'   /* EDIT: window start (inclusive) */
           AND f.datecleared <  '2026-06-01'   /* EDIT: window end   (exclusive) */
           AND f.dateoccured > '1900-01-01'
+          AND f.datecleared > f.dateoccured   /* stub filter: drop instant-closed Quick Time stubs */
           AND COALESCE(f.FDeleted,0) = 0
           AND COALESCE(f.FMergedIntoFaultid,0) = 0
           AND COALESCE(u.uisapiagent,0) = 0
@@ -68,6 +73,7 @@ JOIN (
         WHERE f.datecleared >= '2026-03-01'   /* EDIT: keep in sync with above */
           AND f.datecleared <  '2026-06-01'   /* EDIT: keep in sync with above */
           AND f.dateoccured > '1900-01-01'
+          AND f.datecleared > f.dateoccured   /* stub filter: drop instant-closed Quick Time stubs */
           AND COALESCE(f.FDeleted,0) = 0
           AND COALESCE(f.FMergedIntoFaultid,0) = 0
           AND COALESCE(u.uisapiagent,0) = 0
