@@ -784,3 +784,91 @@ export interface TicketBacklog {
     firstResponseState: string;
   }[];
 }
+
+// ---------- Similarity / embeddings (FaultVectorScore, method 1) ----------
+
+/** One approximate recurring-problem cluster — a group of similar reactive
+ *  tickets sharing a lowest-faultid anchor. `avgResolutionHours` is the mean
+ *  wall-clock resolve time over resolved members; `distinctResolvers` is a
+ *  handling-consistency signal (many resolvers for one recurring problem =
+ *  knowledge not captured). */
+export interface RecurringProblemCluster {
+  anchorFaultId: number;
+  representativeSummary: string;
+  ticketCount: number;
+  distinctClients: number;
+  totalHoursLogged: number;
+  avgResolutionHours: number | null;
+  distinctResolvers: number;
+  avgScore: number | null;
+}
+
+export interface RecurringProblemClusters {
+  window: ServiceWindow;
+  minScore: number;
+  /** Notes that clustering is an anchor approximation, not transitive closure. */
+  approximationNote: string;
+  clusters: RecurringProblemCluster[];
+}
+
+/** An open ticket and its highest-scoring near-duplicate neighbour (merge /
+ *  double-logging candidate). `matchedState` says whether the match is still
+ *  open or already closed. */
+export interface DuplicateTicketMatch {
+  openTicketId: number;
+  openSummary: string;
+  client: string;
+  ageDays: number;
+  matchedTicketId: number;
+  matchedSummary: string;
+  matchedState: "open" | "closed";
+  score: number | null;
+}
+
+export interface DuplicateTickets {
+  scope: TicketScope;
+  minScore: number;
+  duplicates: DuplicateTicketMatch[];
+}
+
+/** A client who repeatedly logs the same issue. `recurringPairCount` is the
+ *  number of high-similarity same-client ticket pairs; `distinctTickets` the
+ *  tickets those pairs span. */
+export interface ClientDejaVuRow {
+  clientId: number;
+  client: string;
+  recurringPairCount: number;
+  distinctTickets: number;
+  totalHoursLogged: number;
+}
+
+export interface ClientDejaVu {
+  window: ServiceWindow;
+  minScore: number;
+  clients: ClientDejaVuRow[];
+}
+
+/** One resolved neighbour of a target ticket. */
+export interface SimilarTicketNeighbour {
+  faultId: number;
+  summary: string;
+  score: number | null;
+  resolverId: number | null;
+  resolver: string | null;
+  resolutionHours: number | null;
+  category2: string | null;
+  csat: number | null;
+}
+
+/** Per-ticket nearest-resolved-neighbour insight: the neighbours plus a
+ *  prediction block (median effort, most-common category, top resolvers). */
+export interface SimilarTicketInsights {
+  faultId: number;
+  neighbours: SimilarTicketNeighbour[];
+  summary: {
+    neighbourCount: number;
+    predictedResolutionHoursMedian: number | null;
+    predictedCategory: string | null;
+    suggestedResolvers: { agentId: number; agent: string; neighbourCount: number }[];
+  };
+}

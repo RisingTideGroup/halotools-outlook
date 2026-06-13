@@ -43,6 +43,14 @@ import type {
   TechnicianRiskSignals,
   TechnicianRiskRow,
   TicketBacklog,
+  RecurringProblemClusters,
+  RecurringProblemCluster,
+  DuplicateTickets,
+  DuplicateTicketMatch,
+  ClientDejaVu,
+  ClientDejaVuRow,
+  SimilarTicketInsights,
+  SimilarTicketNeighbour,
 } from "./types.js";
 
 class HaloApiError extends Error {
@@ -1851,6 +1859,380 @@ order by count(*) desc`;
     window: { startdate: start, enddate: end, scope },
     note: "Signals to investigate, not verdicts. Cross-read with throughput and context — e.g. zero-time-closes can mean under-logging, not idleness; after-hours and category-level coaching signals live in the reports/technicians SQL library.",
     technicians,
+  };
+}
+
+// ---------- Analytics: similarity / embeddings (SQL-backed) ----------
+//
+// These compose Halo's ticket-embedding similarity graph (table
+// FaultVectorScore) into recurring-problem / duplicate / per-ticket-neighbour
+// insights. Schema idioms (in addition to the service-delivery ones above):
+//   FaultVectorScore.FVSfaultid          -> the source ticket (FAULTS.faultid)
+//   FaultVectorScore.FVSSimiliarfaultid  -> a similar ticket (always a real FAULTS.faultid)
+//   FaultVectorScore.FVSScore            -> cosine similarity (~0.62–1.0)
+//   FaultVectorScore.fvsSearchMethod     -> embedding method; we ONLY trust method 1.
+//
+// CRITICAL: always filter `fvsSearchMethod = 1`. Other methods are stale /
+// garbage (method '' scores unrelated tickets at 1.0). The graph is directional
+// (source -> similar); for clustering we treat edges as undirected.
+
+/**
+ * Non-actionable-noise predicate on FAULTS.Symptom. The strongest similar
+ * clusters in an embedding graph are auto-replies, OTP / verification emails,
+ * test tickets, recurring review / newsletter notifications, etc. — high
+ * similarity but zero value as a recurring-problem signal. We filter these on
+ * BOTH endpoints of every pair. Heuristic, deliberately conservative.
+ *
+ * EDIT: tune these LIKE patterns per tenant if a noisy auto-generated subject
+ * line is dominating the clusters. Kept internal (no param) so the tools stay
+ * simple; this is the one place to change it.
+ *
+ * `alias` is the FAULTS table alias to apply it to (e.g. "fa", "fb", "f").
+ */
+function noiseFilter(alias: string): string {
+  const s = `cast(${alias}.Symptom as nvarchar(400))`;
+  return (
+    `(${s} is not null` +
+    ` and ${s} not like 'Automatic reply%'` +
+    ` and ${s} not like 'Re: Automatic reply%'` +
+    ` and ${s} not like '%verification code%'` +
+    ` and ${s} not like '% is your %code%'` +
+    ` and ${s} not like 'Test%'` +
+    ` and ${s} not like '%Monthly Support Review%'` +
+    ` and ${s} not like '%Newsletter%'` +
+    ` and ${s} not like 'A new sms ticket received%')`
+  );
+}
+
+/** Median of a numeric array (linear interpolation between the two middle
+ *  values for even counts). Null for an empty set. Used to summarise neighbour
+ *  resolution effort in getSimilarTicketInsights — Report Center has no clean
+ *  single-statement grouped median, so we compute it in TS from the rows. */
+function median(values: number[]): number | null {
+  const xs = values.filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+  if (xs.length === 0) return null;
+  const mid = Math.floor(xs.length / 2);
+  return xs.length % 2 ? xs[mid] : round2((xs[mid - 1] + xs[mid]) / 2);
+}
+
+/**
+ * Cluster semantically-similar reactive tickets to surface recurring problems
+ * worth a KB article / automation / problem record, plus a handling-consistency
+ * signal (how many distinct resolvers, how spread the resolution time is).
+ *
+ * Uses Halo's ticket embeddings (FaultVectorScore, method 1 only), noise-filtered
+ * on both endpoints.
+ *
+ * APPROXIMATE CLUSTERING: a true connected-component (transitive-closure)
+ * clustering needs a recursive CTE, which Report Center forbids. We approximate:
+ * for each undirected edge (score >= minScore, both endpoints reactive +
+ * NOT_STUB + non-noise + in-window on dateoccured) the cluster_anchor is the
+ * LEAST of the two faultids; tickets are grouped by that anchor. Two tickets
+ * only land in the same cluster if they share a direct lowest-id neighbour, so
+ * a long similarity chain can fragment into several anchors. Good enough to spot
+ * recurring themes; not a guarantee of one row per real-world problem.
+ *
+ * Per cluster: anchor faultid, a representative Symptom, distinct ticket count,
+ * distinct clients, total hours logged (ACTIONS.timetaken over the distinct
+ * member tickets), average resolution hours, distinct resolver count, and
+ * average edge score. Ranked by (ticket count × total hours) desc.
+ */
+export async function getRecurringProblemClusters(
+  startdate?: string,
+  enddate?: string,
+  minScore = 0.85,
+  limit = 25,
+): Promise<RecurringProblemClusters> {
+  const { start, end } = resolveWindow(startdate, enddate, 365);
+  const ex = exclusiveEnd(end);
+  const top = Math.max(1, Math.trunc(limit));
+  const ms = Number.isFinite(minScore) ? minScore : 0.85;
+  const anchor = "case when v.FVSfaultid < v.FVSSimiliarfaultid then v.FVSfaultid else v.FVSSimiliarfaultid end";
+  // Shared edge predicate: method 1, score gate, both endpoints reactive +
+  // NOT_STUB + non-noise + in-window on dateoccured.
+  const edgeWhere =
+    `v.fvsSearchMethod = 1 and v.FVSScore >= ${ms}` +
+    ` and rta.RTIsProject = 0 and rta.RTIsOpportunity = 0 and rtb.RTIsProject = 0 and rtb.RTIsOpportunity = 0` +
+    ` and (fa.datecleared > fa.dateoccured or fa.datecleared is null or fa.datecleared < '1900-01-01')` +
+    ` and (fb.datecleared > fb.dateoccured or fb.datecleared is null or fb.datecleared < '1900-01-01')` +
+    ` and fa.dateoccured >= '${start}' and fa.dateoccured < '${ex}'` +
+    ` and fb.dateoccured >= '${start}' and fb.dateoccured < '${ex}'` +
+    ` and ${noiseFilter("fa")} and ${noiseFilter("fb")}`;
+  const edgeJoins =
+    `from FaultVectorScore v` +
+    ` join faults fa on fa.faultid = v.FVSfaultid join requesttype rta on fa.RequestTypeNew = rta.RTid` +
+    ` join faults fb on fb.faultid = v.FVSSimiliarfaultid join requesttype rtb on fb.RequestTypeNew = rtb.RTid`;
+
+  // Distinct (anchor, member) so per-ticket aggregates don't fan out across
+  // multiple edges sharing the same anchor; avg score comes from a separate
+  // per-anchor edge aggregate.
+  const sql = `select top ${top}
+  mem.cluster_anchor,
+  max(cast(f.Symptom as nvarchar(400))) as representative,
+  count(*) as ticket_count,
+  count(distinct f.areaint) as distinct_clients,
+  cast(sum(coalesce(h.hrs, 0)) as decimal(12,2)) as total_hours,
+  cast(avg(case when f.datecleared > f.dateoccured then datediff(minute, f.dateoccured, f.datecleared) / 60.0 end) as decimal(10,2)) as avg_resolution_hours,
+  count(distinct f.clearwhoint) as distinct_resolvers,
+  max(sc.avg_score) as avg_score
+from (
+  select ${anchor} as cluster_anchor, v.FVSfaultid as member ${edgeJoins} where ${edgeWhere}
+  union
+  select ${anchor} as cluster_anchor, v.FVSSimiliarfaultid as member ${edgeJoins} where ${edgeWhere}
+) mem
+join faults f on f.faultid = mem.member
+left join (select faultid, sum(timetaken) as hrs from actions group by faultid) h on h.faultid = mem.member
+join (
+  select ${anchor} as cluster_anchor, cast(avg(v.FVSScore) as decimal(6,4)) as avg_score
+  ${edgeJoins} where ${edgeWhere}
+  group by ${anchor}
+) sc on sc.cluster_anchor = mem.cluster_anchor
+group by mem.cluster_anchor
+order by count(*) * sum(coalesce(h.hrs, 0)) desc`;
+
+  const rows = await reportRows(sql);
+  const clusters: RecurringProblemCluster[] = rows.map((r) => ({
+    anchorFaultId: num(r.cluster_anchor),
+    representativeSummary: String(r.representative ?? ""),
+    ticketCount: num(r.ticket_count),
+    distinctClients: num(r.distinct_clients),
+    totalHoursLogged: round2(num(r.total_hours)),
+    avgResolutionHours: numOrNull(r.avg_resolution_hours),
+    distinctResolvers: num(r.distinct_resolvers),
+    avgScore: numOrNull(r.avg_score),
+  }));
+  return {
+    window: { startdate: start, enddate: end, scope: "reactive" },
+    minScore: ms,
+    approximationNote:
+      "Clustering is approximate: tickets are grouped by the lowest faultid among each similar pair (no transitive closure — Report Center forbids recursive CTEs), so a long similarity chain can fragment across anchors. Uses Halo's ticket embeddings (method 1), noise-filtered.",
+    clusters,
+  };
+}
+
+/**
+ * Open tickets that are near-duplicates of another ticket — merge candidates /
+ * double-logging detection. For each OPEN ticket (status not in 8/9, in scope,
+ * non-noise) finds its single highest-scoring method-1 neighbour at or above
+ * minScore (default 0.9 = near-duplicate) in either direction, and reports the
+ * matched ticket's id / summary / state (open or closed) / score. Ordered by
+ * score desc.
+ *
+ * Uses Halo's ticket embeddings (method 1 only), noise-filtered.
+ */
+export async function getDuplicateTickets(
+  scope: TicketScope = "reactive",
+  minScore = 0.9,
+  limit = 50,
+): Promise<DuplicateTickets> {
+  const top = Math.max(1, Math.trunc(limit));
+  const ms = Number.isFinite(minScore) ? minScore : 0.9;
+  const rtJoin = scope === "reactive" ? "join requesttype rto on o.RequestTypeNew = rto.RTid" : "";
+  const reactive = scope === "reactive" ? "and rto.RTIsProject = 0 and rto.RTIsOpportunity = 0" : "";
+  const edgeWhere = `v.fvsSearchMethod = 1 and v.FVSScore >= ${ms}`;
+
+  const sql = `select top ${top}
+  o.faultid as open_ticket_id,
+  cast(o.Symptom as nvarchar(300)) as open_summary,
+  ao.aareadesc as client,
+  datediff(day, o.dateoccured, getdate()) as age_days,
+  m.match_id as matched_ticket_id,
+  m.match_summary as matched_summary,
+  m.match_state as matched_state,
+  cast(m.score as decimal(6,4)) as score
+from faults o
+${rtJoin}
+join area ao on ao.aarea = o.areaint
+join (
+  select open_id, match_id, score, match_summary, match_state,
+         row_number() over (partition by open_id order by score desc, match_id asc) as rn
+  from (
+    select v.FVSfaultid as open_id, v.FVSSimiliarfaultid as match_id, v.FVSScore as score,
+           cast(fm.Symptom as nvarchar(300)) as match_summary,
+           case when fm.status in (8,9) then 'closed' else 'open' end as match_state
+    from FaultVectorScore v join faults fm on fm.faultid = v.FVSSimiliarfaultid
+    where ${edgeWhere}
+    union all
+    select v.FVSSimiliarfaultid as open_id, v.FVSfaultid as match_id, v.FVSScore as score,
+           cast(fm.Symptom as nvarchar(300)) as match_summary,
+           case when fm.status in (8,9) then 'closed' else 'open' end as match_state
+    from FaultVectorScore v join faults fm on fm.faultid = v.FVSfaultid
+    where ${edgeWhere}
+  ) edges
+) m on m.open_id = o.faultid and m.rn = 1
+where o.status not in (8,9) ${reactive} and ${noiseFilter("o")}
+order by m.score desc`;
+
+  const rows = await reportRows(sql);
+  const duplicates: DuplicateTicketMatch[] = rows.map((r) => ({
+    openTicketId: num(r.open_ticket_id),
+    openSummary: String(r.open_summary ?? ""),
+    client: String(r.client ?? ""),
+    ageDays: num(r.age_days),
+    matchedTicketId: num(r.matched_ticket_id),
+    matchedSummary: String(r.matched_summary ?? ""),
+    matchedState: String(r.matched_state ?? "") as "open" | "closed",
+    score: numOrNull(r.score),
+  }));
+  return { scope, minScore: ms, duplicates };
+}
+
+/**
+ * Clients who repeatedly log the SAME issue — chronic-pain / root-cause /
+ * training targets. Counts high-similarity undirected pairs where BOTH tickets
+ * belong to the same client (AREA) within the window (reactive + non-noise).
+ * Per client: number of recurring pairs, distinct tickets involved, total hours
+ * logged across those tickets. Ranked by pair count desc.
+ *
+ * Same-client recurrence is the signal here; cross-client similarity (a problem
+ * affecting many customers) is what getRecurringProblemClusters surfaces instead.
+ *
+ * Uses Halo's ticket embeddings (method 1 only), noise-filtered.
+ */
+export async function getClientDejaVu(
+  startdate?: string,
+  enddate?: string,
+  minScore = 0.85,
+  limit = 50,
+): Promise<ClientDejaVu> {
+  const { start, end } = resolveWindow(startdate, enddate, 365);
+  const ex = exclusiveEnd(end);
+  const top = Math.max(1, Math.trunc(limit));
+  const ms = Number.isFinite(minScore) ? minScore : 0.85;
+  // One row per same-client undirected pair (FVSfaultid < FVSSimiliarfaultid
+  // dedupes direction). cross apply expands to the two member tickets so we can
+  // count distinct tickets and sum their hours; hours are summed over distinct
+  // (client, member) to avoid a ticket in several pairs being counted twice.
+  const sql = `select top ${top}
+  p.areaint as client_id,
+  max(a.aareadesc) as client,
+  max(p.pair_count) as recurring_pair_count,
+  count(*) as distinct_tickets,
+  cast(sum(coalesce(h.hrs, 0)) as decimal(12,2)) as total_hours
+from (
+  select areaint, member, max(pair_count) as pair_count from (
+    select pr.areaint, t.member, pr.pair_count
+    from (
+      select fa.areaint, v.FVSfaultid as fa_id, v.FVSSimiliarfaultid as fb_id,
+             count(*) over (partition by fa.areaint) as pair_count
+      from FaultVectorScore v
+      join faults fa on fa.faultid = v.FVSfaultid join requesttype rta on fa.RequestTypeNew = rta.RTid
+      join faults fb on fb.faultid = v.FVSSimiliarfaultid join requesttype rtb on fb.RequestTypeNew = rtb.RTid
+      where v.fvsSearchMethod = 1 and v.FVSScore >= ${ms} and v.FVSfaultid < v.FVSSimiliarfaultid
+        and fa.areaint = fb.areaint
+        and rta.RTIsProject = 0 and rta.RTIsOpportunity = 0 and rtb.RTIsProject = 0 and rtb.RTIsOpportunity = 0
+        and fa.dateoccured >= '${start}' and fa.dateoccured < '${ex}'
+        and fb.dateoccured >= '${start}' and fb.dateoccured < '${ex}'
+        and ${noiseFilter("fa")} and ${noiseFilter("fb")}
+    ) pr
+    cross apply (values (pr.fa_id), (pr.fb_id)) t(member)
+  ) expanded
+  group by areaint, member
+) p
+join area a on a.aarea = p.areaint
+left join (select faultid, sum(timetaken) as hrs from actions group by faultid) h on h.faultid = p.member
+group by p.areaint
+order by max(p.pair_count) desc`;
+
+  const rows = await reportRows(sql);
+  const clients: ClientDejaVuRow[] = rows.map((r) => ({
+    clientId: num(r.client_id),
+    client: String(r.client ?? ""),
+    recurringPairCount: num(r.recurring_pair_count),
+    distinctTickets: num(r.distinct_tickets),
+    totalHoursLogged: round2(num(r.total_hours)),
+  }));
+  return {
+    window: { startdate: start, enddate: end, scope: "reactive" },
+    minScore: ms,
+    clients,
+  };
+}
+
+/**
+ * For a single ticket, surface its nearest RESOLVED neighbours so you can route
+ * to whoever solved the same thing before, and predict likely effort / category.
+ * Finds method-1 neighbours (either direction) at score >= 0.8 that are resolved
+ * (status in 8/9, datecleared > dateoccured); returns the top 10 by score with
+ * summary, score, resolver, resolution hours, category2, and CSAT — plus a
+ * summary block: median predicted resolution hours, the most common category2,
+ * and the resolvers who handled the most neighbours.
+ *
+ * Uses Halo's ticket embeddings (method 1 only). Per-ticket lookup, so it is
+ * NOT noise-filtered — you asked about one specific ticket.
+ */
+export async function getSimilarTicketInsights(
+  faultid: number,
+): Promise<SimilarTicketInsights> {
+  const id = Math.trunc(faultid);
+  const sql = `select top 10
+  n.faultid,
+  cast(f.Symptom as nvarchar(300)) as summary,
+  cast(n.score as decimal(6,4)) as score,
+  u.uname as resolver,
+  f.clearwhoint as resolver_id,
+  cast(case when f.datecleared > f.dateoccured then datediff(minute, f.dateoccured, f.datecleared) / 60.0 end as decimal(10,2)) as resolution_hours,
+  f.category2 as category2,
+  try_convert(float, nullif(f.faisatisfactionlevel, '')) as csat
+from (
+  select v.FVSSimiliarfaultid as faultid, v.FVSScore as score from FaultVectorScore v where v.fvsSearchMethod = 1 and v.FVSfaultid = ${id} and v.FVSScore >= 0.8
+  union all
+  select v.FVSfaultid as faultid, v.FVSScore as score from FaultVectorScore v where v.fvsSearchMethod = 1 and v.FVSSimiliarfaultid = ${id} and v.FVSScore >= 0.8
+) n
+join faults f on f.faultid = n.faultid
+left join uname u on f.clearwhoint = u.unum
+where f.status in (8,9) and f.datecleared > f.dateoccured
+order by n.score desc`;
+
+  const rows = await reportRows(sql);
+  const neighbours: SimilarTicketNeighbour[] = rows.map((r) => ({
+    faultId: num(r.faultid),
+    summary: String(r.summary ?? ""),
+    score: numOrNull(r.score),
+    resolverId: numOrNull(r.resolver_id),
+    resolver: r.resolver ? String(r.resolver) : null,
+    resolutionHours: numOrNull(r.resolution_hours),
+    category2: r.category2 ? String(r.category2) : null,
+    csat: numOrNull(r.csat),
+  }));
+
+  // Predicted resolution effort = median of neighbour resolution hours.
+  const predictedResolutionHoursMedian = median(
+    neighbours.map((n) => n.resolutionHours).filter((h): h is number => h != null),
+  );
+  // Predicted category = the most common non-empty category2 among neighbours.
+  const catCounts = new Map<string, number>();
+  for (const n of neighbours) {
+    const c = (n.category2 ?? "").trim();
+    if (c) catCounts.set(c, (catCounts.get(c) ?? 0) + 1);
+  }
+  let predictedCategory: string | null = null;
+  let bestCat = 0;
+  for (const [c, n] of catCounts) {
+    if (n > bestCat) { bestCat = n; predictedCategory = c; }
+  }
+  // Suggested resolvers = the agents who handled the most neighbours, by count.
+  const resolverCounts = new Map<number, { name: string; count: number }>();
+  for (const n of neighbours) {
+    if (n.resolverId == null || n.resolverId <= 0) continue;
+    const b = resolverCounts.get(n.resolverId) ?? { name: n.resolver ?? "", count: 0 };
+    b.count += 1;
+    if (!b.name && n.resolver) b.name = n.resolver;
+    resolverCounts.set(n.resolverId, b);
+  }
+  const suggestedResolvers = Array.from(resolverCounts.entries())
+    .map(([agentId, b]) => ({ agentId, agent: b.name, neighbourCount: b.count }))
+    .sort((a, b) => b.neighbourCount - a.neighbourCount);
+
+  return {
+    faultId: id,
+    neighbours,
+    summary: {
+      neighbourCount: neighbours.length,
+      predictedResolutionHoursMedian,
+      predictedCategory,
+      suggestedResolvers,
+    },
   };
 }
 

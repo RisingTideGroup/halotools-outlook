@@ -27,6 +27,10 @@ import { registerGetClientHealthScorecard } from "./getClientHealthScorecard.js"
 import { registerGetTicketBacklog } from "./getTicketBacklog.js";
 import { registerGetCategoryInsights } from "./getCategoryInsights.js";
 import { registerGetTechnicianRiskSignals } from "./getTechnicianRiskSignals.js";
+import { registerGetRecurringProblemClusters } from "./getRecurringProblemClusters.js";
+import { registerGetDuplicateTickets } from "./getDuplicateTickets.js";
+import { registerGetClientDejaVu } from "./getClientDejaVu.js";
+import { registerGetSimilarTicketInsights } from "./getSimilarTicketInsights.js";
 
 /** Map of tool name → register function so suppression can decide per-tool
  *  whether to wire it up. The order here defines the order the agent sees
@@ -62,6 +66,12 @@ const TOOL_REGISTRY: Array<{ name: string; register: (s: McpServer) => void }> =
   { name: "getTicketBacklog", register: registerGetTicketBacklog },
   { name: "getCategoryInsights", register: registerGetCategoryInsights },
   { name: "getTechnicianRiskSignals", register: registerGetTechnicianRiskSignals },
+
+  // Analytics — similarity/embeddings (ticket vector graph)
+  { name: "getRecurringProblemClusters", register: registerGetRecurringProblemClusters },
+  { name: "getDuplicateTickets", register: registerGetDuplicateTickets },
+  { name: "getClientDejaVu", register: registerGetClientDejaVu },
+  { name: "getSimilarTicketInsights", register: registerGetSimilarTicketInsights },
 
   // Database access + REST escape hatch
   { name: "listReports", register: registerListReports },
