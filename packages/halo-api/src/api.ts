@@ -55,6 +55,11 @@ import type {
   CategorizationTicket,
   HaloCategory,
   NoiseTicketAnalysis,
+  ProjectProfitability,
+  ProjectProfitabilityRow,
+  ProjectBillingModel,
+  ProjectPortfolio,
+  ResourceForecast,
   SimilarTicketNeighbour,
 } from "./types.js";
 
@@ -2607,6 +2612,229 @@ export async function triggerTicketAiSummary(ticketId: number): Promise<unknown>
     method: "POST",
     body: JSON.stringify([{ id: ticketId, _re_index: true }]),
   });
+}
+
+// ---------- Project management / profitability / resourcing ----------
+//
+// Projects = FAULTS where REQUESTTYPE.RTIsProject=1 AND the main-project test
+// (fmainprojectid IS NULL/0/=faultid). Time rolls up via ACTIONS.AProjectID =
+// main project faultid (== FAULTS.FProjectTimeActual). Money links via
+// FAULTS.fcontractid. Revenue has THREE sources, detected per project:
+//   retainer  -> SUM(PREPAYHISTORY.PPAmount>0) on the contract (dominant model)
+//   T&M       -> SUM(ACTIONS.ActionChargeAmount) over the project
+//   else      -> fixed-fee/internal (lump invoice lines are often unlinked here)
+// Cost = ACTIONS hours × agent ucostPrice (pay-type-adjusted: CFagentPayType 1 =
+// annual/÷2080, 2 or blank = hourly). Cost coverage is partial (only some agents
+// are costed) — always surface costCoveragePct before trusting margin.
+
+const PROJECT_MAIN = "(p.fmainprojectid is null or p.fmainprojectid = 0 or p.fmainprojectid = p.faultid)";
+const AGENT_HOURLY_COST =
+  "case when try_convert(int, u.CFagentPayType) = 1 then coalesce(try_convert(float, nullif(cast(u.ucostPrice as nvarchar(40)), '')), 0) / 2080.0 else coalesce(try_convert(float, nullif(cast(u.ucostPrice as nvarchar(40)), '')), 0) end";
+
+/**
+ * Per-project profitability with auto-detected billing model. For each main
+ * project (default trailing — actually all active with hours), picks the revenue
+ * source by model (retainer prepay top-ups → T&M charges → else unmapped),
+ * computes hours (FProjectTimeActual), pay-type-adjusted labour cost with a
+ * coverage %, effective rate, and gross margin (flagged reliable only when cost
+ * coverage is high). Flags over-servicing (hours >> estimate). Sorted by hours.
+ */
+export async function getProjectProfitability(
+  limit = 50,
+  minHours = 1,
+): Promise<ProjectProfitability> {
+  const top = Math.max(1, Math.min(500, Math.trunc(limit)));
+  const mh = Number.isFinite(minHours) ? minHours : 1;
+  const sql = `select top ${top}
+  p.faultid,
+  left(cast(p.Symptom as nvarchar(90)), 90) as project,
+  a.aareadesc as client,
+  cast(p.FProjectTimeActual as decimal(12,2)) as hours,
+  cast(p.estimate as decimal(10,2)) as est_hrs,
+  cast(coalesce(pp.prepay_rev, 0) as decimal(12,2)) as prepay_rev,
+  cast(coalesce(act.tm_charge, 0) as decimal(12,2)) as tm_charge,
+  cast(coalesce(act.labour_cost, 0) as decimal(12,2)) as labour_cost,
+  cast(coalesce(act.costed_hours, 0) as decimal(12,2)) as costed_hours
+from faults p
+join requesttype rt on p.requesttypenew = rt.RTid
+left join area a on a.aarea = p.areaint
+left join (select PPContractID, sum(case when PPAmount > 0 then PPAmount else 0 end) as prepay_rev from PREPAYHISTORY group by PPContractID) pp on pp.PPContractID = p.fcontractid
+left join (
+  select ac.AProjectID,
+    sum(ac.ActionChargeAmount) as tm_charge,
+    sum(ac.timetaken * (${AGENT_HOURLY_COST})) as labour_cost,
+    sum(case when coalesce(try_convert(float, nullif(cast(u.ucostPrice as nvarchar(40)), '')), 0) > 0 then ac.timetaken else 0 end) as costed_hours
+  from actions ac join uname u on u.unum = ac.whoagentid
+  group by ac.AProjectID
+) act on act.AProjectID = p.faultid
+where rt.RTIsProject = 1 and ${PROJECT_MAIN}
+  and coalesce(p.fdeleted,0) = coalesce(p.fmergedintofaultid,0)
+  and p.FProjectTimeActual > ${mh}
+order by p.FProjectTimeActual desc`;
+
+  const rows = await reportRows(sql);
+  const projects: ProjectProfitabilityRow[] = rows.map((r) => {
+    const hours = num(r.hours);
+    const prepay = num(r.prepay_rev);
+    const tm = num(r.tm_charge);
+    const labourCost = round2(num(r.labour_cost));
+    const costedHours = num(r.costed_hours);
+    const est = num(r.est_hrs);
+    const estimateHours = est > 1 ? est : null; // <=1 is the 0.75 template placeholder
+    const coverage = hours > 0 ? round2((costedHours / hours) * 100) : null;
+
+    let model: ProjectBillingModel;
+    let revenue: number;
+    let source: string;
+    if (prepay > 0) {
+      model = "retainer";
+      revenue = prepay;
+      source = "prepay block top-ups (contract-level; may fund >1 project)";
+    } else if (tm > 0) {
+      model = "time-and-materials";
+      revenue = tm;
+      source = "ACTIONS charge amount (T&M)";
+    } else {
+      model = "fixed-fee-or-internal";
+      revenue = 0;
+      source = "no prepay/T&M signal — fixed-fee (often unlinked) or internal";
+    }
+    const marginReliable = coverage != null && coverage >= 80;
+    const grossMargin = revenue > 0 ? round2(revenue - labourCost) : null;
+    return {
+      projectId: num(r.faultid),
+      project: String(r.project ?? "").trim(),
+      client: String(r.client ?? ""),
+      billingModel: model,
+      revenue: round2(revenue),
+      revenueSource: source,
+      hours,
+      estimateHours,
+      labourCost,
+      costCoveragePct: coverage,
+      effectiveRate: revenue > 0 && hours > 0 ? round2(revenue / hours) : null,
+      grossMargin,
+      grossMarginPct: grossMargin != null && revenue > 0 ? round2((grossMargin / revenue) * 100) : null,
+      marginReliable,
+      prepayRevenue: round2(prepay),
+      tmCharge: round2(tm),
+      overServiced: estimateHours != null && hours > estimateHours * 1.5,
+    };
+  });
+  return {
+    note:
+      "Billing model auto-detected per project (retainer prepay > T&M charge > fixed/internal). Retainer revenue is the contract's total block top-ups and may span multiple projects on a shared contract. Labour cost is pay-type-adjusted ucostPrice and PARTIAL — trust grossMargin only when marginReliable=true (costCoveragePct>=80). effectiveRate (revenue/hours) is the robust profitability proxy.",
+    projects,
+  };
+}
+
+/**
+ * Project portfolio health board: active main projects with % complete (child
+ * tasks closed / total), rolled-up hours, estimate, age, and status. Optionally
+ * include completed projects. Sorted by child-task count (biggest first).
+ */
+export async function getProjectPortfolio(
+  includeCompleted = false,
+  limit = 100,
+): Promise<ProjectPortfolio> {
+  const top = Math.max(1, Math.min(500, Math.trunc(limit)));
+  const statusFilter = includeCompleted ? "" : "and p.status not in (8,9)";
+  const sql = `select top ${top}
+  p.faultid,
+  left(cast(p.Symptom as nvarchar(90)), 90) as project,
+  a.aareadesc as client,
+  s.tstatusdesc as status,
+  coalesce(ch.child_total, 0) as child_total,
+  coalesce(ch.child_closed, 0) as child_closed,
+  cast(p.FProjectTimeActual as decimal(12,2)) as hours,
+  cast(p.estimate as decimal(10,2)) as est_hrs,
+  datediff(day, p.FProjectStartDate, getdate()) as age_days
+from faults p
+join requesttype rt on p.requesttypenew = rt.RTid
+left join area a on a.aarea = p.areaint
+left join tstatus s on s.Tstatus = p.status
+left join (
+  select c.fmainprojectid as pid,
+    count(*) as child_total,
+    sum(case when c.status in (8,9) then 1 else 0 end) as child_closed
+  from faults c where c.fmainprojectid > 0 and c.faultid <> c.fmainprojectid
+  group by c.fmainprojectid
+) ch on ch.pid = p.faultid
+where rt.RTIsProject = 1 and ${PROJECT_MAIN}
+  and coalesce(p.fdeleted,0) = coalesce(p.fmergedintofaultid,0) ${statusFilter}
+order by coalesce(ch.child_total, 0) desc`;
+
+  const rows = await reportRows(sql);
+  return {
+    projects: rows.map((r) => {
+      const total = num(r.child_total);
+      const closed = num(r.child_closed);
+      const est = num(r.est_hrs);
+      return {
+        projectId: num(r.faultid),
+        project: String(r.project ?? "").trim(),
+        client: String(r.client ?? ""),
+        status: String(r.status ?? ""),
+        childTasks: total,
+        tasksClosed: closed,
+        percentComplete: total > 0 ? round2((closed / total) * 100) : null,
+        hours: round2(num(r.hours)),
+        estimateHours: est > 1 ? est : null,
+        ageDays: numOrNull(r.age_days),
+      };
+    }),
+  };
+}
+
+/**
+ * Forward resource load per technician: booked appointment hours over the next
+ * `weeks` (from APPOINTMENT start/end, excluding all-day and deleted) vs a weekly
+ * capacity target (UNAME.CFAgentRequiredBillableHours, default 40). Flags
+ * over-allocated / under-booked. Excludes bots and the Unassigned pseudo-agent.
+ */
+export async function getResourceForecast(weeks = 4): Promise<ResourceForecast> {
+  const w = Math.max(1, Math.min(26, Math.trunc(weeks)));
+  const start = new Date().toISOString().slice(0, 10);
+  const endD = new Date();
+  endD.setUTCDate(endD.getUTCDate() + w * 7);
+  const end = endD.toISOString().slice(0, 10);
+  const sql = `select
+  u.unum as agent_id,
+  u.uname as agent,
+  count(*) as appointments,
+  cast(sum(datediff(minute, ap.APStartDate, ap.APEndDate) / 60.0) as decimal(12,1)) as scheduled_hours,
+  max(try_convert(float, nullif(cast(u.CFAgentRequiredBillableHours as nvarchar(40)), ''))) as weekly_target
+from APPOINTMENT ap
+join uname u on u.unum = ap.APunum
+where coalesce(ap.APdeleted,0) = 0 and coalesce(ap.APAllDayEvent,0) = 0
+  and coalesce(u.uisapiagent,0) = 0 and u.unum <> 1
+  and ap.APStartDate >= '${start}' and ap.APStartDate < '${end}'
+group by u.unum, u.uname
+order by sum(datediff(minute, ap.APStartDate, ap.APEndDate) / 60.0) desc
+offset 0 rows`;
+
+  const rows = await reportRows(sql);
+  const technicians = rows.map((r) => {
+    const scheduled = round2(num(r.scheduled_hours));
+    const weeklyTarget = numOrNull(r.weekly_target);
+    const capacity = weeklyTarget != null ? round2(weeklyTarget * w) : null;
+    const util = capacity && capacity > 0 ? round2((scheduled / capacity) * 100) : null;
+    let status = "ok";
+    if (util != null) {
+      if (util > 100) status = "over-allocated";
+      else if (util < 40) status = "under-booked";
+    }
+    return {
+      agentId: num(r.agent_id),
+      agent: String(r.agent ?? ""),
+      scheduledHours: scheduled,
+      appointments: num(r.appointments),
+      capacityHours: capacity,
+      utilisationPct: util,
+      status,
+    };
+  });
+  return { startdate: start, weeks: w, technicians };
 }
 
 export { HaloApiError };

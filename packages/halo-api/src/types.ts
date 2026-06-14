@@ -970,3 +970,71 @@ export interface NoiseTicketAnalysis {
   }[];
   byMailbox: { mailboxId: number; tickets: number }[];
 }
+
+// ---------- Project management / profitability / resourcing ----------
+
+export type ProjectBillingModel = "retainer" | "time-and-materials" | "fixed-fee-or-internal";
+
+/** Per-project profitability with auto-detected billing model. Revenue source is
+ *  chosen per project: prepay top-ups (retainer) → ACTIONS charge (T&M) → else
+ *  unmapped. Cost is pay-type-adjusted ucostPrice and is PARTIAL — always read
+ *  costCoveragePct before trusting margin. */
+export interface ProjectProfitabilityRow {
+  projectId: number;
+  project: string;
+  client: string;
+  billingModel: ProjectBillingModel;
+  revenue: number;
+  revenueSource: string;
+  hours: number;
+  estimateHours: number | null;
+  labourCost: number;
+  costCoveragePct: number | null;
+  effectiveRate: number | null;
+  grossMargin: number | null;
+  grossMarginPct: number | null;
+  marginReliable: boolean;
+  prepayRevenue: number;
+  tmCharge: number;
+  overServiced: boolean;
+}
+
+export interface ProjectProfitability {
+  note: string;
+  projects: ProjectProfitabilityRow[];
+}
+
+/** One project in the portfolio health board. */
+export interface ProjectPortfolioRow {
+  projectId: number;
+  project: string;
+  client: string;
+  status: string;
+  childTasks: number;
+  tasksClosed: number;
+  percentComplete: number | null;
+  hours: number;
+  estimateHours: number | null;
+  ageDays: number | null;
+}
+
+export interface ProjectPortfolio {
+  projects: ProjectPortfolioRow[];
+}
+
+/** Per-agent forward resource load: booked appointment hours vs weekly target. */
+export interface ResourceForecastRow {
+  agentId: number;
+  agent: string;
+  scheduledHours: number;
+  appointments: number;
+  capacityHours: number | null;
+  utilisationPct: number | null;
+  status: string;
+}
+
+export interface ResourceForecast {
+  startdate: string;
+  weeks: number;
+  technicians: ResourceForecastRow[];
+}
