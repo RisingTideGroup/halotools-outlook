@@ -21,6 +21,22 @@ import { registerGetTechnicianUtilizationSnapshot } from "./getTechnicianUtiliza
 import { registerGetRevenuePerTechSnapshot } from "./getRevenuePerTechSnapshot.js";
 import { registerGetMrrPerSeatSnapshot } from "./getMrrPerSeatSnapshot.js";
 import { registerGetMspKpis } from "./getMspKpis.js";
+import { registerGetServiceDeskHealth } from "./getServiceDeskHealth.js";
+import { registerGetTechnicianScorecard } from "./getTechnicianScorecard.js";
+import { registerGetClientHealthScorecard } from "./getClientHealthScorecard.js";
+import { registerGetTicketBacklog } from "./getTicketBacklog.js";
+import { registerGetCategoryInsights } from "./getCategoryInsights.js";
+import { registerGetTechnicianRiskSignals } from "./getTechnicianRiskSignals.js";
+import { registerGetRecurringProblemClusters } from "./getRecurringProblemClusters.js";
+import { registerGetDuplicateTickets } from "./getDuplicateTickets.js";
+import { registerGetClientDejaVu } from "./getClientDejaVu.js";
+import { registerGetSimilarTicketInsights } from "./getSimilarTicketInsights.js";
+import { registerGetKnowledgeGaps } from "./getKnowledgeGaps.js";
+import { registerGetTicketsToCategorize } from "./getTicketsToCategorize.js";
+import { registerSetTicketCategory } from "./setTicketCategory.js";
+import { registerCreateCategory } from "./createCategory.js";
+import { registerTriggerTicketAiSummary } from "./triggerTicketAiSummary.js";
+import { registerGetNoiseTicketAnalysis } from "./getNoiseTicketAnalysis.js";
 
 /** Map of tool name → register function so suppression can decide per-tool
  *  whether to wire it up. The order here defines the order the agent sees
@@ -48,6 +64,28 @@ const TOOL_REGISTRY: Array<{ name: string; register: (s: McpServer) => void }> =
   { name: "getRevenuePerTechSnapshot", register: registerGetRevenuePerTechSnapshot },
   { name: "getMrrPerSeatSnapshot", register: registerGetMrrPerSeatSnapshot },
   { name: "getMspKpis", register: registerGetMspKpis },
+
+  // Analytics — service-delivery KPIs (SQL-backed)
+  { name: "getServiceDeskHealth", register: registerGetServiceDeskHealth },
+  { name: "getTechnicianScorecard", register: registerGetTechnicianScorecard },
+  { name: "getClientHealthScorecard", register: registerGetClientHealthScorecard },
+  { name: "getTicketBacklog", register: registerGetTicketBacklog },
+  { name: "getCategoryInsights", register: registerGetCategoryInsights },
+  { name: "getTechnicianRiskSignals", register: registerGetTechnicianRiskSignals },
+
+  // Analytics — similarity/embeddings (ticket vector graph)
+  { name: "getRecurringProblemClusters", register: registerGetRecurringProblemClusters },
+  { name: "getDuplicateTickets", register: registerGetDuplicateTickets },
+  { name: "getClientDejaVu", register: registerGetClientDejaVu },
+  { name: "getSimilarTicketInsights", register: registerGetSimilarTicketInsights },
+  { name: "getKnowledgeGaps", register: registerGetKnowledgeGaps },
+
+  // Ticket categorisation (AI-in-the-loop: fetch feed + apply)
+  { name: "getTicketsToCategorize", register: registerGetTicketsToCategorize },
+  { name: "setTicketCategory", register: registerSetTicketCategory },
+  { name: "createCategory", register: registerCreateCategory },
+  { name: "triggerTicketAiSummary", register: registerTriggerTicketAiSummary },
+  { name: "getNoiseTicketAnalysis", register: registerGetNoiseTicketAnalysis },
 
   // Database access + REST escape hatch
   { name: "listReports", register: registerListReports },

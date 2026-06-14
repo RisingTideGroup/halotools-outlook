@@ -409,6 +409,16 @@ export interface UpdateTicketPayload {
   customfields?: Array<{ name: string; value: string | number | boolean }>;
   /** ISO datetime for the ticket target / due date. Halo expects this exact field name on writes. */
   targetdate?: string;
+  /** Category fields. NOTE the off-by-one: API `category_1` == DB `category2` == the
+   *  PRIMARY categorisation (CATEGORYDETAIL CDType=2). `categoryid_1` takes the CDid. */
+  category_1?: string;
+  categoryid_1?: number;
+  category_2?: string;
+  categoryid_2?: number;
+  category_3?: string;
+  categoryid_3?: number;
+  category_4?: string;
+  categoryid_4?: number;
 }
 
 /**
@@ -614,4 +624,349 @@ export interface MspKpis {
   revenuePerTech: number;
   mrrPerSeat: number;
   utilization?: UtilizationSnapshot;
+}
+
+// ---------- Service-delivery KPIs (SQL-backed) ----------
+
+/** Which tickets a service-delivery query counts.
+ *  - `reactive`: excludes projects + opportunities (REQUESTTYPE.RTIsProject / RTIsOpportunity).
+ *  - `all`: every non-deleted, non-merged ticket regardless of type. */
+export type TicketScope = "reactive" | "all";
+
+/** Window + scope echoed back on every service-delivery snapshot. */
+export interface ServiceWindow {
+  startdate: string;
+  enddate: string;
+  scope: TicketScope;
+  clientId?: number;
+}
+
+/** SLA attainment pair. `attainmentPct` = met / (met + breached) × 100; null when no
+ *  ticket in the cohort had an SLA target (Halo state '' = no SLA applies). */
+export interface SlaAttainment {
+  met: number;
+  breached: number;
+  attainmentPct: number | null;
+}
+
+/** CSAT block. `ai` is the AI-derived satisfaction (faisatisfactionlevel, ~1–10) — the
+ *  only signal with real coverage in most tenants. `native` is the built-in survey score
+ *  (SatisfactionLevel), usually sparse until CSAT surveys are rolled out. */
+export interface CsatBlock {
+  ai: { avg: number | null; responses: number; scale: string };
+  native: { avg: number | null; responses: number };
+}
+
+/** One-shot service-desk health snapshot for a window.
+ *  Cohorts (documented because they differ by metric):
+ *   - inflow / firstResponseSla / csat are measured on tickets CREATED in the window.
+ *   - outflow / resolutionSla / meanTimeToResolveHours / firstTimeFix are measured on
+ *     tickets RESOLVED (cleared) in the window.
+ *   - openBacklogNow / breachingNow are point-in-time (as of query time). */
+export interface ServiceDeskHealth {
+  window: ServiceWindow;
+  inflow: number;
+  outflow: number;
+  netBacklogChange: number;
+  openBacklogNow: number;
+  breachingNow: number;
+  resolvedCohort: number;
+  firstResponseSla: SlaAttainment;
+  resolutionSla: SlaAttainment;
+  meanTimeToResolveHours: number | null;
+  firstTimeFixCount: number;
+  firstTimeFixRate: number | null;
+  csat: CsatBlock;
+}
+
+/** Per-technician performance row (resolved-in-window cohort, grouped by the agent who
+ *  closed the ticket). `hoursLogged` / `hoursBillable` come from ACTIONS authored by the
+ *  agent in the window across all ticket types, so they reflect total effort, not just the
+ *  reactive tickets counted in `resolved`. */
+export interface TechnicianScorecardRow {
+  agentId: number;
+  agent: string;
+  resolved: number;
+  meanTimeToResolveHours: number | null;
+  resolutionSla: SlaAttainment;
+  firstResponseSla: SlaAttainment;
+  firstTimeFixCount: number;
+  firstTimeFixRate: number | null;
+  aiCsatAvg: number | null;
+  csatResponses: number;
+  hoursLogged: number;
+  hoursBillable: number;
+}
+
+export interface TechnicianScorecard {
+  window: ServiceWindow;
+  technicians: TechnicianScorecardRow[];
+}
+
+/** Per-client service-health row. Surfaces at-risk accounts (high volume + low SLA / CSAT). */
+export interface ClientHealthRow {
+  clientId: number;
+  client: string;
+  created: number;
+  resolved: number;
+  openNow: number;
+  resolutionSla: SlaAttainment;
+  firstResponseSla: SlaAttainment;
+  meanTimeToResolveHours: number | null;
+  aiCsatAvg: number | null;
+  csatResponses: number;
+}
+
+export interface ClientHealthScorecard {
+  window: ServiceWindow;
+  clients: ClientHealthRow[];
+}
+
+/** Ticket-categorisation insight: coverage + top categories + recurring-problem
+ *  candidates. Surfaces broken taxonomies (high uncategorised share) and the
+ *  high-volume/high-effort categories worth a KB article or automation. */
+export interface CategoryInsights {
+  window: ServiceWindow;
+  totalTickets: number;
+  uncategorisedTickets: number;
+  uncategorisedPct: number | null;
+  topByVolume: { category: string; tickets: number; hours: number }[];
+  topByHours: { category: string; tickets: number; hours: number }[];
+  /** Named categories ranked by tickets × hours — the automation / KB targets. */
+  recurringProblemCandidates: { category: string; tickets: number; hours: number; effortScore: number }[];
+}
+
+/** Per-technician leading risk signals for coaching vs disengagement. All rates
+ *  are heuristic flags, not verdicts — read alongside throughput and context
+ *  (e.g. a tech who logs no time can look idle while busy). */
+export interface TechnicianRiskRow {
+  agentId: number;
+  agent: string;
+  resolved: number;
+  zeroTimeCloses: number;
+  zeroTimeCloseRate: number | null;
+  slaBreaches: number;
+  resolutionSlaBreachRate: number | null;
+  aiCsatAvg: number | null;
+  openOwned: number;
+  staleOwned: number;
+  staleOwnedRate: number | null;
+  avgOpenAgeDays: number | null;
+  // Time-entry discipline (real-time logging). Lag = entry-created minus work-date
+  // (ACTIONS.ActionDateCreated - Whe_). lateEditedEntries clears the automation
+  // window by only counting edits >1 day after creation.
+  timeEntries: number;
+  avgEntryLagHours: number | null;
+  pctLoggedRealtime: number | null;
+  lateEditedEntries: number;
+  /** Heuristic flags raised for this tech (e.g. high-zero-time-closes, low-sla, stale-backlog, low-csat, late-time-entry). */
+  flags: string[];
+}
+
+export interface TechnicianRiskSignals {
+  window: ServiceWindow;
+  note: string;
+  technicians: TechnicianRiskRow[];
+}
+
+/** Point-in-time open-ticket backlog with aging + SLA-at-risk counts. */
+export interface TicketBacklog {
+  scope: TicketScope;
+  clientId?: number;
+  openTotal: number;
+  breachedNow: number;
+  dueWithin24h: number;
+  aging: {
+    lessThan1Day: number;
+    oneToThreeDays: number;
+    threeToSevenDays: number;
+    sevenToThirtyDays: number;
+    overThirtyDays: number;
+  };
+  oldest: {
+    ticketId: number;
+    client: string;
+    agent: string | null;
+    status: string;
+    priority: number;
+    ageDays: number;
+    fixSlaState: string;
+    firstResponseState: string;
+  }[];
+}
+
+// ---------- Similarity / embeddings (FaultVectorScore, method 1) ----------
+
+/** One approximate recurring-problem cluster — a group of similar reactive
+ *  tickets sharing a lowest-faultid anchor. `avgResolutionHours` is the mean
+ *  wall-clock resolve time over resolved members; `distinctResolvers` is a
+ *  handling-consistency signal (many resolvers for one recurring problem =
+ *  knowledge not captured). */
+export interface RecurringProblemCluster {
+  anchorFaultId: number;
+  representativeSummary: string;
+  ticketCount: number;
+  distinctClients: number;
+  totalHoursLogged: number;
+  avgResolutionHours: number | null;
+  distinctResolvers: number;
+  avgScore: number | null;
+}
+
+export interface RecurringProblemClusters {
+  window: ServiceWindow;
+  minScore: number;
+  /** Notes that clustering is an anchor approximation, not transitive closure. */
+  approximationNote: string;
+  clusters: RecurringProblemCluster[];
+}
+
+/** An open ticket and its highest-scoring near-duplicate neighbour (merge /
+ *  double-logging candidate). `matchedState` says whether the match is still
+ *  open or already closed. */
+export interface DuplicateTicketMatch {
+  openTicketId: number;
+  openSummary: string;
+  client: string;
+  ageDays: number;
+  matchedTicketId: number;
+  matchedSummary: string;
+  matchedState: "open" | "closed";
+  score: number | null;
+}
+
+export interface DuplicateTickets {
+  scope: TicketScope;
+  minScore: number;
+  duplicates: DuplicateTicketMatch[];
+}
+
+/** A client who repeatedly logs the same issue. `recurringPairCount` is the
+ *  number of high-similarity same-client ticket pairs; `distinctTickets` the
+ *  tickets those pairs span. */
+export interface ClientDejaVuRow {
+  clientId: number;
+  client: string;
+  recurringPairCount: number;
+  distinctTickets: number;
+  totalHoursLogged: number;
+}
+
+export interface ClientDejaVu {
+  window: ServiceWindow;
+  minScore: number;
+  clients: ClientDejaVuRow[];
+}
+
+/** One resolved neighbour of a target ticket. */
+export interface SimilarTicketNeighbour {
+  faultId: number;
+  summary: string;
+  score: number | null;
+  resolverId: number | null;
+  resolver: string | null;
+  resolutionHours: number | null;
+  category2: string | null;
+  csat: number | null;
+}
+
+/** Per-ticket nearest-resolved-neighbour insight: the neighbours plus a
+ *  prediction block (median effort, most-common category, top resolvers). */
+export interface SimilarTicketInsights {
+  faultId: number;
+  neighbours: SimilarTicketNeighbour[];
+  summary: {
+    neighbourCount: number;
+    predictedResolutionHoursMedian: number | null;
+    predictedCategory: string | null;
+    suggestedResolvers: { agentId: number; agent: string; neighbourCount: number }[];
+  };
+}
+
+/** Knowledge-base gap analysis from the ticket↔KB embedding matches
+ *  (FaultVectorScore.FVSuse=1). Surfaces how much of the reactive ticket volume
+ *  has a matching KB article, the most-matched articles, and the highest-effort
+ *  tickets with no KB match (= the articles worth writing first). */
+export interface KnowledgeGaps {
+  window: ServiceWindow;
+  matchThreshold: number;
+  coverage: {
+    tickets: number;
+    withKbMatch: number;
+    coveragePct: number | null;
+    avgBestScore: number | null;
+  };
+  /** KB articles ranked by how many tickets match them — the workhorse articles. */
+  topKbArticles: { kbId: number; title: string; ticketsMatched: number; avgScore: number | null }[];
+  /** Uncovered tickets (no KB match at/above threshold) ranked by hours logged. */
+  gapCandidates: {
+    faultId: number;
+    summary: string;
+    client: string;
+    hoursLogged: number;
+    bestKbScore: number | null;
+  }[];
+}
+
+/** One ticket awaiting categorisation, with the cheap AI summary the model
+ *  matches against the controlled category list. */
+export interface CategorizationTicket {
+  faultId: number;
+  subject: string;
+  client: string;
+  currentCategory: string | null;
+  currentCategoryId: number | null;
+  aiSummary: string | null;
+  aiSuggestedCategory: string | null;
+  summaryMissing: boolean;
+}
+
+/** Feed for the AI ticket-categoriser: the controlled taxonomy plus the scoped
+ *  set of tickets (with summaries) to categorise. The model matches each
+ *  summary to `categories` (or proposes a new one), then applies via
+ *  setTicketCategory. */
+export interface TicketsToCategorize {
+  filter: {
+    startdate?: string;
+    enddate?: string;
+    onlyUncategorised: boolean;
+    category?: string;
+    scope: TicketScope;
+  };
+  /** Controlled primary-category taxonomy (CATEGORYDETAIL CDType=2): id = CDid (the
+   *  value to write as categoryid_1), name = the "A>B>C" path. */
+  categories: { id: number; name: string }[];
+  totalMatching: number;
+  returned: number;
+  tickets: CategorizationTicket[];
+}
+
+/** A HaloPSA category (from /Category). type_id 1 = primary ticket category
+ *  (== DB CATEGORYDETAIL CDType 2), 2 = closure, 4 = request-type category. */
+export interface HaloCategory {
+  id: number;
+  category_name: string;
+  value?: string;
+  type_id: number;
+  category_group_id?: number;
+  guid?: string;
+}
+
+/** Noise-ticket analysis: low/no-value tickets (auto-replies, OOO, OTP emails,
+ *  newsletters, tests) that consume triage time, grouped so you can stop them at
+ *  source. */
+export interface NoiseTicketAnalysis {
+  window: { startdate: string; enddate: string; scope: TicketScope };
+  totalReactiveTickets: number;
+  totalNoiseTickets: number;
+  noiseSharePct: number | null;
+  totalHoursWasted: number;
+  byType: {
+    type: string;
+    tickets: number;
+    hoursWasted: number;
+    sharePct: number | null;
+    recommendation: string;
+  }[];
+  byMailbox: { mailboxId: number; tickets: number }[];
 }

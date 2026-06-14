@@ -32,6 +32,30 @@ import type {
   MrrSnapshot,
   UtilizationSnapshot,
   MspKpis,
+  TicketScope,
+  SlaAttainment,
+  ServiceDeskHealth,
+  TechnicianScorecard,
+  TechnicianScorecardRow,
+  ClientHealthScorecard,
+  ClientHealthRow,
+  CategoryInsights,
+  TechnicianRiskSignals,
+  TechnicianRiskRow,
+  TicketBacklog,
+  RecurringProblemClusters,
+  RecurringProblemCluster,
+  DuplicateTickets,
+  DuplicateTicketMatch,
+  ClientDejaVu,
+  ClientDejaVuRow,
+  SimilarTicketInsights,
+  KnowledgeGaps,
+  TicketsToCategorize,
+  CategorizationTicket,
+  HaloCategory,
+  NoiseTicketAnalysis,
+  SimilarTicketNeighbour,
 } from "./types.js";
 
 class HaloApiError extends Error {
@@ -1268,6 +1292,1321 @@ export async function listReports(): Promise<unknown[]> {
     if (Array.isArray(obj.reports)) return obj.reports as unknown[];
   }
   return [];
+}
+
+// ---------- Service-delivery KPIs (SQL-backed) ----------
+//
+// These compose Halo's Report Center (runReportSql) into canonical MSP
+// service-delivery metrics so callers don't have to re-derive the schema each
+// time. Schema idioms used throughout (Halo's 25-year-old internal naming):
+//   FAULTS            = tickets. faultid = ticket number.
+//   FAULTS.areaint    -> AREA.aarea           (the client/company; aareadesc = name)
+//   FAULTS.assignedtoint / clearwhoint -> UNAME.unum  (agent; uname = name)
+//   FAULTS.status     -> TSTATUS.Tstatus      (tstatusdesc = label; TstatusType 0 = open)
+//   FAULTS.RequestTypeNew -> REQUESTTYPE.RTid (RTIsProject / RTIsOpportunity flags)
+//   Slastate / Fslafirstresponsestate: 'I' = in SLA (met), 'O' = out (breached), '' = no SLA
+//   datecleared empty (NULL or < 1900) = ticket still open
+//   fdeleted = fmergedintofaultid           = the "not deleted AND not merged" idiom
+//   dateoccured is the real ticket-open timestamp — NOT datecreated, which is a row
+//     metadata stamp that post-dates clearance on ~95% of tickets (negative durations).
+//   cleartime is Halo's working-DAYS SLA duration; we report wall-clock MTTR via
+//     DATEDIFF(dateoccured -> datecleared) instead, which is intuitive and never negative.
+//   faisatisfactionlevel = AI CSAT (~1–10); SatisfactionLevel = native survey (usually sparse)
+
+/** Run a SELECT and return its result rows as plain objects, throwing on a
+ *  Report Center load error. Report cell values come back as strings. */
+async function reportRows(sql: string): Promise<Record<string, unknown>[]> {
+  const res = (await runReportSql(sql)) as {
+    report?: { loaded?: boolean; load_error?: string; rows?: Record<string, unknown>[] };
+  };
+  const report = res?.report;
+  if (report?.load_error) {
+    throw new HaloApiError(400, `Report SQL failed: ${report.load_error}`);
+  }
+  return report?.rows ?? [];
+}
+
+function num(v: unknown): number {
+  const n = typeof v === "number" ? v : parseFloat(String(v ?? ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Coerce to a rounded number, or null when the source value is absent (Halo
+ *  returns null/"" for AVG over an empty cohort). */
+function numOrNull(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = parseFloat(String(v));
+  return Number.isFinite(n) ? round2(n) : null;
+}
+
+function attainment(met: unknown, breached: unknown): SlaAttainment {
+  const m = num(met);
+  const b = num(breached);
+  const denom = m + b;
+  return { met: m, breached: b, attainmentPct: denom > 0 ? round2((m / denom) * 100) : null };
+}
+
+function rate(part: number, whole: number): number | null {
+  return whole > 0 ? round2((part / whole) * 100) : null;
+}
+
+/** Day after `end` (YYYY-MM-DD) so window comparisons can use an exclusive `<`
+ *  upper bound and include the whole final day. */
+function exclusiveEnd(end: string): string {
+  const d = new Date(`${end}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Excludes "closed-on-creation" stub tickets (e.g. Halo "Quick Time" time-log
+ * entries) from service-delivery metrics: a ticket that was closed at the same
+ * instant it was opened (`datecleared == dateoccured`) was never serviced. Real
+ * closed tickets (`datecleared > dateoccured`) and any still-open ticket are
+ * kept. These stubs can dominate a tenant (~96% of the "reactive" set here) and
+ * drag every duration toward zero, so they're filtered everywhere. Note: time
+ * logged on stubs still counts towards technician hours — that comes from
+ * ACTIONS, not this ticket filter.
+ */
+const NOT_STUB =
+  "(f.datecleared > f.dateoccured or f.datecleared is null or f.datecleared < '1900-01-01')";
+
+/** SQL fragments shared by the windowed service-delivery queries. */
+function deliverySql(start: string, end: string, scope: TicketScope, clientId?: number) {
+  const ex = exclusiveEnd(end);
+  const join = scope === "reactive" ? "join requesttype rt on f.RequestTypeNew = rt.RTid" : "";
+  const filters = [
+    "f.fdeleted = f.fmergedintofaultid",
+    NOT_STUB,
+    scope === "reactive" ? "rt.RTIsProject = 0 and rt.RTIsOpportunity = 0" : "",
+    clientId != null ? `f.areaint = ${Math.trunc(clientId)}` : "",
+  ]
+    .filter(Boolean)
+    .join(" and ");
+  return {
+    join,
+    filters,
+    createdIn: `f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`,
+    clearedIn: `f.datecleared >= '${start}' and f.datecleared < '${ex}'`,
+    open: `(f.datecleared is null or f.datecleared < '1900-01-01')`,
+  };
+}
+
+/**
+ * One-shot service-desk health snapshot for a window (defaults to trailing 30
+ * days). Volume in/out, current open backlog + live breaches, first-response &
+ * resolution SLA attainment, mean time to resolve, first-time-fix rate, and
+ * CSAT (AI + native). Optionally scoped to a single client. See ServiceDeskHealth
+ * for which cohort each metric is measured on.
+ */
+export async function getServiceDeskHealth(
+  startdate?: string,
+  enddate?: string,
+  scope: TicketScope = "reactive",
+  clientId?: number,
+): Promise<ServiceDeskHealth> {
+  const { start, end } = resolveWindow(startdate, enddate, 30);
+  const s = deliverySql(start, end, scope, clientId);
+  const sql = `select
+  sum(case when ${s.createdIn} then 1 else 0 end) as inflow,
+  sum(case when ${s.clearedIn} then 1 else 0 end) as outflow,
+  sum(case when ${s.open} then 1 else 0 end) as open_now,
+  sum(case when ${s.open} and f.Slastate = 'O' then 1 else 0 end) as breaching_now,
+  sum(case when ${s.createdIn} and f.Fslafirstresponsestate = 'I' then 1 else 0 end) as frt_met,
+  sum(case when ${s.createdIn} and f.Fslafirstresponsestate = 'O' then 1 else 0 end) as frt_breach,
+  sum(case when ${s.clearedIn} and f.Slastate = 'I' then 1 else 0 end) as fix_met,
+  sum(case when ${s.clearedIn} and f.Slastate = 'O' then 1 else 0 end) as fix_breach,
+  avg(case when ${s.clearedIn} then datediff(minute, f.dateoccured, f.datecleared) / 60.0 end) as mttr_hours,
+  sum(case when ${s.clearedIn} and f.fFirstTimeFix = 1 then 1 else 0 end) as ftf,
+  avg(case when ${s.createdIn} and f.faisatisfactionlevel > 0 then cast(f.faisatisfactionlevel as float) end) as ai_csat,
+  sum(case when ${s.createdIn} and f.faisatisfactionlevel > 0 then 1 else 0 end) as ai_csat_n,
+  avg(case when ${s.createdIn} and f.SatisfactionLevel > 0 then cast(f.SatisfactionLevel as float) end) as nat_csat,
+  sum(case when ${s.createdIn} and f.SatisfactionLevel > 0 then 1 else 0 end) as nat_csat_n
+from faults f
+${s.join}
+where ${s.filters} and ((${s.createdIn}) or (${s.clearedIn}) or ${s.open})`;
+
+  const row = (await reportRows(sql))[0] ?? {};
+  const inflow = num(row.inflow);
+  const outflow = num(row.outflow);
+  const ftf = num(row.ftf);
+  return {
+    window: { startdate: start, enddate: end, scope, clientId },
+    inflow,
+    outflow,
+    netBacklogChange: inflow - outflow,
+    openBacklogNow: num(row.open_now),
+    breachingNow: num(row.breaching_now),
+    resolvedCohort: outflow,
+    firstResponseSla: attainment(row.frt_met, row.frt_breach),
+    resolutionSla: attainment(row.fix_met, row.fix_breach),
+    meanTimeToResolveHours: numOrNull(row.mttr_hours),
+    firstTimeFixCount: ftf,
+    firstTimeFixRate: rate(ftf, outflow),
+    csat: {
+      ai: { avg: numOrNull(row.ai_csat), responses: num(row.ai_csat_n), scale: "1-10 (AI-derived)" },
+      native: { avg: numOrNull(row.nat_csat), responses: num(row.nat_csat_n) },
+    },
+  };
+}
+
+/**
+ * Per-technician performance scorecard for a window (defaults to trailing 30
+ * days), grouped by the agent who closed each resolved ticket. Returns tickets
+ * resolved, mean time to resolve, SLA attainment, first-time-fix, AI CSAT, and
+ * hours logged / billable. Sorted by tickets resolved, capped at `limit` (25).
+ */
+export async function getTechnicianScorecard(
+  startdate?: string,
+  enddate?: string,
+  scope: TicketScope = "reactive",
+  limit = 25,
+): Promise<TechnicianScorecard> {
+  const { start, end } = resolveWindow(startdate, enddate, 30);
+  const ex = exclusiveEnd(end);
+  const s = deliverySql(start, end, scope);
+  const top = Math.max(1, Math.trunc(limit));
+  const sql = `select top ${top}
+  u.unum as agent_id,
+  u.uname as agent,
+  count(*) as resolved,
+  avg(datediff(minute, f.dateoccured, f.datecleared) / 60.0) as mttr_hours,
+  sum(case when f.Slastate = 'I' then 1 else 0 end) as fix_met,
+  sum(case when f.Slastate = 'O' then 1 else 0 end) as fix_breach,
+  sum(case when f.Fslafirstresponsestate = 'I' then 1 else 0 end) as frt_met,
+  sum(case when f.Fslafirstresponsestate = 'O' then 1 else 0 end) as frt_breach,
+  sum(case when f.fFirstTimeFix = 1 then 1 else 0 end) as ftf,
+  avg(case when f.faisatisfactionlevel > 0 then cast(f.faisatisfactionlevel as float) end) as ai_csat,
+  sum(case when f.faisatisfactionlevel > 0 then 1 else 0 end) as csat_n,
+  max(act.hrs_logged) as hrs_logged,
+  max(act.hrs_billable) as hrs_billable
+from faults f
+join uname u on f.clearwhoint = u.unum
+${s.join}
+left join (
+  select whoagentid,
+    sum(timetaken) as hrs_logged,
+    sum(actionchargehours + actionnonchargehours + actionprepayhours) as hrs_billable
+  from actions
+  where ActionDateCreated >= '${start}' and ActionDateCreated < '${ex}'
+  group by whoagentid
+) act on act.whoagentid = f.clearwhoint
+where ${s.filters} and (${s.clearedIn})
+group by u.unum, u.uname
+order by count(*) desc`;
+
+  const rows = await reportRows(sql);
+  const technicians: TechnicianScorecardRow[] = rows.map((r) => {
+    const resolved = num(r.resolved);
+    const ftf = num(r.ftf);
+    return {
+      agentId: num(r.agent_id),
+      agent: String(r.agent ?? ""),
+      resolved,
+      meanTimeToResolveHours: numOrNull(r.mttr_hours),
+      resolutionSla: attainment(r.fix_met, r.fix_breach),
+      firstResponseSla: attainment(r.frt_met, r.frt_breach),
+      firstTimeFixCount: ftf,
+      firstTimeFixRate: rate(ftf, resolved),
+      aiCsatAvg: numOrNull(r.ai_csat),
+      csatResponses: num(r.csat_n),
+      hoursLogged: round2(num(r.hrs_logged)),
+      hoursBillable: round2(num(r.hrs_billable)),
+    };
+  });
+  return { window: { startdate: start, enddate: end, scope }, technicians };
+}
+
+/**
+ * Per-client service-health scorecard for a window (defaults to trailing 30
+ * days). Ticket volume in/out, current open count, SLA attainment, mean time to
+ * resolve, and AI CSAT — sorted by tickets created, capped at `limit` (default
+ * 50). Use to spot at-risk accounts (high volume + low SLA / CSAT).
+ */
+export async function getClientHealthScorecard(
+  startdate?: string,
+  enddate?: string,
+  scope: TicketScope = "reactive",
+  limit = 50,
+): Promise<ClientHealthScorecard> {
+  const { start, end } = resolveWindow(startdate, enddate, 30);
+  const s = deliverySql(start, end, scope);
+  const top = Math.max(1, Math.trunc(limit));
+  const sql = `select top ${top}
+  a.aarea as client_id,
+  a.aareadesc as client,
+  sum(case when ${s.createdIn} then 1 else 0 end) as created,
+  sum(case when ${s.clearedIn} then 1 else 0 end) as resolved,
+  sum(case when ${s.open} then 1 else 0 end) as open_now,
+  sum(case when ${s.clearedIn} and f.Slastate = 'I' then 1 else 0 end) as fix_met,
+  sum(case when ${s.clearedIn} and f.Slastate = 'O' then 1 else 0 end) as fix_breach,
+  sum(case when ${s.createdIn} and f.Fslafirstresponsestate = 'I' then 1 else 0 end) as frt_met,
+  sum(case when ${s.createdIn} and f.Fslafirstresponsestate = 'O' then 1 else 0 end) as frt_breach,
+  avg(case when ${s.clearedIn} then datediff(minute, f.dateoccured, f.datecleared) / 60.0 end) as mttr_hours,
+  avg(case when ${s.createdIn} and f.faisatisfactionlevel > 0 then cast(f.faisatisfactionlevel as float) end) as ai_csat,
+  sum(case when ${s.createdIn} and f.faisatisfactionlevel > 0 then 1 else 0 end) as csat_n
+from faults f
+join area a on a.aarea = f.areaint
+${s.join}
+where ${s.filters} and ((${s.createdIn}) or (${s.clearedIn}) or ${s.open})
+group by a.aarea, a.aareadesc
+order by sum(case when ${s.createdIn} then 1 else 0 end) desc`;
+
+  const rows = await reportRows(sql);
+  const clients: ClientHealthRow[] = rows.map((r) => ({
+    clientId: num(r.client_id),
+    client: String(r.client ?? ""),
+    created: num(r.created),
+    resolved: num(r.resolved),
+    openNow: num(r.open_now),
+    resolutionSla: attainment(r.fix_met, r.fix_breach),
+    firstResponseSla: attainment(r.frt_met, r.frt_breach),
+    meanTimeToResolveHours: numOrNull(r.mttr_hours),
+    aiCsatAvg: numOrNull(r.ai_csat),
+    csatResponses: num(r.csat_n),
+  }));
+  return { window: { startdate: start, enddate: end, scope }, clients };
+}
+
+/**
+ * Point-in-time open-ticket backlog: total open, aging buckets, tickets already
+ * breaching their fix SLA, tickets due within 24h, and the oldest open tickets.
+ * Optionally scoped to a single client. Not windowed — reflects the queue right
+ * now. `scope` defaults to reactive (excludes projects/opportunities).
+ */
+export async function getTicketBacklog(
+  scope: TicketScope = "reactive",
+  clientId?: number,
+): Promise<TicketBacklog> {
+  const join = scope === "reactive" ? "join requesttype rt on f.RequestTypeNew = rt.RTid" : "";
+  const filters = [
+    "f.fdeleted = f.fmergedintofaultid",
+    "(f.datecleared is null or f.datecleared < '1900-01-01')",
+    scope === "reactive" ? "rt.RTIsProject = 0 and rt.RTIsOpportunity = 0" : "",
+    clientId != null ? `f.areaint = ${Math.trunc(clientId)}` : "",
+  ]
+    .filter(Boolean)
+    .join(" and ");
+  const age = "datediff(day, f.dateoccured, getdate())";
+
+  const aggSql = `select
+  count(*) as open_total,
+  sum(case when f.Slastate = 'O' then 1 else 0 end) as breached_now,
+  sum(case when f.Slastate <> 'O' and f.fixbydate > '1900-01-01' and f.fixbydate < dateadd(hour, 24, getdate()) then 1 else 0 end) as due_24h,
+  sum(case when ${age} < 1 then 1 else 0 end) as a0,
+  sum(case when ${age} >= 1 and ${age} < 3 then 1 else 0 end) as a1,
+  sum(case when ${age} >= 3 and ${age} < 7 then 1 else 0 end) as a2,
+  sum(case when ${age} >= 7 and ${age} < 30 then 1 else 0 end) as a3,
+  sum(case when ${age} >= 30 then 1 else 0 end) as a4
+from faults f
+${join}
+where ${filters}`;
+
+  const oldestSql = `select top 15
+  f.faultid as ticket_id,
+  a.aareadesc as client,
+  u.uname as agent,
+  s.tstatusdesc as status,
+  f.seriousness as priority,
+  ${age} as age_days,
+  f.Slastate as fix_sla_state,
+  f.Fslafirstresponsestate as frt_state
+from faults f
+join area a on a.aarea = f.areaint
+left join uname u on f.assignedtoint = u.unum
+join tstatus s on f.status = s.Tstatus
+${join}
+where ${filters}
+order by f.dateoccured asc`;
+
+  const [agg, oldest] = await Promise.all([reportRows(aggSql), reportRows(oldestSql)]);
+  const a = agg[0] ?? {};
+  return {
+    scope,
+    clientId,
+    openTotal: num(a.open_total),
+    breachedNow: num(a.breached_now),
+    dueWithin24h: num(a.due_24h),
+    aging: {
+      lessThan1Day: num(a.a0),
+      oneToThreeDays: num(a.a1),
+      threeToSevenDays: num(a.a2),
+      sevenToThirtyDays: num(a.a3),
+      overThirtyDays: num(a.a4),
+    },
+    oldest: oldest.map((r) => ({
+      ticketId: num(r.ticket_id),
+      client: String(r.client ?? ""),
+      agent: r.agent ? String(r.agent) : null,
+      status: String(r.status ?? ""),
+      priority: num(r.priority),
+      ageDays: num(r.age_days),
+      fixSlaState: String(r.fix_sla_state ?? ""),
+      firstResponseState: String(r.frt_state ?? ""),
+    })),
+  };
+}
+
+/**
+ * Ticket-categorisation insight for a window (defaults to trailing 30 days):
+ * how much of the queue is uncategorised, the top categories by volume and by
+ * logged hours, and the recurring-problem candidates (named categories ranked
+ * by tickets × hours — the KB-article / automation targets). A high
+ * `uncategorisedPct` (industry red flag is ~40%+) means reporting is blind to
+ * recurring issues. Uses faults.category2 (Halo's primary category, stored as a
+ * denormalised "A>B>C" path); hours come from ACTIONS time logged in the window.
+ */
+export async function getCategoryInsights(
+  startdate?: string,
+  enddate?: string,
+  scope: TicketScope = "reactive",
+  limit = 15,
+): Promise<CategoryInsights> {
+  const { start, end } = resolveWindow(startdate, enddate, 30);
+  const ex = exclusiveEnd(end);
+  const join = scope === "reactive" ? "join requesttype rt on f.requesttypenew = rt.RTid" : "";
+  const reactive = scope === "reactive" ? "and rt.RTIsProject = 0 and rt.RTIsOpportunity = 0" : "";
+  const base = `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0) and ${NOT_STUB} ${reactive} and f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`;
+  const cat = `coalesce(nullif(ltrim(rtrim(f.category2)), ''), '(uncategorised)')`;
+
+  const summarySql = `select
+  count(*) as total,
+  sum(case when nullif(ltrim(rtrim(f.category2)), '') is null then 1 else 0 end) as uncategorised
+from faults f
+${join}
+where ${base}`;
+
+  const catSql = `select top 100
+  ${cat} as category,
+  count(*) as tickets,
+  cast(sum(coalesce(a.hrs, 0)) as decimal(12,2)) as hours
+from faults f
+${join}
+left join (select faultid, sum(timetaken) as hrs from actions where ActionDateCreated >= '${start}' and ActionDateCreated < '${ex}' group by faultid) a on a.faultid = f.faultid
+where ${base}
+group by ${cat}
+order by count(*) desc`;
+
+  const [summaryRows, catRows] = await Promise.all([reportRows(summarySql), reportRows(catSql)]);
+  const summary = summaryRows[0] ?? {};
+  const total = num(summary.total);
+  const uncategorised = num(summary.uncategorised);
+  const cats = catRows.map((r) => ({
+    category: String(r.category ?? ""),
+    tickets: num(r.tickets),
+    hours: round2(num(r.hours)),
+  }));
+  const named = cats.filter((c) => c.category !== "(uncategorised)");
+  return {
+    window: { startdate: start, enddate: end, scope },
+    totalTickets: total,
+    uncategorisedTickets: uncategorised,
+    uncategorisedPct: rate(uncategorised, total),
+    topByVolume: cats.slice(0, limit),
+    topByHours: [...cats].sort((a, b) => b.hours - a.hours).slice(0, limit),
+    recurringProblemCandidates: named
+      .map((c) => ({ ...c, effortScore: round2(c.tickets * c.hours) }))
+      .sort((a, b) => b.effortScore - a.effortScore)
+      .slice(0, limit),
+  };
+}
+
+/**
+ * Per-technician leading risk signals for a window (defaults to trailing 30
+ * days): of the reactive tickets a tech closed — zero-time-close rate (closed
+ * with no time logged) and resolution-SLA breach rate and AI CSAT; plus their
+ * current owned-open backlog and how much of it is stale (no action in 3+ days);
+ * plus time-entry discipline — average lag between work date and entry creation,
+ * % logged within an hour, and entries back-edited >1 day later. Raises heuristic
+ * `flags` (high-zero-time-closes >30%, low-sla >20% breach, stale-backlog,
+ * low-csat <5, late-time-entry <60% real-time) to separate "needs coaching"
+ * from "disengaged".
+ * These are signals to investigate, not verdicts — a tech who under-logs time
+ * looks idle while busy, so always read with throughput and context.
+ */
+export async function getTechnicianRiskSignals(
+  startdate?: string,
+  enddate?: string,
+  scope: TicketScope = "reactive",
+  limit = 50,
+): Promise<TechnicianRiskSignals> {
+  const { start, end } = resolveWindow(startdate, enddate, 30);
+  const ex = exclusiveEnd(end);
+  const join = scope === "reactive" ? "join requesttype rt on f.requesttypenew = rt.RTid" : "";
+  const reactive = scope === "reactive" ? "and rt.RTIsProject = 0 and rt.RTIsOpportunity = 0" : "";
+  const notDeleted = "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)";
+  const realAgent = "coalesce(u.uisapiagent,0) = 0";
+  const top = Math.max(1, Math.trunc(limit));
+
+  // Closed-by-tech cohort: throughput + zero-time closes + SLA breach + CSAT.
+  const closedSql = `select top ${top}
+  u.unum as agent_id,
+  u.uname as agent,
+  count(*) as resolved,
+  sum(case when coalesce(a.hrs,0) = 0 then 1 else 0 end) as zero_time_closes,
+  sum(case when f.Slastate = 'O' then 1 else 0 end) as sla_breach,
+  cast(avg(try_convert(float, nullif(f.faisatisfactionlevel, ''))) as decimal(6,2)) as ai_csat
+from faults f
+join uname u on f.clearwhoint = u.unum
+${join}
+left join (select faultid, sum(timetaken) as hrs from actions group by faultid) a on a.faultid = f.faultid
+where ${notDeleted} and ${NOT_STUB} ${reactive} and ${realAgent} and f.datecleared >= '${start}' and f.datecleared < '${ex}'
+group by u.unum, u.uname
+order by count(*) desc`;
+
+  // Owned-open cohort: current backlog held by each tech + stale share.
+  const ownedSql = `select top ${top}
+  u.unum as agent_id,
+  u.uname as agent,
+  count(*) as open_owned,
+  sum(case when f.Flastactiondate < dateadd(day, -3, getdate()) then 1 else 0 end) as stale_3d,
+  cast(avg(datediff(day, f.dateoccured, getdate()) * 1.0) as decimal(10,1)) as avg_age_days
+from faults f
+join uname u on f.assignedtoint = u.unum
+${join}
+where ${notDeleted} ${reactive} and ${realAgent} and u.unum <> 1 and (f.datecleared is null or f.datecleared < '1900-01-01')
+group by u.unum, u.uname
+order by count(*) desc`;
+
+  // Time-entry discipline: lag between work date (Whe_) and entry creation, plus
+  // back-edits >1 day after creation (which clears this tenant's automation that
+  // touches every action a few minutes after creation).
+  const latencySql = `select top ${top}
+  u.unum as agent_id,
+  u.uname as agent,
+  count(*) as time_entries,
+  cast(avg(datediff(minute, a.Whe_, a.ActionDateCreated) / 60.0) as decimal(10,1)) as avg_lag_hrs,
+  sum(case when datediff(hour, a.Whe_, a.ActionDateCreated) <= 1 then 1 else 0 end) as realtime_1h,
+  sum(case when a.ALastUpdated > dateadd(hour, 24, a.ActionDateCreated) then 1 else 0 end) as edited_1day_plus
+from actions a
+join uname u on a.whoagentid = u.unum
+where ${realAgent} and a.timetaken > 0 and a.Whe_ >= '${start}' and a.Whe_ < '${ex}'
+group by u.unum, u.uname
+order by count(*) desc`;
+
+  const [closedRows, ownedRows, latencyRows] = await Promise.all([
+    reportRows(closedSql),
+    reportRows(ownedSql),
+    reportRows(latencySql),
+  ]);
+
+  const blank = (id: number, agent: string): TechnicianRiskRow => ({
+    agentId: id,
+    agent,
+    resolved: 0,
+    zeroTimeCloses: 0,
+    zeroTimeCloseRate: null,
+    slaBreaches: 0,
+    resolutionSlaBreachRate: null,
+    aiCsatAvg: null,
+    openOwned: 0,
+    staleOwned: 0,
+    staleOwnedRate: null,
+    avgOpenAgeDays: null,
+    timeEntries: 0,
+    avgEntryLagHours: null,
+    pctLoggedRealtime: null,
+    lateEditedEntries: 0,
+    flags: [],
+  });
+
+  const byId = new Map<number, TechnicianRiskRow>();
+  for (const r of closedRows) {
+    const id = num(r.agent_id);
+    const resolved = num(r.resolved);
+    const zero = num(r.zero_time_closes);
+    const breach = num(r.sla_breach);
+    const row = blank(id, String(r.agent ?? ""));
+    row.resolved = resolved;
+    row.zeroTimeCloses = zero;
+    row.zeroTimeCloseRate = rate(zero, resolved);
+    row.slaBreaches = breach;
+    row.resolutionSlaBreachRate = rate(breach, resolved);
+    row.aiCsatAvg = numOrNull(r.ai_csat);
+    byId.set(id, row);
+  }
+  for (const r of ownedRows) {
+    const id = num(r.agent_id);
+    const openOwned = num(r.open_owned);
+    const stale = num(r.stale_3d);
+    const row = byId.get(id) ?? blank(id, String(r.agent ?? ""));
+    row.openOwned = openOwned;
+    row.staleOwned = stale;
+    row.staleOwnedRate = rate(stale, openOwned);
+    row.avgOpenAgeDays = numOrNull(r.avg_age_days);
+    byId.set(id, row);
+  }
+  for (const r of latencyRows) {
+    const id = num(r.agent_id);
+    const entries = num(r.time_entries);
+    const realtime = num(r.realtime_1h);
+    const row = byId.get(id) ?? blank(id, String(r.agent ?? ""));
+    row.timeEntries = entries;
+    row.avgEntryLagHours = numOrNull(r.avg_lag_hrs);
+    row.pctLoggedRealtime = rate(realtime, entries);
+    row.lateEditedEntries = num(r.edited_1day_plus);
+    byId.set(id, row);
+  }
+
+  const technicians = Array.from(byId.values()).map((t) => {
+    const flags: string[] = [];
+    if ((t.zeroTimeCloseRate ?? 0) > 30 && t.resolved >= 5) flags.push("high-zero-time-closes");
+    if ((t.resolutionSlaBreachRate ?? 0) > 20 && t.resolved >= 5) flags.push("low-sla-attainment");
+    if (t.staleOwned >= 5 && (t.staleOwnedRate ?? 0) >= 50) flags.push("stale-backlog");
+    if (t.aiCsatAvg != null && t.aiCsatAvg < 5) flags.push("low-csat");
+    if (t.pctLoggedRealtime != null && t.pctLoggedRealtime < 60 && t.timeEntries >= 10)
+      flags.push("late-time-entry");
+    return { ...t, flags };
+  });
+  technicians.sort((a, b) => b.resolved - a.resolved);
+
+  return {
+    window: { startdate: start, enddate: end, scope },
+    note: "Signals to investigate, not verdicts. Cross-read with throughput and context — e.g. zero-time-closes can mean under-logging, not idleness; after-hours and category-level coaching signals live in the reports/technicians SQL library.",
+    technicians,
+  };
+}
+
+// ---------- Analytics: similarity / embeddings (SQL-backed) ----------
+//
+// These compose Halo's ticket-embedding similarity graph (table
+// FaultVectorScore) into recurring-problem / duplicate / per-ticket-neighbour
+// insights. Schema idioms (in addition to the service-delivery ones above):
+//   FaultVectorScore.FVSfaultid          -> the source ticket (FAULTS.faultid)
+//   FaultVectorScore.FVSSimiliarfaultid  -> the matched item; a TICKET id when FVSuse=0,
+//                                            a KB-article id (KBENTRY.id) when FVSuse=1.
+//   FaultVectorScore.FVSScore            -> cosine similarity (~0.62–1.0)
+//   FaultVectorScore.fvsSearchMethod     -> embedding method; we ONLY trust method 1.
+//   FaultVectorScore.FVSuse              -> match TYPE: 0 = ticket↔ticket, 1 = ticket↔KB.
+//     (KB ids 1..N collide with low faultids, so without this split a KB match looks
+//      like an unrelated old ticket — the trap that hides KB matches.)
+//
+// CRITICAL: always filter `fvsSearchMethod = 1 AND FVSuse = 0` for ticket↔ticket. Other methods are stale /
+// garbage (method '' scores unrelated tickets at 1.0). The graph is directional
+// (source -> similar); for clustering we treat edges as undirected.
+
+/**
+ * Non-actionable-noise predicate on FAULTS.Symptom. The strongest similar
+ * clusters in an embedding graph are auto-replies, OTP / verification emails,
+ * test tickets, recurring review / newsletter notifications, etc. — high
+ * similarity but zero value as a recurring-problem signal. We filter these on
+ * BOTH endpoints of every pair. Heuristic, deliberately conservative.
+ *
+ * EDIT: tune these LIKE patterns per tenant if a noisy auto-generated subject
+ * line is dominating the clusters. Kept internal (no param) so the tools stay
+ * simple; this is the one place to change it.
+ *
+ * `alias` is the FAULTS table alias to apply it to (e.g. "fa", "fb", "f").
+ */
+function noiseFilter(alias: string): string {
+  const s = `cast(${alias}.Symptom as nvarchar(400))`;
+  return (
+    `(${s} is not null` +
+    ` and ${s} not like 'Automatic reply%'` +
+    ` and ${s} not like 'Re: Automatic reply%'` +
+    ` and ${s} not like '%verification code%'` +
+    ` and ${s} not like '% is your %code%'` +
+    ` and ${s} not like 'Test%'` +
+    ` and ${s} not like '%Monthly Support Review%'` +
+    ` and ${s} not like '%Newsletter%'` +
+    ` and ${s} not like 'A new sms ticket received%')`
+  );
+}
+
+/** Median of a numeric array (linear interpolation between the two middle
+ *  values for even counts). Null for an empty set. Used to summarise neighbour
+ *  resolution effort in getSimilarTicketInsights — Report Center has no clean
+ *  single-statement grouped median, so we compute it in TS from the rows. */
+function median(values: number[]): number | null {
+  const xs = values.filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+  if (xs.length === 0) return null;
+  const mid = Math.floor(xs.length / 2);
+  return xs.length % 2 ? xs[mid] : round2((xs[mid - 1] + xs[mid]) / 2);
+}
+
+/**
+ * Cluster semantically-similar reactive tickets to surface recurring problems
+ * worth a KB article / automation / problem record, plus a handling-consistency
+ * signal (how many distinct resolvers, how spread the resolution time is).
+ *
+ * Uses Halo's ticket embeddings (FaultVectorScore, method 1 only), noise-filtered
+ * on both endpoints.
+ *
+ * APPROXIMATE CLUSTERING: a true connected-component (transitive-closure)
+ * clustering needs a recursive CTE, which Report Center forbids. We approximate:
+ * for each undirected edge (score >= minScore, both endpoints reactive +
+ * NOT_STUB + non-noise + in-window on dateoccured) the cluster_anchor is the
+ * LEAST of the two faultids; tickets are grouped by that anchor. Two tickets
+ * only land in the same cluster if they share a direct lowest-id neighbour, so
+ * a long similarity chain can fragment into several anchors. Good enough to spot
+ * recurring themes; not a guarantee of one row per real-world problem.
+ *
+ * Per cluster: anchor faultid, a representative Symptom, distinct ticket count,
+ * distinct clients, total hours logged (ACTIONS.timetaken over the distinct
+ * member tickets), average resolution hours, distinct resolver count, and
+ * average edge score. Ranked by (ticket count × total hours) desc.
+ */
+export async function getRecurringProblemClusters(
+  startdate?: string,
+  enddate?: string,
+  minScore = 0.85,
+  limit = 25,
+): Promise<RecurringProblemClusters> {
+  const { start, end } = resolveWindow(startdate, enddate, 365);
+  const ex = exclusiveEnd(end);
+  const top = Math.max(1, Math.trunc(limit));
+  const ms = Number.isFinite(minScore) ? minScore : 0.85;
+  const anchor = "case when v.FVSfaultid < v.FVSSimiliarfaultid then v.FVSfaultid else v.FVSSimiliarfaultid end";
+  // Shared edge predicate: method 1, score gate, both endpoints reactive +
+  // NOT_STUB + non-noise + in-window on dateoccured.
+  const edgeWhere =
+    `v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSScore >= ${ms}` +
+    ` and rta.RTIsProject = 0 and rta.RTIsOpportunity = 0 and rtb.RTIsProject = 0 and rtb.RTIsOpportunity = 0` +
+    ` and (fa.datecleared > fa.dateoccured or fa.datecleared is null or fa.datecleared < '1900-01-01')` +
+    ` and (fb.datecleared > fb.dateoccured or fb.datecleared is null or fb.datecleared < '1900-01-01')` +
+    ` and fa.dateoccured >= '${start}' and fa.dateoccured < '${ex}'` +
+    ` and fb.dateoccured >= '${start}' and fb.dateoccured < '${ex}'` +
+    ` and ${noiseFilter("fa")} and ${noiseFilter("fb")}`;
+  const edgeJoins =
+    `from FaultVectorScore v` +
+    ` join faults fa on fa.faultid = v.FVSfaultid join requesttype rta on fa.RequestTypeNew = rta.RTid` +
+    ` join faults fb on fb.faultid = v.FVSSimiliarfaultid join requesttype rtb on fb.RequestTypeNew = rtb.RTid`;
+
+  // Distinct (anchor, member) so per-ticket aggregates don't fan out across
+  // multiple edges sharing the same anchor; avg score comes from a separate
+  // per-anchor edge aggregate.
+  const sql = `select top ${top}
+  mem.cluster_anchor,
+  max(cast(f.Symptom as nvarchar(400))) as representative,
+  count(*) as ticket_count,
+  count(distinct f.areaint) as distinct_clients,
+  cast(sum(coalesce(h.hrs, 0)) as decimal(12,2)) as total_hours,
+  cast(avg(case when f.datecleared > f.dateoccured then datediff(minute, f.dateoccured, f.datecleared) / 60.0 end) as decimal(10,2)) as avg_resolution_hours,
+  count(distinct f.clearwhoint) as distinct_resolvers,
+  max(sc.avg_score) as avg_score
+from (
+  select ${anchor} as cluster_anchor, v.FVSfaultid as member ${edgeJoins} where ${edgeWhere}
+  union
+  select ${anchor} as cluster_anchor, v.FVSSimiliarfaultid as member ${edgeJoins} where ${edgeWhere}
+) mem
+join faults f on f.faultid = mem.member
+left join (select faultid, sum(timetaken) as hrs from actions group by faultid) h on h.faultid = mem.member
+join (
+  select ${anchor} as cluster_anchor, cast(avg(v.FVSScore) as decimal(6,4)) as avg_score
+  ${edgeJoins} where ${edgeWhere}
+  group by ${anchor}
+) sc on sc.cluster_anchor = mem.cluster_anchor
+group by mem.cluster_anchor
+order by count(*) * sum(coalesce(h.hrs, 0)) desc`;
+
+  const rows = await reportRows(sql);
+  const clusters: RecurringProblemCluster[] = rows.map((r) => ({
+    anchorFaultId: num(r.cluster_anchor),
+    representativeSummary: String(r.representative ?? ""),
+    ticketCount: num(r.ticket_count),
+    distinctClients: num(r.distinct_clients),
+    totalHoursLogged: round2(num(r.total_hours)),
+    avgResolutionHours: numOrNull(r.avg_resolution_hours),
+    distinctResolvers: num(r.distinct_resolvers),
+    avgScore: numOrNull(r.avg_score),
+  }));
+  return {
+    window: { startdate: start, enddate: end, scope: "reactive" },
+    minScore: ms,
+    approximationNote:
+      "Clustering is approximate: tickets are grouped by the lowest faultid among each similar pair (no transitive closure — Report Center forbids recursive CTEs), so a long similarity chain can fragment across anchors. Uses Halo's ticket embeddings (method 1), noise-filtered.",
+    clusters,
+  };
+}
+
+/**
+ * Open tickets that are near-duplicates of another ticket — merge candidates /
+ * double-logging detection. For each OPEN ticket (status not in 8/9, in scope,
+ * non-noise) finds its single highest-scoring method-1 neighbour at or above
+ * minScore (default 0.9 = near-duplicate) in either direction, and reports the
+ * matched ticket's id / summary / state (open or closed) / score. Ordered by
+ * score desc.
+ *
+ * Uses Halo's ticket embeddings (method 1 only), noise-filtered.
+ */
+export async function getDuplicateTickets(
+  scope: TicketScope = "reactive",
+  minScore = 0.9,
+  limit = 50,
+): Promise<DuplicateTickets> {
+  const top = Math.max(1, Math.trunc(limit));
+  const ms = Number.isFinite(minScore) ? minScore : 0.9;
+  const rtJoin = scope === "reactive" ? "join requesttype rto on o.RequestTypeNew = rto.RTid" : "";
+  const reactive = scope === "reactive" ? "and rto.RTIsProject = 0 and rto.RTIsOpportunity = 0" : "";
+  const edgeWhere = `v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSScore >= ${ms}`;
+
+  const sql = `select top ${top}
+  o.faultid as open_ticket_id,
+  cast(o.Symptom as nvarchar(300)) as open_summary,
+  ao.aareadesc as client,
+  datediff(day, o.dateoccured, getdate()) as age_days,
+  m.match_id as matched_ticket_id,
+  m.match_summary as matched_summary,
+  m.match_state as matched_state,
+  cast(m.score as decimal(6,4)) as score
+from faults o
+${rtJoin}
+join area ao on ao.aarea = o.areaint
+join (
+  select open_id, match_id, score, match_summary, match_state,
+         row_number() over (partition by open_id order by score desc, match_id asc) as rn
+  from (
+    select v.FVSfaultid as open_id, v.FVSSimiliarfaultid as match_id, v.FVSScore as score,
+           cast(fm.Symptom as nvarchar(300)) as match_summary,
+           case when fm.status in (8,9) then 'closed' else 'open' end as match_state
+    from FaultVectorScore v join faults fm on fm.faultid = v.FVSSimiliarfaultid
+    where ${edgeWhere}
+    union all
+    select v.FVSSimiliarfaultid as open_id, v.FVSfaultid as match_id, v.FVSScore as score,
+           cast(fm.Symptom as nvarchar(300)) as match_summary,
+           case when fm.status in (8,9) then 'closed' else 'open' end as match_state
+    from FaultVectorScore v join faults fm on fm.faultid = v.FVSfaultid
+    where ${edgeWhere}
+  ) edges
+) m on m.open_id = o.faultid and m.rn = 1
+where o.status not in (8,9) ${reactive} and ${noiseFilter("o")}
+order by m.score desc`;
+
+  const rows = await reportRows(sql);
+  const duplicates: DuplicateTicketMatch[] = rows.map((r) => ({
+    openTicketId: num(r.open_ticket_id),
+    openSummary: String(r.open_summary ?? ""),
+    client: String(r.client ?? ""),
+    ageDays: num(r.age_days),
+    matchedTicketId: num(r.matched_ticket_id),
+    matchedSummary: String(r.matched_summary ?? ""),
+    matchedState: String(r.matched_state ?? "") as "open" | "closed",
+    score: numOrNull(r.score),
+  }));
+  return { scope, minScore: ms, duplicates };
+}
+
+/**
+ * Clients who repeatedly log the SAME issue — chronic-pain / root-cause /
+ * training targets. Counts high-similarity undirected pairs where BOTH tickets
+ * belong to the same client (AREA) within the window (reactive + non-noise).
+ * Per client: number of recurring pairs, distinct tickets involved, total hours
+ * logged across those tickets. Ranked by pair count desc.
+ *
+ * Same-client recurrence is the signal here; cross-client similarity (a problem
+ * affecting many customers) is what getRecurringProblemClusters surfaces instead.
+ *
+ * Uses Halo's ticket embeddings (method 1 only), noise-filtered.
+ */
+export async function getClientDejaVu(
+  startdate?: string,
+  enddate?: string,
+  minScore = 0.85,
+  limit = 50,
+): Promise<ClientDejaVu> {
+  const { start, end } = resolveWindow(startdate, enddate, 365);
+  const ex = exclusiveEnd(end);
+  const top = Math.max(1, Math.trunc(limit));
+  const ms = Number.isFinite(minScore) ? minScore : 0.85;
+  // One row per same-client undirected pair (FVSfaultid < FVSSimiliarfaultid
+  // dedupes direction). cross apply expands to the two member tickets so we can
+  // count distinct tickets and sum their hours; hours are summed over distinct
+  // (client, member) to avoid a ticket in several pairs being counted twice.
+  const sql = `select top ${top}
+  p.areaint as client_id,
+  max(a.aareadesc) as client,
+  max(p.pair_count) as recurring_pair_count,
+  count(*) as distinct_tickets,
+  cast(sum(coalesce(h.hrs, 0)) as decimal(12,2)) as total_hours
+from (
+  select areaint, member, max(pair_count) as pair_count from (
+    select pr.areaint, t.member, pr.pair_count
+    from (
+      select fa.areaint, v.FVSfaultid as fa_id, v.FVSSimiliarfaultid as fb_id,
+             count(*) over (partition by fa.areaint) as pair_count
+      from FaultVectorScore v
+      join faults fa on fa.faultid = v.FVSfaultid join requesttype rta on fa.RequestTypeNew = rta.RTid
+      join faults fb on fb.faultid = v.FVSSimiliarfaultid join requesttype rtb on fb.RequestTypeNew = rtb.RTid
+      where v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSScore >= ${ms} and v.FVSfaultid < v.FVSSimiliarfaultid
+        and fa.areaint = fb.areaint
+        and rta.RTIsProject = 0 and rta.RTIsOpportunity = 0 and rtb.RTIsProject = 0 and rtb.RTIsOpportunity = 0
+        and fa.dateoccured >= '${start}' and fa.dateoccured < '${ex}'
+        and fb.dateoccured >= '${start}' and fb.dateoccured < '${ex}'
+        and ${noiseFilter("fa")} and ${noiseFilter("fb")}
+    ) pr
+    cross apply (values (pr.fa_id), (pr.fb_id)) t(member)
+  ) expanded
+  group by areaint, member
+) p
+join area a on a.aarea = p.areaint
+left join (select faultid, sum(timetaken) as hrs from actions group by faultid) h on h.faultid = p.member
+group by p.areaint
+order by max(p.pair_count) desc`;
+
+  const rows = await reportRows(sql);
+  const clients: ClientDejaVuRow[] = rows.map((r) => ({
+    clientId: num(r.client_id),
+    client: String(r.client ?? ""),
+    recurringPairCount: num(r.recurring_pair_count),
+    distinctTickets: num(r.distinct_tickets),
+    totalHoursLogged: round2(num(r.total_hours)),
+  }));
+  return {
+    window: { startdate: start, enddate: end, scope: "reactive" },
+    minScore: ms,
+    clients,
+  };
+}
+
+/**
+ * For a single ticket, surface its nearest RESOLVED neighbours so you can route
+ * to whoever solved the same thing before, and predict likely effort / category.
+ * Finds method-1 neighbours (either direction) at score >= 0.8 that are resolved
+ * (status in 8/9, datecleared > dateoccured); returns the top 10 by score with
+ * summary, score, resolver, resolution hours, category2, and CSAT — plus a
+ * summary block: median predicted resolution hours, the most common category2,
+ * and the resolvers who handled the most neighbours.
+ *
+ * Uses Halo's ticket embeddings (method 1 only). Per-ticket lookup, so it is
+ * NOT noise-filtered — you asked about one specific ticket.
+ */
+export async function getSimilarTicketInsights(
+  faultid: number,
+): Promise<SimilarTicketInsights> {
+  const id = Math.trunc(faultid);
+  const sql = `select top 10
+  n.faultid,
+  cast(f.Symptom as nvarchar(300)) as summary,
+  cast(n.score as decimal(6,4)) as score,
+  u.uname as resolver,
+  f.clearwhoint as resolver_id,
+  cast(case when f.datecleared > f.dateoccured then datediff(minute, f.dateoccured, f.datecleared) / 60.0 end as decimal(10,2)) as resolution_hours,
+  f.category2 as category2,
+  try_convert(float, nullif(f.faisatisfactionlevel, '')) as csat
+from (
+  select v.FVSSimiliarfaultid as faultid, v.FVSScore as score from FaultVectorScore v where v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSfaultid = ${id} and v.FVSScore >= 0.8
+  union all
+  select v.FVSfaultid as faultid, v.FVSScore as score from FaultVectorScore v where v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSSimiliarfaultid = ${id} and v.FVSScore >= 0.8
+) n
+join faults f on f.faultid = n.faultid
+left join uname u on f.clearwhoint = u.unum
+where f.status in (8,9) and f.datecleared > f.dateoccured
+order by n.score desc`;
+
+  const rows = await reportRows(sql);
+  const neighbours: SimilarTicketNeighbour[] = rows.map((r) => ({
+    faultId: num(r.faultid),
+    summary: String(r.summary ?? ""),
+    score: numOrNull(r.score),
+    resolverId: numOrNull(r.resolver_id),
+    resolver: r.resolver ? String(r.resolver) : null,
+    resolutionHours: numOrNull(r.resolution_hours),
+    category2: r.category2 ? String(r.category2) : null,
+    csat: numOrNull(r.csat),
+  }));
+
+  // Predicted resolution effort = median of neighbour resolution hours.
+  const predictedResolutionHoursMedian = median(
+    neighbours.map((n) => n.resolutionHours).filter((h): h is number => h != null),
+  );
+  // Predicted category = the most common non-empty category2 among neighbours.
+  const catCounts = new Map<string, number>();
+  for (const n of neighbours) {
+    const c = (n.category2 ?? "").trim();
+    if (c) catCounts.set(c, (catCounts.get(c) ?? 0) + 1);
+  }
+  let predictedCategory: string | null = null;
+  let bestCat = 0;
+  for (const [c, n] of catCounts) {
+    if (n > bestCat) { bestCat = n; predictedCategory = c; }
+  }
+  // Suggested resolvers = the agents who handled the most neighbours, by count.
+  const resolverCounts = new Map<number, { name: string; count: number }>();
+  for (const n of neighbours) {
+    if (n.resolverId == null || n.resolverId <= 0) continue;
+    const b = resolverCounts.get(n.resolverId) ?? { name: n.resolver ?? "", count: 0 };
+    b.count += 1;
+    if (!b.name && n.resolver) b.name = n.resolver;
+    resolverCounts.set(n.resolverId, b);
+  }
+  const suggestedResolvers = Array.from(resolverCounts.entries())
+    .map(([agentId, b]) => ({ agentId, agent: b.name, neighbourCount: b.count }))
+    .sort((a, b) => b.neighbourCount - a.neighbourCount);
+
+  return {
+    faultId: id,
+    neighbours,
+    summary: {
+      neighbourCount: neighbours.length,
+      predictedResolutionHoursMedian,
+      predictedCategory,
+      suggestedResolvers,
+    },
+  };
+}
+
+/**
+ * Knowledge-base gap analysis from the ticket↔KB embedding matches
+ * (FaultVectorScore where FVSuse=1, the KB-article side; FVSSimiliarfaultid is a
+ * KBENTRY.id). For a window (default trailing 365 days) of reactive, non-stub,
+ * noise-filtered tickets: KB coverage (how many tickets have a match at/above
+ * `matchThreshold`), the most-matched KB articles, and the highest-effort
+ * uncovered tickets — the articles worth writing first. Requires KB embeddings
+ * to be enabled in Halo; returns zeroed coverage with no rows if absent.
+ */
+export async function getKnowledgeGaps(
+  startdate?: string,
+  enddate?: string,
+  matchThreshold = 0.8,
+  limit = 20,
+): Promise<KnowledgeGaps> {
+  const { start, end } = resolveWindow(startdate, enddate, 365);
+  const ex = exclusiveEnd(end);
+  const th = Number.isFinite(matchThreshold) ? matchThreshold : 0.8;
+  const top = Math.max(1, Math.trunc(limit));
+  const base =
+    `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)` +
+    ` and rt.RTIsProject = 0 and rt.RTIsOpportunity = 0` +
+    ` and (f.datecleared > f.dateoccured or f.datecleared is null or f.datecleared < '1900-01-01')` +
+    ` and f.dateoccured >= '${start}' and f.dateoccured < '${ex}' and ${noiseFilter("f")}`;
+  const kbJoin =
+    `left join (select FVSfaultid, max(FVSScore) as best_kb from FaultVectorScore where FVSuse = 1 group by FVSfaultid) kb on kb.FVSfaultid = f.faultid`;
+
+  const coverageSql = `select
+  count(*) as tickets,
+  sum(case when kb.best_kb >= ${th} then 1 else 0 end) as covered,
+  cast(avg(kb.best_kb) as decimal(6,4)) as avg_best
+from faults f
+join requesttype rt on f.requesttypenew = rt.RTid
+${kbJoin}
+where ${base}`;
+
+  const topKbSql = `select top ${top}
+  k.id as kb_id,
+  max(cast(k.description as nvarchar(160))) as title,
+  count(distinct fvs.FVSfaultid) as tickets_matched,
+  cast(avg(fvs.FVSScore) as decimal(6,4)) as avg_score
+from FaultVectorScore fvs
+join KBENTRY k on k.id = fvs.FVSSimiliarfaultid
+join faults f on f.faultid = fvs.FVSfaultid
+join requesttype rt on f.requesttypenew = rt.RTid
+where fvs.FVSuse = 1 and fvs.FVSScore >= ${th} and ${base}
+group by k.id
+order by count(distinct fvs.FVSfaultid) desc`;
+
+  const gapSql = `select top ${top}
+  f.faultid,
+  left(cast(f.Symptom as nvarchar(140)), 140) as summary,
+  a.aareadesc as client,
+  cast(coalesce(h.hrs, 0) as decimal(12,2)) as hours_logged,
+  cast(kb.best_kb as decimal(6,4)) as best_kb
+from faults f
+join requesttype rt on f.requesttypenew = rt.RTid
+left join area a on a.aarea = f.areaint
+left join (select faultid, sum(timetaken) as hrs from actions group by faultid) h on h.faultid = f.faultid
+${kbJoin}
+where ${base} and (kb.best_kb is null or kb.best_kb < ${th})
+order by coalesce(h.hrs, 0) desc`;
+
+  const [covRows, kbRows, gapRows] = await Promise.all([
+    reportRows(coverageSql),
+    reportRows(topKbSql),
+    reportRows(gapSql),
+  ]);
+
+  const cov = covRows[0] ?? {};
+  const tickets = num(cov.tickets);
+  const covered = num(cov.covered);
+  return {
+    window: { startdate: start, enddate: end, scope: "reactive" },
+    matchThreshold: th,
+    coverage: {
+      tickets,
+      withKbMatch: covered,
+      coveragePct: rate(covered, tickets),
+      avgBestScore: numOrNull(cov.avg_best),
+    },
+    topKbArticles: kbRows.map((r) => ({
+      kbId: num(r.kb_id),
+      title: String(r.title ?? "").trim(),
+      ticketsMatched: num(r.tickets_matched),
+      avgScore: numOrNull(r.avg_score),
+    })),
+    gapCandidates: gapRows.map((r) => ({
+      faultId: num(r.faultid),
+      summary: String(r.summary ?? "").trim(),
+      client: String(r.client ?? ""),
+      hoursLogged: round2(num(r.hours_logged)),
+      bestKbScore: numOrNull(r.best_kb),
+    })),
+  };
+}
+
+// ---------- Ticket categorisation (AI-in-the-loop) ----------
+//
+// The MCP supplies the data + the write; the calling model does the matching.
+// getTicketsToCategorize returns the controlled taxonomy + the scoped tickets
+// (with their cheap AI summary); the model maps each summary to a category (or
+// proposes a new one) and applies it with setTicketCategory. KEY off-by-one:
+// API `category_1`/`categoryid_1` == DB `category2`/`categoryid2` == the primary
+// categorisation (CATEGORYDETAIL CDType=2).
+
+/**
+ * Feed for the ticket categoriser. Scope with `onlyUncategorised` (default true),
+ * a specific `category` (CDid or "A>B>C" path) to audit/re-categorise, or neither
+ * + onlyUncategorised=false for everything; plus an optional dateoccured range and
+ * reactive/all scope. Returns the controlled CDType=2 taxonomy and the matching
+ * tickets with their AI summary (and a `summaryMissing` flag for ones that need a
+ * fresh AI insight first). Stubs (closed-on-creation) are excluded.
+ */
+export async function getTicketsToCategorize(opts: {
+  startdate?: string;
+  enddate?: string;
+  onlyUncategorised?: boolean;
+  category?: string;
+  scope?: TicketScope;
+  limit?: number;
+} = {}): Promise<TicketsToCategorize> {
+  const onlyUncategorised = opts.onlyUncategorised ?? true;
+  const scope = opts.scope ?? "reactive";
+  const top = Math.max(1, Math.min(1000, Math.trunc(opts.limit ?? 100)));
+  const join = scope === "reactive" ? "join requesttype rt on f.requesttypenew = rt.RTid" : "";
+
+  const where: string[] = [
+    "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)",
+    NOT_STUB,
+  ];
+  if (scope === "reactive") where.push("rt.RTIsProject = 0 and rt.RTIsOpportunity = 0");
+  if (opts.startdate) where.push(`f.dateoccured >= '${opts.startdate}'`);
+  if (opts.enddate) where.push(`f.dateoccured < '${exclusiveEnd(opts.enddate)}'`);
+  if (opts.category != null && opts.category !== "") {
+    const c = opts.category.trim();
+    if (/^\d+$/.test(c)) where.push(`f.categoryid2 = ${c}`);
+    else where.push(`cast(f.category2 as nvarchar(400)) = '${c.replace(/'/g, "''")}'`);
+  } else if (onlyUncategorised) {
+    where.push("nullif(ltrim(rtrim(cast(f.category2 as nvarchar(400)))), '') is null");
+  }
+  const whereSql = where.join(" and ");
+
+  const ticketsSql = `select top ${top}
+  f.faultid,
+  left(cast(f.Symptom as nvarchar(120)), 120) as subject,
+  a.aareadesc as client,
+  cast(f.category2 as nvarchar(200)) as current_category,
+  f.categoryid2 as current_category_id,
+  left(convert(nvarchar(max), f.faigeneratedsummary), 400) as ai_summary,
+  cast(f.faisuggestedcategory as nvarchar(120)) as ai_suggested_category
+from faults f
+${join}
+left join area a on a.aarea = f.areaint
+where ${whereSql}
+order by f.dateoccured desc`;
+
+  const countSql = `select count(*) as n from faults f ${join} where ${whereSql}`;
+  const catSql = `select cd.CDid as id, cast(cd.CDCategoryName as nvarchar(200)) as name from CATEGORYDETAIL cd where cd.CDType = 2 order by cd.CDCategoryName offset 0 rows`;
+
+  const [ticketRows, countRows, catRows] = await Promise.all([
+    reportRows(ticketsSql),
+    reportRows(countSql),
+    reportRows(catSql),
+  ]);
+
+  const tickets: CategorizationTicket[] = ticketRows.map((r) => {
+    const summary = r.ai_summary ? String(r.ai_summary).trim() : "";
+    return {
+      faultId: num(r.faultid),
+      subject: String(r.subject ?? "").trim(),
+      client: String(r.client ?? ""),
+      currentCategory: r.current_category ? String(r.current_category) : null,
+      currentCategoryId: r.current_category_id != null && String(r.current_category_id) !== "" ? num(r.current_category_id) : null,
+      aiSummary: summary || null,
+      aiSuggestedCategory: r.ai_suggested_category ? String(r.ai_suggested_category) : null,
+      summaryMissing: summary.length === 0,
+    };
+  });
+
+  return {
+    filter: {
+      startdate: opts.startdate,
+      enddate: opts.enddate,
+      onlyUncategorised,
+      category: opts.category,
+      scope,
+    },
+    categories: catRows.map((r) => ({ id: num(r.id), name: String(r.name ?? "").trim() })),
+    totalMatching: num(countRows[0]?.n),
+    returned: tickets.length,
+    tickets,
+  };
+}
+
+/**
+ * Apply the primary category to a ticket. `categoryId` is the CATEGORYDETAIL CDid
+ * (CDType=2); `categoryPath` is its "A>B>C" name (optional but recommended — Halo
+ * stores both). Writes API `categoryid_1` + `category_1` (= DB categoryid2/category2).
+ * This is a single-ticket write; bulk categorisation = the caller looping after
+ * reviewing the proposed mapping.
+ */
+export async function setTicketCategory(
+  ticketId: number,
+  categoryId: number,
+  categoryPath?: string,
+): Promise<HaloTicket> {
+  return updateTicket({
+    id: ticketId,
+    categoryid_1: categoryId,
+    ...(categoryPath ? { category_1: categoryPath } : {}),
+  });
+}
+
+/**
+ * Create a HaloPSA category via POST /Category. `typeId` 1 = primary ticket
+ * category (the kind tickets are tagged with; == DB CATEGORYDETAIL CDType 2),
+ * 2 = closure, 4 = request-type. Name is the "A>B>C" path. Use to add genuinely
+ * missing categories surfaced by the categoriser (e.g. "License Request",
+ * "Noise>Auto-Reply"). The new CDid is returned for use with setTicketCategory.
+ */
+export async function createCategory(
+  categoryName: string,
+  typeId = 1,
+  categoryGroupId?: number,
+): Promise<HaloCategory> {
+  const payload: Record<string, unknown> = {
+    category_name: categoryName,
+    value: categoryName,
+    type_id: typeId,
+    sla_id: -1,
+    priority_id: -1,
+    chargerate: -1,
+    itilrequesttype: 0,
+  };
+  if (categoryGroupId != null) payload.category_group_id = categoryGroupId;
+  const res = await call<HaloCategory | HaloCategory[]>("/Category", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return Array.isArray(res) ? res[0] : res;
+}
+
+// ---------- Noise-ticket analysis (stop low-value tickets at source) ----------
+
+/** SQL fragment classifying a ticket's Symptom into a noise type. Only the
+ *  explicit patterns count as noise — NOT a catch-all (most uncategorised
+ *  tickets are real work). */
+function noiseTypeSql(sym: string): string {
+  return `case
+  when ${sym} like 'Automatic reply%' or ${sym} like 'Automatische Antwort%' or ${sym} like '%out of office%' or ${sym} like '%auto-reply%' or ${sym} like '%automatic reply%' then 'Auto-Reply / Out-of-Office'
+  when ${sym} like '%verification code%' or ${sym} like '%security code%' or ${sym} like '% is your %code%' or ${sym} like '%one-time pass%' then 'Verification / OTP'
+  when ${sym} like '%newsletter%' or ${sym} like '%unsubscribe%' then 'Newsletter / Marketing'
+  when ${sym} like 'test %' or ${sym} like '%test ticket%' or ${sym} like 'testing%' then 'Test'
+  else 'Other' end`;
+}
+
+const NOISE_RECOMMENDATIONS: Record<string, string> = {
+  "Auto-Reply / Out-of-Office":
+    "Enable Halo's auto-reply / out-of-office detection on the inbound mailbox (Mailbox settings → reject or auto-close auto-replies) so OOO bounces never open tickets.",
+  "Verification / OTP":
+    "Route verification/OTP and security-code emails away from the ticket mailbox, or add an inbound rule to discard them — they're never actionable.",
+  "Newsletter / Marketing":
+    "Unsubscribe the ticket mailbox from vendor newsletters/marketing, or add a sender/subject inbound rule to discard them.",
+  Test: "Internal test tickets — exclude from reporting and remind staff to use a sandbox/test type.",
+  Other: "Review manually; matched a generic noise heuristic but no specific source rule.",
+};
+
+/**
+ * Analyse noise tickets — low/no-value reactive tickets (auto-replies, OOO, OTP
+ * emails, newsletters, tests) that still consume triage time — for a window
+ * (defaults to trailing 365 days). Returns the noise share of reactive volume,
+ * hours wasted, a breakdown by noise type with a source-fix recommendation each,
+ * and a per-mailbox breakdown so you can see which inbound mailbox to harden.
+ */
+export async function getNoiseTicketAnalysis(
+  startdate?: string,
+  enddate?: string,
+): Promise<NoiseTicketAnalysis> {
+  const { start, end } = resolveWindow(startdate, enddate, 365);
+  const ex = exclusiveEnd(end);
+  const sym = "cast(f.Symptom as nvarchar(400))";
+  const base =
+    `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)` +
+    ` and rt.RTIsProject = 0 and rt.RTIsOpportunity = 0` +
+    ` and f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`;
+  const isNoise =
+    `(${sym} like 'Automatic reply%' or ${sym} like 'Automatische Antwort%' or ${sym} like '%out of office%' or ${sym} like '%auto-reply%' or ${sym} like '%automatic reply%'` +
+    ` or ${sym} like '%verification code%' or ${sym} like '%security code%' or ${sym} like '% is your %code%' or ${sym} like '%one-time pass%'` +
+    ` or ${sym} like '%newsletter%' or ${sym} like '%unsubscribe%'` +
+    ` or ${sym} like 'test %' or ${sym} like '%test ticket%' or ${sym} like 'testing%')`;
+
+  const summarySql = `select
+  count(*) as total_reactive,
+  sum(case when ${isNoise} then 1 else 0 end) as total_noise,
+  cast(sum(case when ${isNoise} then coalesce(h.hrs, 0) else 0 end) as decimal(12,2)) as noise_hours
+from faults f
+join requesttype rt on f.requesttypenew = rt.RTid
+left join (select faultid, sum(timetaken) as hrs from actions group by faultid) h on h.faultid = f.faultid
+where ${base}`;
+
+  const byTypeSql = `select ${noiseTypeSql(sym)} as noise_type,
+  count(*) as tickets,
+  cast(sum(coalesce(h.hrs, 0)) as decimal(12,2)) as hours_wasted
+from faults f
+join requesttype rt on f.requesttypenew = rt.RTid
+left join (select faultid, sum(timetaken) as hrs from actions group by faultid) h on h.faultid = f.faultid
+where ${base} and ${isNoise}
+group by ${noiseTypeSql(sym)}
+order by count(*) desc
+offset 0 rows`;
+
+  const byMailboxSql = `select f.FMailBoxID as mailbox_id, count(*) as tickets
+from faults f
+join requesttype rt on f.requesttypenew = rt.RTid
+where ${base} and ${isNoise}
+group by f.FMailBoxID
+order by count(*) desc
+offset 0 rows`;
+
+  const [sumRows, typeRows, mbRows] = await Promise.all([
+    reportRows(summarySql),
+    reportRows(byTypeSql),
+    reportRows(byMailboxSql),
+  ]);
+
+  const s = sumRows[0] ?? {};
+  const totalReactive = num(s.total_reactive);
+  const totalNoise = num(s.total_noise);
+  return {
+    window: { startdate: start, enddate: end, scope: "reactive" },
+    totalReactiveTickets: totalReactive,
+    totalNoiseTickets: totalNoise,
+    noiseSharePct: rate(totalNoise, totalReactive),
+    totalHoursWasted: round2(num(s.noise_hours)),
+    byType: typeRows.map((r) => {
+      const t = String(r.noise_type ?? "Other");
+      const tickets = num(r.tickets);
+      return {
+        type: t,
+        tickets,
+        hoursWasted: round2(num(r.hours_wasted)),
+        sharePct: rate(tickets, totalNoise),
+        recommendation: NOISE_RECOMMENDATIONS[t] ?? NOISE_RECOMMENDATIONS.Other,
+      };
+    }),
+    byMailbox: mbRows.map((r) => ({ mailboxId: num(r.mailbox_id), tickets: num(r.tickets) })),
+  };
+}
+
+/**
+ * Trigger a fresh AI re-index (summary / suggestions) on a ticket — POST
+ * /Tickets with `_re_index: true`. Best run on a worked/closed ticket so the
+ * summary reflects the resolution. The response echoes `_re_index` on success,
+ * but the new `faigeneratedsummary` is written asynchronously — wait a moment
+ * and re-pull the ticket (e.g. via getTicketsToCategorize) to read it.
+ */
+export async function triggerTicketAiSummary(ticketId: number): Promise<unknown> {
+  return call<unknown>("/Tickets", {
+    method: "POST",
+    body: JSON.stringify([{ id: ticketId, _re_index: true }]),
+  });
 }
 
 export { HaloApiError };
