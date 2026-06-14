@@ -3066,6 +3066,7 @@ export async function getPrepayAccountBalance(limit = 500): Promise<PrepayAccoun
   const sql = `select top ${top}
   ch.CHid as contract_id,
   a.aareadesc as client,
+  cast(coalesce(a.aisinactive,0) as int) as client_inactive,
   cast(coalesce(ch.chactive,0) as int) as active,
   cast(pp.collected as decimal(14,2)) as collected,
   cast(pp.purchased as decimal(12,2)) as purchased_hrs,
@@ -3097,6 +3098,7 @@ offset 0 rows`;
     return {
       contractId: num(r.contract_id),
       client: String(r.client ?? ""),
+      clientActive: num(r.client_inactive) === 0,
       active: num(r.active) === 1,
       collectedAmount: collected,
       purchasedHours: purchased,
@@ -3114,7 +3116,7 @@ offset 0 rows`;
   });
   return {
     note:
-      "Per-contract prepay (deferred-revenue) account. collectedAmount/purchasedHours = cash invoiced + net hours added (PREPAYHISTORY); consumedHours/recognisedAmount = drawn down + revenue earned (ACTIONS.ActionPrePayHours/adefprepayamount). remainingHours<0 = over-drawn (delivered past the block); deferredBalance = cash collected not yet earned (negative = recognised beyond collected). status: over-drawn / untouched (paid but ~unused) / low-balance / healthy. Grain is the contract — a client may hold several; purchasedHours is net of any adjustments. Amounts in the home currency (see `currency`).",
+      "Per-contract prepay (deferred-revenue) account. collectedAmount/purchasedHours = cash invoiced + net hours added (PREPAYHISTORY); consumedHours/recognisedAmount = drawn down + revenue earned (ACTIONS.ActionPrePayHours/adefprepayamount). remainingHours<0 = over-drawn (delivered past the block); deferredBalance = cash collected not yet earned (negative = recognised beyond collected). status: over-drawn / untouched (paid but ~unused) / low-balance / healthy. clientActive (AREA.aisinactive) flags whether the client account is still active — watch for balances on inactive clients. Grain is the contract — a client may hold several; purchasedHours is net of any adjustments. Amounts in the home currency (see `currency`).",
     currency,
     accounts,
   };

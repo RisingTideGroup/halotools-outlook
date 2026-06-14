@@ -1028,6 +1028,8 @@ export interface ProjectProfitability {
 export interface PrepayAccountRow {
   contractId: number;
   client: string;
+  /** the client account is active (AREA.aisinactive = 0) */
+  clientActive: boolean;
   active: boolean;
   /** cash invoiced into the block (PREPAYHISTORY.PPAmount) */
   collectedAmount: number;
