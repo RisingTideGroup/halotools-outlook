@@ -1331,27 +1331,6 @@ async function reportRows(sql: string): Promise<Record<string, unknown>[]> {
   return report?.rows ?? [];
 }
 
-/**
- * Whether `column` exists on `table` in this tenant's schema. HaloPSA custom
- * fields (column names conventionally prefixed "CF") are per-instance: a query
- * that references one on a tenant that lacks it fails to COMPILE (a bind-time
- * error), so it can't be guarded with CASE/EXISTS inside the query — the column
- * has to be omitted from the SQL entirely. Probe the catalogue first, cache the
- * result for the process lifetime (schema shape is stable within a session).
- */
-const columnCache = new Map<string, boolean>();
-async function columnExists(table: string, column: string): Promise<boolean> {
-  const key = `${table.toLowerCase()}.${column.toLowerCase()}`;
-  const cached = columnCache.get(key);
-  if (cached !== undefined) return cached;
-  const rows = await reportRows(
-    `select top 1 1 as ok from INFORMATION_SCHEMA.COLUMNS where lower(TABLE_NAME) = '${table.toLowerCase()}' and lower(COLUMN_NAME) = '${column.toLowerCase()}'`,
-  );
-  const exists = rows.length > 0;
-  columnCache.set(key, exists);
-  return exists;
-}
-
 function num(v: unknown): number {
   const n = typeof v === "number" ? v : parseFloat(String(v ?? ""));
   return Number.isFinite(n) ? n : 0;
@@ -2644,23 +2623,24 @@ export async function triggerTicketAiSummary(ticketId: number): Promise<unknown>
 //   retainer  -> SUM(PREPAYHISTORY.PPAmount>0) on the contract (dominant model)
 //   T&M       -> SUM(ACTIONS.ActionChargeAmount) over the project
 //   else      -> fixed-fee/internal (lump invoice lines are often unlinked here)
-// Cost = ACTIONS hours × agent ucostPrice (pay-type-adjusted: CFagentPayType 1 =
-// annual/÷2080, 2 or blank = hourly). CFagentPayType is a custom field and may
-// not exist on every tenant — when absent, ucostPrice is treated as already
-// hourly. Cost coverage is partial (only some agents are costed) — always
-// surface costCoveragePct before trusting margin.
+// Cost = ACTIONS hours × the agent's hourly cost rate, taken from standard Halo
+// cost fields only (no per-tenant custom fields): the cost-history rate in
+// UnameCostTracking that was in effect when the work was actually done, falling
+// back to the agent's current cost rate UNAME.ucostPrice. The work-done date is
+// coalesce(Whe_, ActionArrivalDate, ActionDateCreated) — ActionDateCreated can
+// be backdated, so Whe_/ActionArrivalDate (when the work happened) are preferred.
+// Cost coverage is partial (only some agents have a cost rate set) — always
+// surface costCoveragePct before trusting margin. NOTE: this assumes
+// ucostPrice/uctCost is an HOURLY cost rate (the Halo standard). A tenant that
+// instead stores an annual salary in that field will read inflated labour cost —
+// effectiveRate (revenue/hours) is the rate-independent profitability proxy then.
 
 const PROJECT_MAIN = "(p.fmainprojectid is null or p.fmainprojectid = 0 or p.fmainprojectid = p.faultid)";
 
-/** Per-hour agent cost expression. `hasPayType` gates the CFagentPayType custom
- *  field: when present we ÷2080 for salaried (pay type 1) agents, otherwise we
- *  treat ucostPrice as an hourly rate as-is so the query still compiles. */
-function agentHourlyCost(hasPayType: boolean): string {
-  const base = "coalesce(try_convert(float, nullif(cast(u.ucostPrice as nvarchar(40)), '')), 0)";
-  return hasPayType
-    ? `case when try_convert(int, u.CFagentPayType) = 1 then ${base} / 2080.0 else ${base} end`
-    : base;
-}
+/** Per-hour agent cost rate: cost-history rate effective when the work was done
+ *  (UnameCostTracking), else the agent's current cost (UNAME.ucostPrice). */
+const AGENT_HOURLY_COST =
+  "coalesce(uct.uctCost, coalesce(try_convert(float, nullif(cast(u.ucostPrice as nvarchar(40)), '')), 0))";
 
 /**
  * Per-project profitability with auto-detected billing model. For each main
@@ -2676,8 +2656,6 @@ export async function getProjectProfitability(
 ): Promise<ProjectProfitability> {
   const top = Math.max(1, Math.min(500, Math.trunc(limit)));
   const mh = Number.isFinite(minHours) ? minHours : 1;
-  const hasPayType = await columnExists("UNAME", "CFagentPayType");
-  const costExpr = agentHourlyCost(hasPayType);
   const sql = `select top ${top}
   p.faultid,
   left(cast(p.Symptom as nvarchar(90)), 90) as project,
@@ -2695,9 +2673,11 @@ left join (select PPContractID, sum(case when PPAmount > 0 then PPAmount else 0 
 left join (
   select ac.AProjectID,
     sum(ac.ActionChargeAmount) as tm_charge,
-    sum(ac.timetaken * (${costExpr})) as labour_cost,
-    sum(case when coalesce(try_convert(float, nullif(cast(u.ucostPrice as nvarchar(40)), '')), 0) > 0 then ac.timetaken else 0 end) as costed_hours
-  from actions ac join uname u on u.unum = ac.whoagentid
+    sum(ac.timetaken * (${AGENT_HOURLY_COST})) as labour_cost,
+    sum(case when (${AGENT_HOURLY_COST}) > 0 then ac.timetaken else 0 end) as costed_hours
+  from actions ac
+  join uname u on u.unum = ac.whoagentid
+  left join UnameCostTracking uct on uct.uctAgentId = ac.whoagentid and coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) >= uct.uctStartDate and coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) < uct.uctEndDate
   group by ac.AProjectID
 ) act on act.AProjectID = p.faultid
 where rt.RTIsProject = 1 and ${PROJECT_MAIN}
@@ -2756,11 +2736,7 @@ order by p.FProjectTimeActual desc`;
   });
   return {
     note:
-      "Billing model auto-detected per project (retainer prepay > T&M charge > fixed/internal). Retainer revenue is the contract's total block top-ups and may span multiple projects on a shared contract. Labour cost is " +
-      (hasPayType
-        ? "pay-type-adjusted ucostPrice"
-        : "ucostPrice treated as hourly (CFagentPayType custom field not present on this tenant)") +
-      " and PARTIAL — trust grossMargin only when marginReliable=true (costCoveragePct>=80). effectiveRate (revenue/hours) is the robust profitability proxy.",
+      "Billing model auto-detected per project (retainer prepay > T&M charge > fixed/internal). Retainer revenue is the contract's total block top-ups and may span multiple projects on a shared contract. Labour cost uses the agent's hourly cost rate (cost-history rate effective on the action date, else current ucostPrice) and is PARTIAL — trust grossMargin only when marginReliable=true (costCoveragePct>=80). effectiveRate (revenue/hours) is the rate-independent profitability proxy.",
     projects,
   };
 }
@@ -2825,30 +2801,27 @@ order by coalesce(ch.child_total, 0) desc`;
 
 /**
  * Forward resource load per technician: booked appointment hours over the next
- * `weeks` (from APPOINTMENT start/end, excluding all-day and deleted) vs a weekly
- * capacity target (UNAME.CFAgentRequiredBillableHours, default 40). Flags
- * over-allocated / under-booked. Excludes bots and the Unassigned pseudo-agent.
+ * `weeks` (from APPOINTMENT start/end, excluding all-day and deleted) vs a flat
+ * weekly capacity (`weeklyCapacityHours`, default 40 — no per-tenant custom
+ * fields). Flags over-allocated / under-booked. Excludes bots and the
+ * Unassigned pseudo-agent.
  */
-export async function getResourceForecast(weeks = 4): Promise<ResourceForecast> {
+export async function getResourceForecast(
+  weeks = 4,
+  weeklyCapacityHours = 40,
+): Promise<ResourceForecast> {
   const w = Math.max(1, Math.min(26, Math.trunc(weeks)));
+  const weeklyTarget = weeklyCapacityHours > 0 ? weeklyCapacityHours : 40;
+  const capacity = round2(weeklyTarget * w);
   const start = new Date().toISOString().slice(0, 10);
   const endD = new Date();
   endD.setUTCDate(endD.getUTCDate() + w * 7);
   const end = endD.toISOString().slice(0, 10);
-  // CFAgentRequiredBillableHours is a per-tenant custom field; when it's absent
-  // we can't reference it (bind-time error), so omit the column and fall back to
-  // a 40h/wk default capacity in JS. When present, blank per-agent values stay
-  // null (no capacity assumed for that agent).
-  const hasCapacity = await columnExists("UNAME", "CFAgentRequiredBillableHours");
-  const targetExpr = hasCapacity
-    ? "max(try_convert(float, nullif(cast(u.CFAgentRequiredBillableHours as nvarchar(40)), '')))"
-    : "cast(null as float)";
   const sql = `select
   u.unum as agent_id,
   u.uname as agent,
   count(*) as appointments,
-  cast(sum(datediff(minute, ap.APStartDate, ap.APEndDate) / 60.0) as decimal(12,1)) as scheduled_hours,
-  ${targetExpr} as weekly_target
+  cast(sum(datediff(minute, ap.APStartDate, ap.APEndDate) / 60.0) as decimal(12,1)) as scheduled_hours
 from APPOINTMENT ap
 join uname u on u.unum = ap.APunum
 where coalesce(ap.APdeleted,0) = 0 and coalesce(ap.APAllDayEvent,0) = 0
@@ -2861,11 +2834,7 @@ offset 0 rows`;
   const rows = await reportRows(sql);
   const technicians = rows.map((r) => {
     const scheduled = round2(num(r.scheduled_hours));
-    // When the capacity custom field doesn't exist on this tenant, assume a
-    // standard 40h/wk so the forecast still produces utilisation numbers.
-    const weeklyTarget = numOrNull(r.weekly_target) ?? (hasCapacity ? null : 40);
-    const capacity = weeklyTarget != null ? round2(weeklyTarget * w) : null;
-    const util = capacity && capacity > 0 ? round2((scheduled / capacity) * 100) : null;
+    const util = capacity > 0 ? round2((scheduled / capacity) * 100) : null;
     let status = "ok";
     if (util != null) {
       if (util > 100) status = "over-allocated";

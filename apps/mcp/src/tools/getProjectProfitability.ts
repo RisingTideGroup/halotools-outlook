@@ -13,7 +13,7 @@ export function registerGetProjectProfitability(server: McpServer): void {
     {
       title: "Get HaloPSA project profitability (auto-detected billing model)",
       description:
-        "Per-project profitability with the billing model auto-detected from the data: retainer (prepay block top-ups on the project's contract) → time-and-materials (ActionChargeAmount) → fixed-fee/internal. Returns revenue (from the matching source), delivered hours, pay-type-adjusted labour cost with a coverage %, effective rate (£/hr), gross margin (only reliable when costCoveragePct≥80 — cost data is partial in this tenant), and an over-serviced flag (hours ≫ estimate). Caveats: retainer revenue is contract-level (may span multiple projects); effective rate is the robust profitability proxy when cost coverage is low.",
+        "Per-project profitability with the billing model auto-detected from the data: retainer (prepay block top-ups on the project's contract) → time-and-materials (ActionChargeAmount) → fixed-fee/internal. Returns revenue (from the matching source), delivered hours, labour cost from the agent's hourly cost rate (cost-history rate effective on the action date, else current ucostPrice) with a coverage %, effective rate (£/hr), gross margin (only reliable when costCoveragePct≥80 — cost data is partial), and an over-serviced flag (hours ≫ estimate). Caveats: retainer revenue is contract-level (may span multiple projects); effective rate is the robust profitability proxy when cost coverage is low or the cost field stores a non-hourly figure.",
       inputSchema,
     },
     async ({ limit, minHours }) => {
