@@ -35,6 +35,7 @@ import { registerGetKnowledgeGaps } from "./getKnowledgeGaps.js";
 import { registerGetTicketsToCategorize } from "./getTicketsToCategorize.js";
 import { registerSetTicketCategory } from "./setTicketCategory.js";
 import { registerCreateCategory } from "./createCategory.js";
+import { registerTriggerTicketAiSummary } from "./triggerTicketAiSummary.js";
 import { registerGetNoiseTicketAnalysis } from "./getNoiseTicketAnalysis.js";
 
 /** Map of tool name → register function so suppression can decide per-tool
@@ -83,6 +84,7 @@ const TOOL_REGISTRY: Array<{ name: string; register: (s: McpServer) => void }> =
   { name: "getTicketsToCategorize", register: registerGetTicketsToCategorize },
   { name: "setTicketCategory", register: registerSetTicketCategory },
   { name: "createCategory", register: registerCreateCategory },
+  { name: "triggerTicketAiSummary", register: registerTriggerTicketAiSummary },
   { name: "getNoiseTicketAnalysis", register: registerGetNoiseTicketAnalysis },
 
   // Database access + REST escape hatch

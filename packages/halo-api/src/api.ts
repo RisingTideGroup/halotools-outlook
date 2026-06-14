@@ -2595,4 +2595,18 @@ offset 0 rows`;
   };
 }
 
+/**
+ * Trigger a fresh AI re-index (summary / suggestions) on a ticket — POST
+ * /Tickets with `_re_index: true`. Best run on a worked/closed ticket so the
+ * summary reflects the resolution. The response echoes `_re_index` on success,
+ * but the new `faigeneratedsummary` is written asynchronously — wait a moment
+ * and re-pull the ticket (e.g. via getTicketsToCategorize) to read it.
+ */
+export async function triggerTicketAiSummary(ticketId: number): Promise<unknown> {
+  return call<unknown>("/Tickets", {
+    method: "POST",
+    body: JSON.stringify([{ id: ticketId, _re_index: true }]),
+  });
+}
+
 export { HaloApiError };
