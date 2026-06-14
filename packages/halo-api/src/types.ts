@@ -1038,3 +1038,47 @@ export interface ResourceForecast {
   weeks: number;
   technicians: ResourceForecastRow[];
 }
+
+/** Per-agent utilisation over a past window: booked (calendar) vs worked
+ *  (logged) vs billable, against leave-adjusted capacity. */
+export interface TechnicianUtilizationRow {
+  agentId: number;
+  agent: string;
+  capacityHours: number;
+  leaveHours: number;
+  netCapacityHours: number;
+  bookedHours: number;
+  workedHours: number;
+  billableHours: number;
+  /** booked calendar hours / net capacity */
+  bookedUtilPct: number | null;
+  /** logged work hours / net capacity */
+  workedUtilPct: number | null;
+  /** billable hours / net capacity (the revenue-bearing utilisation) */
+  billableUtilPct: number | null;
+  /** billable hours / worked hours (quality of the work mix) */
+  billabilityPct: number | null;
+  status: string;
+}
+
+export interface TechnicianUtilization {
+  startdate: string;
+  enddate: string;
+  workingDays: number;
+  dailyCapacityHours: number;
+  targetUtilisationPct: number;
+  note: string;
+  totals: {
+    capacityHours: number;
+    leaveHours: number;
+    netCapacityHours: number;
+    bookedHours: number;
+    workedHours: number;
+    billableHours: number;
+    bookedUtilPct: number | null;
+    workedUtilPct: number | null;
+    billableUtilPct: number | null;
+    billabilityPct: number | null;
+  };
+  technicians: TechnicianUtilizationRow[];
+}

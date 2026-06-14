@@ -60,6 +60,8 @@ import type {
   ProjectBillingModel,
   ProjectPortfolio,
   ResourceForecast,
+  TechnicianUtilization,
+  TechnicianUtilizationRow,
   SimilarTicketNeighbour,
 } from "./types.js";
 
@@ -2851,6 +2853,127 @@ offset 0 rows`;
     };
   });
   return { startdate: start, weeks: w, technicians };
+}
+
+/** Count weekdays (Mon–Fri) in an inclusive [start, end] date window. */
+function weekdaysBetween(start: string, end: string): number {
+  const s = new Date(`${start}T00:00:00Z`);
+  const e = new Date(`${end}T00:00:00Z`);
+  if (e < s) return 0;
+  let days = 0;
+  for (const d = new Date(s); d <= e; d.setUTCDate(d.getUTCDate() + 1)) {
+    const dow = d.getUTCDay();
+    if (dow !== 0 && dow !== 6) days++;
+  }
+  return days;
+}
+
+/**
+ * Per-technician utilisation over a past window, combining three standard
+ * sources: booked calendar time (APPOINTMENT), actually-logged work and its
+ * billable share (ACTIONS timetaken + ActIsBillable — the charge-hours columns
+ * are unreliable/empty in many tenants), and leave (HOLIDAYS) which reduces
+ * capacity. Capacity = working weekdays in the window × dailyCapacityHours,
+ * minus each agent's leave hours. Returns per-agent and rolled-up:
+ *   bookedUtil  = booked / net capacity  (calendar fill)
+ *   workedUtil  = worked / net capacity  (effort actually logged)
+ *   billableUtil= billable / net capacity (revenue-bearing utilisation)
+ *   billability = billable / worked      (quality of the work mix)
+ * Flags over-allocated (booked > 100%), under-utilised (worked below target),
+ * and low-billability. Only agents with booked or worked hours are returned
+ * (excludes bots and the Unassigned pseudo-agent).
+ */
+export async function getTechnicianUtilization(
+  startdate?: string,
+  enddate?: string,
+  dailyCapacityHours = 8,
+  targetUtilisationPct = 75,
+): Promise<TechnicianUtilization> {
+  const { start, end } = resolveWindow(startdate, enddate, 30);
+  const dch = dailyCapacityHours > 0 ? dailyCapacityHours : 8;
+  const target = targetUtilisationPct > 0 ? targetUtilisationPct : 75;
+  const workingDays = weekdaysBetween(start, end);
+  const grossCapacity = round2(workingDays * dch);
+  const ex = exclusiveEnd(end);
+  const sql = `select
+  u.unum as agent_id,
+  u.uname as agent,
+  cast(coalesce(ap.booked,0) as decimal(14,2)) as booked_hrs,
+  cast(coalesce(wk.worked,0) as decimal(14,2)) as worked_hrs,
+  cast(coalesce(wk.billable,0) as decimal(14,2)) as billable_hrs,
+  cast(coalesce(h.leave_hrs,0) as decimal(14,2)) as leave_hrs
+from uname u
+left join (select APunum, sum(datediff(minute, APStartDate, APEndDate)/60.0) as booked from APPOINTMENT where coalesce(APdeleted,0)=0 and coalesce(APAllDayEvent,0)=0 and APStartDate >= '${start}' and APStartDate < '${ex}' group by APunum) ap on ap.APunum = u.unum
+left join (select ac.whoagentid, sum(ac.timetaken) as worked, sum(case when ac.ActIsBillable = 1 then ac.timetaken else 0 end) as billable from actions ac where coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) >= '${start}' and coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) < '${ex}' group by ac.whoagentid) wk on wk.whoagentid = u.unum
+left join (select HTechnicianID, sum(Hduration) as leave_hrs from HOLIDAYS where Hdate >= '${start}' and Hdate < '${ex}' group by HTechnicianID) h on h.HTechnicianID = u.unum
+where coalesce(u.uisapiagent,0) = 0 and u.unum <> 1 and (coalesce(ap.booked,0) > 0 or coalesce(wk.worked,0) > 0)
+order by coalesce(wk.worked,0) desc
+offset 0 rows`;
+
+  const rows = await reportRows(sql);
+  const tot = { capacity: 0, leave: 0, net: 0, booked: 0, worked: 0, billable: 0 };
+  const technicians: TechnicianUtilizationRow[] = rows.map((r) => {
+    const leave = round2(num(r.leave_hrs));
+    const net = round2(Math.max(grossCapacity - leave, 0));
+    const booked = round2(num(r.booked_hrs));
+    const worked = round2(num(r.worked_hrs));
+    const billable = round2(num(r.billable_hrs));
+    const bookedUtil = net > 0 ? round2((booked / net) * 100) : null;
+    const workedUtil = net > 0 ? round2((worked / net) * 100) : null;
+    const billableUtil = net > 0 ? round2((billable / net) * 100) : null;
+    const billability = worked > 0 ? round2((billable / worked) * 100) : null;
+    tot.capacity += grossCapacity;
+    tot.leave += leave;
+    tot.net += net;
+    tot.booked += booked;
+    tot.worked += worked;
+    tot.billable += billable;
+    let status = "ok";
+    if (bookedUtil != null && bookedUtil > 100) status = "over-allocated";
+    else if (workedUtil != null && workedUtil < target * 0.5) status = "under-utilised";
+    else if (workedUtil != null && workedUtil < target) status = "below-target";
+    if (billability != null && billability < 50 && worked > 0) {
+      status = status === "ok" ? "low-billability" : `${status}, low-billability`;
+    }
+    return {
+      agentId: num(r.agent_id),
+      agent: String(r.agent ?? ""),
+      capacityHours: grossCapacity,
+      leaveHours: leave,
+      netCapacityHours: net,
+      bookedHours: booked,
+      workedHours: worked,
+      billableHours: billable,
+      bookedUtilPct: bookedUtil,
+      workedUtilPct: workedUtil,
+      billableUtilPct: billableUtil,
+      billabilityPct: billability,
+      status,
+    };
+  });
+
+  return {
+    startdate: start,
+    enddate: end,
+    workingDays,
+    dailyCapacityHours: dch,
+    targetUtilisationPct: target,
+    note:
+      "Capacity = working weekdays in window × dailyCapacityHours, minus each agent's leave (HOLIDAYS). Booked = APPOINTMENT calendar hours; worked = ACTIONS timetaken (logged effort); billable = worked hours flagged ActIsBillable=1 (the ActionChargeHours columns are unreliable/empty in many tenants, so the billable flag is used). bookedUtil can exceed 100% when the calendar holds non-work blocks. billability (billable/worked) measures the work mix; billableUtil (billable/capacity) is the revenue-bearing utilisation.",
+    totals: {
+      capacityHours: round2(tot.capacity),
+      leaveHours: round2(tot.leave),
+      netCapacityHours: round2(tot.net),
+      bookedHours: round2(tot.booked),
+      workedHours: round2(tot.worked),
+      billableHours: round2(tot.billable),
+      bookedUtilPct: tot.net > 0 ? round2((tot.booked / tot.net) * 100) : null,
+      workedUtilPct: tot.net > 0 ? round2((tot.worked / tot.net) * 100) : null,
+      billableUtilPct: tot.net > 0 ? round2((tot.billable / tot.net) * 100) : null,
+      billabilityPct: tot.worked > 0 ? round2((tot.billable / tot.worked) * 100) : null,
+    },
+    technicians,
+  };
 }
 
 export { HaloApiError };
