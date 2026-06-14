@@ -53,6 +53,8 @@ import type {
   KnowledgeGaps,
   TicketsToCategorize,
   CategorizationTicket,
+  HaloCategory,
+  NoiseTicketAnalysis,
   SimilarTicketNeighbour,
 } from "./types.js";
 
@@ -2455,6 +2457,142 @@ export async function setTicketCategory(
     categoryid_1: categoryId,
     ...(categoryPath ? { category_1: categoryPath } : {}),
   });
+}
+
+/**
+ * Create a HaloPSA category via POST /Category. `typeId` 1 = primary ticket
+ * category (the kind tickets are tagged with; == DB CATEGORYDETAIL CDType 2),
+ * 2 = closure, 4 = request-type. Name is the "A>B>C" path. Use to add genuinely
+ * missing categories surfaced by the categoriser (e.g. "License Request",
+ * "Noise>Auto-Reply"). The new CDid is returned for use with setTicketCategory.
+ */
+export async function createCategory(
+  categoryName: string,
+  typeId = 1,
+  categoryGroupId?: number,
+): Promise<HaloCategory> {
+  const payload: Record<string, unknown> = {
+    category_name: categoryName,
+    value: categoryName,
+    type_id: typeId,
+    sla_id: -1,
+    priority_id: -1,
+    chargerate: -1,
+    itilrequesttype: 0,
+  };
+  if (categoryGroupId != null) payload.category_group_id = categoryGroupId;
+  const res = await call<HaloCategory | HaloCategory[]>("/Category", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return Array.isArray(res) ? res[0] : res;
+}
+
+// ---------- Noise-ticket analysis (stop low-value tickets at source) ----------
+
+/** SQL fragment classifying a ticket's Symptom into a noise type. Only the
+ *  explicit patterns count as noise — NOT a catch-all (most uncategorised
+ *  tickets are real work). */
+function noiseTypeSql(sym: string): string {
+  return `case
+  when ${sym} like 'Automatic reply%' or ${sym} like 'Automatische Antwort%' or ${sym} like '%out of office%' or ${sym} like '%auto-reply%' or ${sym} like '%automatic reply%' then 'Auto-Reply / Out-of-Office'
+  when ${sym} like '%verification code%' or ${sym} like '%security code%' or ${sym} like '% is your %code%' or ${sym} like '%one-time pass%' then 'Verification / OTP'
+  when ${sym} like '%newsletter%' or ${sym} like '%unsubscribe%' then 'Newsletter / Marketing'
+  when ${sym} like 'test %' or ${sym} like '%test ticket%' or ${sym} like 'testing%' then 'Test'
+  else 'Other' end`;
+}
+
+const NOISE_RECOMMENDATIONS: Record<string, string> = {
+  "Auto-Reply / Out-of-Office":
+    "Enable Halo's auto-reply / out-of-office detection on the inbound mailbox (Mailbox settings → reject or auto-close auto-replies) so OOO bounces never open tickets.",
+  "Verification / OTP":
+    "Route verification/OTP and security-code emails away from the ticket mailbox, or add an inbound rule to discard them — they're never actionable.",
+  "Newsletter / Marketing":
+    "Unsubscribe the ticket mailbox from vendor newsletters/marketing, or add a sender/subject inbound rule to discard them.",
+  Test: "Internal test tickets — exclude from reporting and remind staff to use a sandbox/test type.",
+  Other: "Review manually; matched a generic noise heuristic but no specific source rule.",
+};
+
+/**
+ * Analyse noise tickets — low/no-value reactive tickets (auto-replies, OOO, OTP
+ * emails, newsletters, tests) that still consume triage time — for a window
+ * (defaults to trailing 365 days). Returns the noise share of reactive volume,
+ * hours wasted, a breakdown by noise type with a source-fix recommendation each,
+ * and a per-mailbox breakdown so you can see which inbound mailbox to harden.
+ */
+export async function getNoiseTicketAnalysis(
+  startdate?: string,
+  enddate?: string,
+): Promise<NoiseTicketAnalysis> {
+  const { start, end } = resolveWindow(startdate, enddate, 365);
+  const ex = exclusiveEnd(end);
+  const sym = "cast(f.Symptom as nvarchar(400))";
+  const base =
+    `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)` +
+    ` and rt.RTIsProject = 0 and rt.RTIsOpportunity = 0` +
+    ` and f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`;
+  const isNoise =
+    `(${sym} like 'Automatic reply%' or ${sym} like 'Automatische Antwort%' or ${sym} like '%out of office%' or ${sym} like '%auto-reply%' or ${sym} like '%automatic reply%'` +
+    ` or ${sym} like '%verification code%' or ${sym} like '%security code%' or ${sym} like '% is your %code%' or ${sym} like '%one-time pass%'` +
+    ` or ${sym} like '%newsletter%' or ${sym} like '%unsubscribe%'` +
+    ` or ${sym} like 'test %' or ${sym} like '%test ticket%' or ${sym} like 'testing%')`;
+
+  const summarySql = `select
+  count(*) as total_reactive,
+  sum(case when ${isNoise} then 1 else 0 end) as total_noise,
+  cast(sum(case when ${isNoise} then coalesce(h.hrs, 0) else 0 end) as decimal(12,2)) as noise_hours
+from faults f
+join requesttype rt on f.requesttypenew = rt.RTid
+left join (select faultid, sum(timetaken) as hrs from actions group by faultid) h on h.faultid = f.faultid
+where ${base}`;
+
+  const byTypeSql = `select ${noiseTypeSql(sym)} as noise_type,
+  count(*) as tickets,
+  cast(sum(coalesce(h.hrs, 0)) as decimal(12,2)) as hours_wasted
+from faults f
+join requesttype rt on f.requesttypenew = rt.RTid
+left join (select faultid, sum(timetaken) as hrs from actions group by faultid) h on h.faultid = f.faultid
+where ${base} and ${isNoise}
+group by ${noiseTypeSql(sym)}
+order by count(*) desc
+offset 0 rows`;
+
+  const byMailboxSql = `select f.FMailBoxID as mailbox_id, count(*) as tickets
+from faults f
+join requesttype rt on f.requesttypenew = rt.RTid
+where ${base} and ${isNoise}
+group by f.FMailBoxID
+order by count(*) desc
+offset 0 rows`;
+
+  const [sumRows, typeRows, mbRows] = await Promise.all([
+    reportRows(summarySql),
+    reportRows(byTypeSql),
+    reportRows(byMailboxSql),
+  ]);
+
+  const s = sumRows[0] ?? {};
+  const totalReactive = num(s.total_reactive);
+  const totalNoise = num(s.total_noise);
+  return {
+    window: { startdate: start, enddate: end, scope: "reactive" },
+    totalReactiveTickets: totalReactive,
+    totalNoiseTickets: totalNoise,
+    noiseSharePct: rate(totalNoise, totalReactive),
+    totalHoursWasted: round2(num(s.noise_hours)),
+    byType: typeRows.map((r) => {
+      const t = String(r.noise_type ?? "Other");
+      const tickets = num(r.tickets);
+      return {
+        type: t,
+        tickets,
+        hoursWasted: round2(num(r.hours_wasted)),
+        sharePct: rate(tickets, totalNoise),
+        recommendation: NOISE_RECOMMENDATIONS[t] ?? NOISE_RECOMMENDATIONS.Other,
+      };
+    }),
+    byMailbox: mbRows.map((r) => ({ mailboxId: num(r.mailbox_id), tickets: num(r.tickets) })),
+  };
 }
 
 export { HaloApiError };

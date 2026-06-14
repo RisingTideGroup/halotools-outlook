@@ -940,3 +940,33 @@ export interface TicketsToCategorize {
   returned: number;
   tickets: CategorizationTicket[];
 }
+
+/** A HaloPSA category (from /Category). type_id 1 = primary ticket category
+ *  (== DB CATEGORYDETAIL CDType 2), 2 = closure, 4 = request-type category. */
+export interface HaloCategory {
+  id: number;
+  category_name: string;
+  value?: string;
+  type_id: number;
+  category_group_id?: number;
+  guid?: string;
+}
+
+/** Noise-ticket analysis: low/no-value tickets (auto-replies, OOO, OTP emails,
+ *  newsletters, tests) that consume triage time, grouped so you can stop them at
+ *  source. */
+export interface NoiseTicketAnalysis {
+  window: { startdate: string; enddate: string; scope: TicketScope };
+  totalReactiveTickets: number;
+  totalNoiseTickets: number;
+  noiseSharePct: number | null;
+  totalHoursWasted: number;
+  byType: {
+    type: string;
+    tickets: number;
+    hoursWasted: number;
+    sharePct: number | null;
+    recommendation: string;
+  }[];
+  byMailbox: { mailboxId: number; tickets: number }[];
+}
