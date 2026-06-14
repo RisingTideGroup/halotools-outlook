@@ -2871,9 +2871,10 @@ function weekdaysBetween(start: string, end: string): number {
 /**
  * Per-technician utilisation over a past window, combining three standard
  * sources: booked calendar time (APPOINTMENT), actually-logged work and its
- * billable share (ACTIONS timetaken + ActIsBillable — the charge-hours columns
- * are unreliable/empty in many tenants), and leave (HOLIDAYS) which reduces
- * capacity. Capacity = working weekdays in the window × dailyCapacityHours,
+ * billable share (ACTIONS timetaken; billable = a real charge code, i.e.
+ * ActionCode + 1 > 0 — non-billable time is stored as ActionCode = -1; the
+ * charge-hours columns are unreliable/empty in many tenants), and leave
+ * (HOLIDAYS) which reduces capacity. Capacity = working weekdays × dailyCapacityHours,
  * minus each agent's leave hours. Returns per-agent and rolled-up:
  *   bookedUtil  = booked / net capacity  (calendar fill)
  *   workedUtil  = worked / net capacity  (effort actually logged)
@@ -2904,7 +2905,7 @@ export async function getTechnicianUtilization(
   cast(coalesce(h.leave_hrs,0) as decimal(14,2)) as leave_hrs
 from uname u
 left join (select APunum, sum(datediff(minute, APStartDate, APEndDate)/60.0) as booked from APPOINTMENT where coalesce(APdeleted,0)=0 and coalesce(APAllDayEvent,0)=0 and APStartDate >= '${start}' and APStartDate < '${ex}' group by APunum) ap on ap.APunum = u.unum
-left join (select ac.whoagentid, sum(ac.timetaken) as worked, sum(case when ac.ActIsBillable = 1 then ac.timetaken else 0 end) as billable from actions ac where coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) >= '${start}' and coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) < '${ex}' group by ac.whoagentid) wk on wk.whoagentid = u.unum
+left join (select ac.whoagentid, sum(ac.timetaken) as worked, sum(case when coalesce(ac.ActionCode, -1) + 1 > 0 then ac.timetaken else 0 end) as billable from actions ac where coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) >= '${start}' and coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) < '${ex}' group by ac.whoagentid) wk on wk.whoagentid = u.unum
 left join (select HTechnicianID, sum(Hduration) as leave_hrs from HOLIDAYS where Hdate >= '${start}' and Hdate < '${ex}' group by HTechnicianID) h on h.HTechnicianID = u.unum
 where coalesce(u.uisapiagent,0) = 0 and u.unum <> 1 and (coalesce(ap.booked,0) > 0 or coalesce(wk.worked,0) > 0)
 order by coalesce(wk.worked,0) desc
@@ -2959,7 +2960,7 @@ offset 0 rows`;
     dailyCapacityHours: dch,
     targetUtilisationPct: target,
     note:
-      "Capacity = working weekdays in window × dailyCapacityHours, minus each agent's leave (HOLIDAYS). Booked = APPOINTMENT calendar hours; worked = ACTIONS timetaken (logged effort); billable = worked hours flagged ActIsBillable=1 (the ActionChargeHours columns are unreliable/empty in many tenants, so the billable flag is used). bookedUtil can exceed 100% when the calendar holds non-work blocks. billability (billable/worked) measures the work mix; billableUtil (billable/capacity) is the revenue-bearing utilisation.",
+      "Capacity = working weekdays in window × dailyCapacityHours, minus each agent's leave (HOLIDAYS). Booked = APPOINTMENT calendar hours; worked = ACTIONS timetaken (logged effort); billable = worked hours carrying a real charge code (ActionCode + 1 > 0; non-billable time is stored as ActionCode = -1). The ActionChargeHours/ActIsBillable columns are unreliable in many tenants (ActIsBillable over-counts non-billable -1 actions), so the charge code is used. bookedUtil can exceed 100% when the calendar holds non-work blocks. billability (billable/worked) measures the work mix; billableUtil (billable/capacity) is the revenue-bearing utilisation. This matches the charge_hours a timesheet day/range summary reports.",
     totals: {
       capacityHours: round2(tot.capacity),
       leaveHours: round2(tot.leave),
