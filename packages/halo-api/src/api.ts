@@ -51,6 +51,8 @@ import type {
   ClientDejaVuRow,
   SimilarTicketInsights,
   KnowledgeGaps,
+  TicketsToCategorize,
+  CategorizationTicket,
   SimilarTicketNeighbour,
 } from "./types.js";
 
@@ -2336,6 +2338,123 @@ order by coalesce(h.hrs, 0) desc`;
       bestKbScore: numOrNull(r.best_kb),
     })),
   };
+}
+
+// ---------- Ticket categorisation (AI-in-the-loop) ----------
+//
+// The MCP supplies the data + the write; the calling model does the matching.
+// getTicketsToCategorize returns the controlled taxonomy + the scoped tickets
+// (with their cheap AI summary); the model maps each summary to a category (or
+// proposes a new one) and applies it with setTicketCategory. KEY off-by-one:
+// API `category_1`/`categoryid_1` == DB `category2`/`categoryid2` == the primary
+// categorisation (CATEGORYDETAIL CDType=2).
+
+/**
+ * Feed for the ticket categoriser. Scope with `onlyUncategorised` (default true),
+ * a specific `category` (CDid or "A>B>C" path) to audit/re-categorise, or neither
+ * + onlyUncategorised=false for everything; plus an optional dateoccured range and
+ * reactive/all scope. Returns the controlled CDType=2 taxonomy and the matching
+ * tickets with their AI summary (and a `summaryMissing` flag for ones that need a
+ * fresh AI insight first). Stubs (closed-on-creation) are excluded.
+ */
+export async function getTicketsToCategorize(opts: {
+  startdate?: string;
+  enddate?: string;
+  onlyUncategorised?: boolean;
+  category?: string;
+  scope?: TicketScope;
+  limit?: number;
+} = {}): Promise<TicketsToCategorize> {
+  const onlyUncategorised = opts.onlyUncategorised ?? true;
+  const scope = opts.scope ?? "reactive";
+  const top = Math.max(1, Math.min(1000, Math.trunc(opts.limit ?? 100)));
+  const join = scope === "reactive" ? "join requesttype rt on f.requesttypenew = rt.RTid" : "";
+
+  const where: string[] = [
+    "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)",
+    NOT_STUB,
+  ];
+  if (scope === "reactive") where.push("rt.RTIsProject = 0 and rt.RTIsOpportunity = 0");
+  if (opts.startdate) where.push(`f.dateoccured >= '${opts.startdate}'`);
+  if (opts.enddate) where.push(`f.dateoccured < '${exclusiveEnd(opts.enddate)}'`);
+  if (opts.category != null && opts.category !== "") {
+    const c = opts.category.trim();
+    if (/^\d+$/.test(c)) where.push(`f.categoryid2 = ${c}`);
+    else where.push(`cast(f.category2 as nvarchar(400)) = '${c.replace(/'/g, "''")}'`);
+  } else if (onlyUncategorised) {
+    where.push("nullif(ltrim(rtrim(cast(f.category2 as nvarchar(400)))), '') is null");
+  }
+  const whereSql = where.join(" and ");
+
+  const ticketsSql = `select top ${top}
+  f.faultid,
+  left(cast(f.Symptom as nvarchar(120)), 120) as subject,
+  a.aareadesc as client,
+  cast(f.category2 as nvarchar(200)) as current_category,
+  f.categoryid2 as current_category_id,
+  left(convert(nvarchar(max), f.faigeneratedsummary), 400) as ai_summary,
+  cast(f.faisuggestedcategory as nvarchar(120)) as ai_suggested_category
+from faults f
+${join}
+left join area a on a.aarea = f.areaint
+where ${whereSql}
+order by f.dateoccured desc`;
+
+  const countSql = `select count(*) as n from faults f ${join} where ${whereSql}`;
+  const catSql = `select cd.CDid as id, cast(cd.CDCategoryName as nvarchar(200)) as name from CATEGORYDETAIL cd where cd.CDType = 2 order by cd.CDCategoryName offset 0 rows`;
+
+  const [ticketRows, countRows, catRows] = await Promise.all([
+    reportRows(ticketsSql),
+    reportRows(countSql),
+    reportRows(catSql),
+  ]);
+
+  const tickets: CategorizationTicket[] = ticketRows.map((r) => {
+    const summary = r.ai_summary ? String(r.ai_summary).trim() : "";
+    return {
+      faultId: num(r.faultid),
+      subject: String(r.subject ?? "").trim(),
+      client: String(r.client ?? ""),
+      currentCategory: r.current_category ? String(r.current_category) : null,
+      currentCategoryId: r.current_category_id != null && String(r.current_category_id) !== "" ? num(r.current_category_id) : null,
+      aiSummary: summary || null,
+      aiSuggestedCategory: r.ai_suggested_category ? String(r.ai_suggested_category) : null,
+      summaryMissing: summary.length === 0,
+    };
+  });
+
+  return {
+    filter: {
+      startdate: opts.startdate,
+      enddate: opts.enddate,
+      onlyUncategorised,
+      category: opts.category,
+      scope,
+    },
+    categories: catRows.map((r) => ({ id: num(r.id), name: String(r.name ?? "").trim() })),
+    totalMatching: num(countRows[0]?.n),
+    returned: tickets.length,
+    tickets,
+  };
+}
+
+/**
+ * Apply the primary category to a ticket. `categoryId` is the CATEGORYDETAIL CDid
+ * (CDType=2); `categoryPath` is its "A>B>C" name (optional but recommended — Halo
+ * stores both). Writes API `categoryid_1` + `category_1` (= DB categoryid2/category2).
+ * This is a single-ticket write; bulk categorisation = the caller looping after
+ * reviewing the proposed mapping.
+ */
+export async function setTicketCategory(
+  ticketId: number,
+  categoryId: number,
+  categoryPath?: string,
+): Promise<HaloTicket> {
+  return updateTicket({
+    id: ticketId,
+    categoryid_1: categoryId,
+    ...(categoryPath ? { category_1: categoryPath } : {}),
+  });
 }
 
 export { HaloApiError };

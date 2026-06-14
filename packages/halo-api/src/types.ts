@@ -409,6 +409,16 @@ export interface UpdateTicketPayload {
   customfields?: Array<{ name: string; value: string | number | boolean }>;
   /** ISO datetime for the ticket target / due date. Halo expects this exact field name on writes. */
   targetdate?: string;
+  /** Category fields. NOTE the off-by-one: API `category_1` == DB `category2` == the
+   *  PRIMARY categorisation (CATEGORYDETAIL CDType=2). `categoryid_1` takes the CDid. */
+  category_1?: string;
+  categoryid_1?: number;
+  category_2?: string;
+  categoryid_2?: number;
+  category_3?: string;
+  categoryid_3?: number;
+  category_4?: string;
+  categoryid_4?: number;
 }
 
 /**
@@ -896,4 +906,37 @@ export interface KnowledgeGaps {
     hoursLogged: number;
     bestKbScore: number | null;
   }[];
+}
+
+/** One ticket awaiting categorisation, with the cheap AI summary the model
+ *  matches against the controlled category list. */
+export interface CategorizationTicket {
+  faultId: number;
+  subject: string;
+  client: string;
+  currentCategory: string | null;
+  currentCategoryId: number | null;
+  aiSummary: string | null;
+  aiSuggestedCategory: string | null;
+  summaryMissing: boolean;
+}
+
+/** Feed for the AI ticket-categoriser: the controlled taxonomy plus the scoped
+ *  set of tickets (with summaries) to categorise. The model matches each
+ *  summary to `categories` (or proposes a new one), then applies via
+ *  setTicketCategory. */
+export interface TicketsToCategorize {
+  filter: {
+    startdate?: string;
+    enddate?: string;
+    onlyUncategorised: boolean;
+    category?: string;
+    scope: TicketScope;
+  };
+  /** Controlled primary-category taxonomy (CATEGORYDETAIL CDType=2): id = CDid (the
+   *  value to write as categoryid_1), name = the "A>B>C" path. */
+  categories: { id: number; name: string }[];
+  totalMatching: number;
+  returned: number;
+  tickets: CategorizationTicket[];
 }
