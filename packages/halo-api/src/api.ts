@@ -1331,6 +1331,27 @@ async function reportRows(sql: string): Promise<Record<string, unknown>[]> {
   return report?.rows ?? [];
 }
 
+/**
+ * Whether `column` exists on `table` in this tenant's schema. HaloPSA custom
+ * fields (column names conventionally prefixed "CF") are per-instance: a query
+ * that references one on a tenant that lacks it fails to COMPILE (a bind-time
+ * error), so it can't be guarded with CASE/EXISTS inside the query — the column
+ * has to be omitted from the SQL entirely. Probe the catalogue first, cache the
+ * result for the process lifetime (schema shape is stable within a session).
+ */
+const columnCache = new Map<string, boolean>();
+async function columnExists(table: string, column: string): Promise<boolean> {
+  const key = `${table.toLowerCase()}.${column.toLowerCase()}`;
+  const cached = columnCache.get(key);
+  if (cached !== undefined) return cached;
+  const rows = await reportRows(
+    `select top 1 1 as ok from INFORMATION_SCHEMA.COLUMNS where lower(TABLE_NAME) = '${table.toLowerCase()}' and lower(COLUMN_NAME) = '${column.toLowerCase()}'`,
+  );
+  const exists = rows.length > 0;
+  columnCache.set(key, exists);
+  return exists;
+}
+
 function num(v: unknown): number {
   const n = typeof v === "number" ? v : parseFloat(String(v ?? ""));
   return Number.isFinite(n) ? n : 0;
@@ -2624,12 +2645,22 @@ export async function triggerTicketAiSummary(ticketId: number): Promise<unknown>
 //   T&M       -> SUM(ACTIONS.ActionChargeAmount) over the project
 //   else      -> fixed-fee/internal (lump invoice lines are often unlinked here)
 // Cost = ACTIONS hours × agent ucostPrice (pay-type-adjusted: CFagentPayType 1 =
-// annual/÷2080, 2 or blank = hourly). Cost coverage is partial (only some agents
-// are costed) — always surface costCoveragePct before trusting margin.
+// annual/÷2080, 2 or blank = hourly). CFagentPayType is a custom field and may
+// not exist on every tenant — when absent, ucostPrice is treated as already
+// hourly. Cost coverage is partial (only some agents are costed) — always
+// surface costCoveragePct before trusting margin.
 
 const PROJECT_MAIN = "(p.fmainprojectid is null or p.fmainprojectid = 0 or p.fmainprojectid = p.faultid)";
-const AGENT_HOURLY_COST =
-  "case when try_convert(int, u.CFagentPayType) = 1 then coalesce(try_convert(float, nullif(cast(u.ucostPrice as nvarchar(40)), '')), 0) / 2080.0 else coalesce(try_convert(float, nullif(cast(u.ucostPrice as nvarchar(40)), '')), 0) end";
+
+/** Per-hour agent cost expression. `hasPayType` gates the CFagentPayType custom
+ *  field: when present we ÷2080 for salaried (pay type 1) agents, otherwise we
+ *  treat ucostPrice as an hourly rate as-is so the query still compiles. */
+function agentHourlyCost(hasPayType: boolean): string {
+  const base = "coalesce(try_convert(float, nullif(cast(u.ucostPrice as nvarchar(40)), '')), 0)";
+  return hasPayType
+    ? `case when try_convert(int, u.CFagentPayType) = 1 then ${base} / 2080.0 else ${base} end`
+    : base;
+}
 
 /**
  * Per-project profitability with auto-detected billing model. For each main
@@ -2645,6 +2676,8 @@ export async function getProjectProfitability(
 ): Promise<ProjectProfitability> {
   const top = Math.max(1, Math.min(500, Math.trunc(limit)));
   const mh = Number.isFinite(minHours) ? minHours : 1;
+  const hasPayType = await columnExists("UNAME", "CFagentPayType");
+  const costExpr = agentHourlyCost(hasPayType);
   const sql = `select top ${top}
   p.faultid,
   left(cast(p.Symptom as nvarchar(90)), 90) as project,
@@ -2662,7 +2695,7 @@ left join (select PPContractID, sum(case when PPAmount > 0 then PPAmount else 0 
 left join (
   select ac.AProjectID,
     sum(ac.ActionChargeAmount) as tm_charge,
-    sum(ac.timetaken * (${AGENT_HOURLY_COST})) as labour_cost,
+    sum(ac.timetaken * (${costExpr})) as labour_cost,
     sum(case when coalesce(try_convert(float, nullif(cast(u.ucostPrice as nvarchar(40)), '')), 0) > 0 then ac.timetaken else 0 end) as costed_hours
   from actions ac join uname u on u.unum = ac.whoagentid
   group by ac.AProjectID
@@ -2723,7 +2756,11 @@ order by p.FProjectTimeActual desc`;
   });
   return {
     note:
-      "Billing model auto-detected per project (retainer prepay > T&M charge > fixed/internal). Retainer revenue is the contract's total block top-ups and may span multiple projects on a shared contract. Labour cost is pay-type-adjusted ucostPrice and PARTIAL — trust grossMargin only when marginReliable=true (costCoveragePct>=80). effectiveRate (revenue/hours) is the robust profitability proxy.",
+      "Billing model auto-detected per project (retainer prepay > T&M charge > fixed/internal). Retainer revenue is the contract's total block top-ups and may span multiple projects on a shared contract. Labour cost is " +
+      (hasPayType
+        ? "pay-type-adjusted ucostPrice"
+        : "ucostPrice treated as hourly (CFagentPayType custom field not present on this tenant)") +
+      " and PARTIAL — trust grossMargin only when marginReliable=true (costCoveragePct>=80). effectiveRate (revenue/hours) is the robust profitability proxy.",
     projects,
   };
 }
@@ -2798,12 +2835,20 @@ export async function getResourceForecast(weeks = 4): Promise<ResourceForecast> 
   const endD = new Date();
   endD.setUTCDate(endD.getUTCDate() + w * 7);
   const end = endD.toISOString().slice(0, 10);
+  // CFAgentRequiredBillableHours is a per-tenant custom field; when it's absent
+  // we can't reference it (bind-time error), so omit the column and fall back to
+  // a 40h/wk default capacity in JS. When present, blank per-agent values stay
+  // null (no capacity assumed for that agent).
+  const hasCapacity = await columnExists("UNAME", "CFAgentRequiredBillableHours");
+  const targetExpr = hasCapacity
+    ? "max(try_convert(float, nullif(cast(u.CFAgentRequiredBillableHours as nvarchar(40)), '')))"
+    : "cast(null as float)";
   const sql = `select
   u.unum as agent_id,
   u.uname as agent,
   count(*) as appointments,
   cast(sum(datediff(minute, ap.APStartDate, ap.APEndDate) / 60.0) as decimal(12,1)) as scheduled_hours,
-  max(try_convert(float, nullif(cast(u.CFAgentRequiredBillableHours as nvarchar(40)), ''))) as weekly_target
+  ${targetExpr} as weekly_target
 from APPOINTMENT ap
 join uname u on u.unum = ap.APunum
 where coalesce(ap.APdeleted,0) = 0 and coalesce(ap.APAllDayEvent,0) = 0
@@ -2816,7 +2861,9 @@ offset 0 rows`;
   const rows = await reportRows(sql);
   const technicians = rows.map((r) => {
     const scheduled = round2(num(r.scheduled_hours));
-    const weeklyTarget = numOrNull(r.weekly_target);
+    // When the capacity custom field doesn't exist on this tenant, assume a
+    // standard 40h/wk so the forecast still produces utilisation numbers.
+    const weeklyTarget = numOrNull(r.weekly_target) ?? (hasCapacity ? null : 40);
     const capacity = weeklyTarget != null ? round2(weeklyTarget * w) : null;
     const util = capacity && capacity > 0 ? round2((scheduled / capacity) * 100) : null;
     let status = "ok";
