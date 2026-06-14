@@ -973,7 +973,7 @@ export interface NoiseTicketAnalysis {
 
 // ---------- Project management / profitability / resourcing ----------
 
-export type ProjectBillingModel = "retainer" | "time-and-materials" | "fixed-fee-or-internal";
+export type ProjectBillingModel = "retainer" | "time-and-materials" | "mixed" | "fixed-fee-or-internal";
 
 /** Per-project profitability with auto-detected billing model. Revenue source is
  *  chosen per project: prepay top-ups (retainer) → ACTIONS charge (T&M) → else
@@ -984,8 +984,13 @@ export interface ProjectProfitabilityRow {
   project: string;
   client: string;
   billingModel: ProjectBillingModel;
+  /** recognised revenue = distinct linked invoice lines (T&M + prepay-DR) */
   revenue: number;
   revenueSource: string;
+  /** prepay deferred-revenue recognised on this project (ACTIONS.adefprepayamount) */
+  prepayRecognised: number;
+  /** pure time-and-materials recognised (revenue − prepayRecognised) */
+  tmRecognised: number;
   hours: number;
   billableHours: number;
   estimateHours: number | null;
@@ -1015,6 +1020,41 @@ export interface ProjectProfitability {
   note: string;
   currency: string;
   projects: ProjectProfitabilityRow[];
+}
+
+/** Prepay (deferred-revenue) account balance for one contract. The prepay
+ *  account is a contract-level ledger: cash collected via PREPAYHISTORY top-ups
+ *  vs hours consumed / revenue recognised on ACTIONS. */
+export interface PrepayAccountRow {
+  contractId: number;
+  client: string;
+  active: boolean;
+  /** cash invoiced into the block (PREPAYHISTORY.PPAmount) */
+  collectedAmount: number;
+  /** net hours added to the block (PREPAYHISTORY.pphours; can be net of adjustments) */
+  purchasedHours: number;
+  /** hours drawn down (ACTIONS.ActionPrePayHours) */
+  consumedHours: number;
+  /** purchasedHours − consumedHours; negative = over-drawn */
+  remainingHours: number;
+  /** prepay revenue recognised as consumed (ACTIONS.adefprepayamount) */
+  recognisedAmount: number;
+  /** collectedAmount − recognisedAmount = unearned deferred revenue still on the books (negative = recognised beyond cash collected) */
+  deferredBalance: number;
+  /** collectedAmount / purchasedHours (blended sold rate) */
+  blendedRate: number | null;
+  projectsOnContract: number;
+  lastTopUp: string | null;
+  /** healthy | low-balance | over-drawn | untouched */
+  status: string;
+  overDrawn: boolean;
+  untouched: boolean;
+}
+
+export interface PrepayAccountBalance {
+  note: string;
+  currency: string;
+  accounts: PrepayAccountRow[];
 }
 
 /** One project in the portfolio health board. */

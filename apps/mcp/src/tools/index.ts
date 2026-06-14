@@ -41,6 +41,7 @@ import { registerGetProjectPortfolio } from "./getProjectPortfolio.js";
 import { registerGetProjectProfitability } from "./getProjectProfitability.js";
 import { registerGetResourceForecast } from "./getResourceForecast.js";
 import { registerGetTechnicianUtilization } from "./getTechnicianUtilization.js";
+import { registerGetPrepayAccountBalance } from "./getPrepayAccountBalance.js";
 
 /** Map of tool name → register function so suppression can decide per-tool
  *  whether to wire it up. The order here defines the order the agent sees
@@ -96,6 +97,7 @@ const TOOL_REGISTRY: Array<{ name: string; register: (s: McpServer) => void }> =
   { name: "getProjectProfitability", register: registerGetProjectProfitability },
   { name: "getResourceForecast", register: registerGetResourceForecast },
   { name: "getTechnicianUtilization", register: registerGetTechnicianUtilization },
+  { name: "getPrepayAccountBalance", register: registerGetPrepayAccountBalance },
 
   // Database access + REST escape hatch
   { name: "listReports", register: registerListReports },

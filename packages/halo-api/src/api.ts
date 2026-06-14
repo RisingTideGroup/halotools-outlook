@@ -62,6 +62,8 @@ import type {
   ResourceForecast,
   TechnicianUtilization,
   TechnicianUtilizationRow,
+  PrepayAccountBalance,
+  PrepayAccountRow,
   SimilarTicketNeighbour,
 } from "./types.js";
 
@@ -2680,6 +2682,8 @@ export async function getProjectProfitability(
   cast(coalesce(con.consumed_hrs, 0) as decimal(12,2)) as consumed_hrs,
   cast(coalesce(act.billable_hours, 0) as decimal(12,2)) as billable_hrs,
   cast(coalesce(act.uncharged_hours, 0) as decimal(12,2)) as uncharged_hrs,
+  cast(coalesce(act.prepay_recognised, 0) as decimal(14,2)) as prepay_recognised,
+  cast(coalesce(rev.recognised, 0) as decimal(14,2)) as recognised_rev,
   cast(coalesce(act.tm_charge, 0) as decimal(12,2)) as tm_charge,
   cast(coalesce(act.labour_cost, 0) as decimal(12,2)) as labour_cost,
   cast(coalesce(act.costed_hours, 0) as decimal(12,2)) as costed_hours
@@ -2688,9 +2692,11 @@ join requesttype rt on p.requesttypenew = rt.RTid
 left join area a on a.aarea = p.areaint
 left join (select PPContractID, sum(case when PPAmount > 0 then PPAmount else 0 end) as prepay_rev, sum(PPHours) as purchased_hrs from PREPAYHISTORY group by PPContractID) pp on pp.PPContractID = p.fcontractid
 left join (select AContractId, sum(ActionPrePayHours) as consumed_hrs from actions group by AContractId) con on con.AContractId = p.fcontractid
+left join (select proj, sum(net) as recognised from (select distinct ac.AProjectID as proj, ac.actioninvoicelineid as lineid, idt.IDNet_Amount as net from actions ac join INVOICEDETAIL idt on idt.IDid = ac.actioninvoicelineid where ac.actioninvoicelineid > 0 and ac.AProjectID > 0) d group by proj) rev on rev.proj = p.faultid
 left join (
   select ac.AProjectID,
     sum(ac.ActionChargeAmount) as tm_charge,
+    sum(coalesce(ac.adefprepayamount,0)) as prepay_recognised,
     sum(case when coalesce(ac.ActionCode,-1) + 1 > 0 then ac.timetaken else 0 end) as billable_hours,
     sum(case when coalesce(ac.ActionCode,-1) + 1 > 0 and coalesce(ac.ActionPrePayHours,0) = 0 and coalesce(ac.ActionChargeAmount,0) = 0 then ac.timetaken else 0 end) as uncharged_hours,
     sum(ac.timetaken * (${AGENT_HOURLY_COST})) as labour_cost,
@@ -2719,21 +2725,26 @@ order by p.FProjectTimeActual desc`;
     const estimateHours = est > 1 ? est : null; // <=1 is the 0.75 template placeholder
     const coverage = hours > 0 ? round2((costedHours / hours) * 100) : null;
 
+    // Revenue = recognised, from DISTINCT linked invoice lines (the unified
+    // recognition key covers BOTH T&M and prepay deferred-revenue, so no double
+    // count); the prepay-DR slice (adefprepayamount) is broken out, T&M = the rest.
+    const revenue = round2(num(r.recognised_rev));
+    const prepayRecognised = round2(num(r.prepay_recognised));
+    const tmRecognised = round2(Math.max(revenue - prepayRecognised, 0));
     let model: ProjectBillingModel;
-    let revenue: number;
     let source: string;
-    if (prepay > 0) {
+    if (prepayRecognised > 0 && tmRecognised > 0) {
+      model = "mixed";
+      source = "recognised invoice lines — both prepay deferred-revenue and T&M";
+    } else if (prepayRecognised > 0) {
       model = "retainer";
-      revenue = prepay;
-      source = "prepay block top-ups (contract-level; may fund >1 project)";
-    } else if (tm > 0) {
+      source = "recognised prepay deferred-revenue (adefprepayamount)";
+    } else if (tmRecognised > 0) {
       model = "time-and-materials";
-      revenue = tm;
-      source = "ACTIONS charge amount (T&M)";
+      source = "recognised T&M invoice lines";
     } else {
       model = "fixed-fee-or-internal";
-      revenue = 0;
-      source = "no prepay/T&M signal — fixed-fee (often unlinked) or internal";
+      source = "no recognised invoice lines — fixed-fee (often unlinked) or internal";
     }
     const marginReliable = coverage != null && coverage >= 80;
     const grossMargin = revenue > 0 ? round2(revenue - labourCost) : null;
@@ -2757,6 +2768,8 @@ order by p.FProjectTimeActual desc`;
       billingModel: model,
       revenue: round2(revenue),
       revenueSource: source,
+      prepayRecognised,
+      tmRecognised,
       hours,
       billableHours,
       estimateHours,
@@ -2778,7 +2791,7 @@ order by p.FProjectTimeActual desc`;
   });
   return {
     note:
-      "Billing model auto-detected per project (retainer prepay > T&M charge > fixed/internal). Projects here are refilled PREPAY BLOCKS, not fixed-fee: prepayPurchasedHours (PREPAYHISTORY top-ups) is the real budget — the estimate field is usually a stale placeholder. soldRate = revenue/purchased hours (the blended sold rate). unchargedHours = billable hours that were NEITHER drawn from the prepay block NOR billed as a direct charge amount (ActionPrePayHours=0 AND ActionChargeAmount=0) = genuinely leaked labour; unchargedValue prices it at soldRate/effectiveRate. NOTE billable time can be billed via prepay draw-down OR direct charge, so do not infer a leak from delivered − prepayConsumed alone. overServiced = delivered hours exceed the purchased block (or, with no prepay, 1.5x the estimate). Labour cost uses the agent's hourly cost rate and is PARTIAL — trust grossMargin only when marginReliable=true. All amounts are in the home currency (see `currency`).",
+      "revenue = RECOGNISED revenue from DISTINCT linked invoice lines (ACTIONS.actioninvoicelineid → INVOICEDETAIL.IDNet_Amount); this one key covers BOTH prepay deferred-revenue and T&M, so it is not double-counted. prepayRecognised (adefprepayamount) is the prepay-DR slice; tmRecognised is the rest. effectiveRate = revenue/delivered hours. Projects are refilled PREPAY BLOCKS, not fixed-fee: prepayPurchasedHours (PREPAYHISTORY top-ups) is the real budget — the estimate field is usually a stale placeholder; prepayRevenue is the cash collected (top-ups). For the deferred-revenue ACCOUNT BALANCE (collected vs recognised vs remaining/over-drawn) use getPrepayAccountBalance — it's a contract-level concept and prepay often spans multiple projects. unchargedHours = billable hours NEITHER drawn from prepay NOR billed via a charge amount (genuinely leaked labour). overServiced = delivered hours exceed the purchased block (or, with no prepay, 1.5x the estimate). Labour cost is PARTIAL — trust grossMargin only when marginReliable=true. Amounts in the home currency (see `currency`).",
     currency,
     projects,
   };
@@ -3032,6 +3045,78 @@ offset 0 rows`;
       billabilityPct: tot.worked > 0 ? round2((tot.billable / tot.worked) * 100) : null,
     },
     technicians,
+  };
+}
+
+/**
+ * Prepay (deferred-revenue) account balance per contract — the contract-level
+ * ledger behind the retainer model. Cash collected (PREPAYHISTORY top-ups,
+ * invoiced) and net hours purchased vs hours consumed (ACTIONS.ActionPrePayHours)
+ * and revenue recognised (ACTIONS.adefprepayamount, since deferred revenue is on).
+ * Computes remainingHours (negative = over-drawn) and deferredBalance (cash not
+ * yet earned; negative = recognised beyond collected). Status flags over-drawn,
+ * untouched (paid but barely consumed) and low-balance. Grain is the contract
+ * because only a minority carry an explicit project link and many span
+ * multiple projects — a client may hold several prepay contracts.
+ * Answers questions like "which clients have a negative prepay balance" or
+ * "who has untouched prepay". Sorted lowest remaining first (over-drawn on top).
+ */
+export async function getPrepayAccountBalance(limit = 500): Promise<PrepayAccountBalance> {
+  const top = Math.max(1, Math.min(2000, Math.trunc(limit)));
+  const sql = `select top ${top}
+  ch.CHid as contract_id,
+  a.aareadesc as client,
+  cast(coalesce(ch.chactive,0) as int) as active,
+  cast(pp.collected as decimal(14,2)) as collected,
+  cast(pp.purchased as decimal(12,2)) as purchased_hrs,
+  cast(coalesce(act.consumed,0) as decimal(12,2)) as consumed_hrs,
+  cast(coalesce(act.recognised,0) as decimal(14,2)) as recognised,
+  coalesce(act.projects,0) as projects_on_contract,
+  convert(varchar(10), pp.last_topup, 23) as last_topup
+from CONTRACTHEADER ch
+join (select PPContractID, sum(PPAmount) as collected, sum(pphours) as purchased, max(ppdate) as last_topup from PREPAYHISTORY group by PPContractID) pp on pp.PPContractID = ch.CHid
+left join area a on a.aarea = ch.CHarea
+left join (select AContractId, sum(coalesce(ActionPrePayHours,0)) as consumed, sum(coalesce(adefprepayamount,0)) as recognised, count(distinct case when AProjectID > 0 then AProjectID end) as projects from actions group by AContractId) act on act.AContractId = ch.CHid
+order by pp.purchased - coalesce(act.consumed,0)
+offset 0 rows`;
+
+  const [rows, currency] = await Promise.all([reportRows(sql), baseCurrency()]);
+  const accounts: PrepayAccountRow[] = rows.map((r) => {
+    const collected = round2(num(r.collected));
+    const purchased = round2(num(r.purchased_hrs));
+    const consumed = round2(num(r.consumed_hrs));
+    const recognised = round2(num(r.recognised));
+    const remaining = round2(purchased - consumed);
+    const deferred = round2(collected - recognised);
+    const overDrawn = remaining < -0.5;
+    const untouched = purchased > 0.5 && consumed <= purchased * 0.02;
+    let status = "healthy";
+    if (overDrawn) status = "over-drawn";
+    else if (untouched) status = "untouched";
+    else if (purchased > 0 && remaining <= purchased * 0.1) status = "low-balance";
+    return {
+      contractId: num(r.contract_id),
+      client: String(r.client ?? ""),
+      active: num(r.active) === 1,
+      collectedAmount: collected,
+      purchasedHours: purchased,
+      consumedHours: consumed,
+      remainingHours: remaining,
+      recognisedAmount: recognised,
+      deferredBalance: deferred,
+      blendedRate: purchased > 0 ? round2(collected / purchased) : null,
+      projectsOnContract: num(r.projects_on_contract),
+      lastTopUp: r.last_topup ? String(r.last_topup) : null,
+      status,
+      overDrawn,
+      untouched,
+    };
+  });
+  return {
+    note:
+      "Per-contract prepay (deferred-revenue) account. collectedAmount/purchasedHours = cash invoiced + net hours added (PREPAYHISTORY); consumedHours/recognisedAmount = drawn down + revenue earned (ACTIONS.ActionPrePayHours/adefprepayamount). remainingHours<0 = over-drawn (delivered past the block); deferredBalance = cash collected not yet earned (negative = recognised beyond collected). status: over-drawn / untouched (paid but ~unused) / low-balance / healthy. Grain is the contract — a client may hold several; purchasedHours is net of any adjustments. Amounts in the home currency (see `currency`).",
+    currency,
+    accounts,
   };
 }
 
