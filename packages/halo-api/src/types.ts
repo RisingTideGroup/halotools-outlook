@@ -991,8 +991,9 @@ export interface ProjectProfitabilityRow {
   estimateHours: number | null;
   prepayPurchasedHours: number;
   prepayConsumedHours: number;
-  /** billable hours delivered but not deducted from the prepay block
-   *  (billableHours − prepayConsumedHours, floored at 0) — uncharged labour. */
+  /** billable hours that were neither drawn from the prepay block nor billed as
+   *  a direct charge amount (ActionPrePayHours=0 AND ActionChargeAmount=0) —
+   *  genuinely uncharged labour. */
   unchargedHours: number;
   unchargedValue: number;
   labourCost: number;

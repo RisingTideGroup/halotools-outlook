@@ -2679,6 +2679,7 @@ export async function getProjectProfitability(
   cast(coalesce(pp.purchased_hrs, 0) as decimal(12,2)) as purchased_hrs,
   cast(coalesce(con.consumed_hrs, 0) as decimal(12,2)) as consumed_hrs,
   cast(coalesce(act.billable_hours, 0) as decimal(12,2)) as billable_hrs,
+  cast(coalesce(act.uncharged_hours, 0) as decimal(12,2)) as uncharged_hrs,
   cast(coalesce(act.tm_charge, 0) as decimal(12,2)) as tm_charge,
   cast(coalesce(act.labour_cost, 0) as decimal(12,2)) as labour_cost,
   cast(coalesce(act.costed_hours, 0) as decimal(12,2)) as costed_hours
@@ -2691,6 +2692,7 @@ left join (
   select ac.AProjectID,
     sum(ac.ActionChargeAmount) as tm_charge,
     sum(case when coalesce(ac.ActionCode,-1) + 1 > 0 then ac.timetaken else 0 end) as billable_hours,
+    sum(case when coalesce(ac.ActionCode,-1) + 1 > 0 and coalesce(ac.ActionPrePayHours,0) = 0 and coalesce(ac.ActionChargeAmount,0) = 0 then ac.timetaken else 0 end) as uncharged_hours,
     sum(ac.timetaken * (${AGENT_HOURLY_COST})) as labour_cost,
     sum(case when (${AGENT_HOURLY_COST}) > 0 then ac.timetaken else 0 end) as costed_hours
   from actions ac
@@ -2737,9 +2739,13 @@ order by p.FProjectTimeActual desc`;
     const grossMargin = revenue > 0 ? round2(revenue - labourCost) : null;
     const effectiveRate = revenue > 0 && hours > 0 ? round2(revenue / hours) : null;
     const soldRate = purchased > 0 && prepay > 0 ? round2(prepay / purchased) : null;
-    // Billable hours delivered but never deducted from the prepay block = uncharged labour.
-    const unchargedHours = purchased > 0 ? round2(Math.max(billableHours - consumed, 0)) : 0;
-    const unchargedValue = soldRate != null ? round2(unchargedHours * soldRate) : 0;
+    // Billable hours that were neither deducted from the prepay block NOR billed
+    // as a direct charge amount = genuinely uncharged labour. (Time can be billed
+    // either by drawing down prepay OR via ActionChargeAmount, so subtracting only
+    // prepay-consumed would wrongly count T&M-charged hours as a leak.)
+    const unchargedHours = round2(num(r.uncharged_hrs));
+    const rateForValue = soldRate ?? effectiveRate;
+    const unchargedValue = rateForValue != null ? round2(unchargedHours * rateForValue) : 0;
     // Over-serviced = delivered beyond what was sold: vs the prepay block when there
     // is one (the refilled budget), else vs the stale estimate.
     const overServiced =
@@ -2772,7 +2778,7 @@ order by p.FProjectTimeActual desc`;
   });
   return {
     note:
-      "Billing model auto-detected per project (retainer prepay > T&M charge > fixed/internal). Projects here are refilled PREPAY BLOCKS, not fixed-fee: prepayPurchasedHours (PREPAYHISTORY top-ups) is the real budget — the estimate field is usually a stale placeholder. soldRate = revenue/purchased hours (the blended sold rate). unchargedHours = billable hours delivered but NOT deducted from the block (billableHours − prepayConsumedHours) = leaked labour; unchargedValue prices it at soldRate. overServiced = delivered hours exceed the purchased block (or, with no prepay, 1.5x the estimate). Labour cost uses the agent's hourly cost rate and is PARTIAL — trust grossMargin only when marginReliable=true. All amounts are in the home currency (see `currency`).",
+      "Billing model auto-detected per project (retainer prepay > T&M charge > fixed/internal). Projects here are refilled PREPAY BLOCKS, not fixed-fee: prepayPurchasedHours (PREPAYHISTORY top-ups) is the real budget — the estimate field is usually a stale placeholder. soldRate = revenue/purchased hours (the blended sold rate). unchargedHours = billable hours that were NEITHER drawn from the prepay block NOR billed as a direct charge amount (ActionPrePayHours=0 AND ActionChargeAmount=0) = genuinely leaked labour; unchargedValue prices it at soldRate/effectiveRate. NOTE billable time can be billed via prepay draw-down OR direct charge, so do not infer a leak from delivered − prepayConsumed alone. overServiced = delivered hours exceed the purchased block (or, with no prepay, 1.5x the estimate). Labour cost uses the agent's hourly cost rate and is PARTIAL — trust grossMargin only when marginReliable=true. All amounts are in the home currency (see `currency`).",
     currency,
     projects,
   };
