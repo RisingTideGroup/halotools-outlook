@@ -987,20 +987,32 @@ export interface ProjectProfitabilityRow {
   revenue: number;
   revenueSource: string;
   hours: number;
+  billableHours: number;
   estimateHours: number | null;
+  prepayPurchasedHours: number;
+  prepayConsumedHours: number;
+  /** billable hours delivered but not deducted from the prepay block
+   *  (billableHours − prepayConsumedHours, floored at 0) — uncharged labour. */
+  unchargedHours: number;
+  unchargedValue: number;
   labourCost: number;
   costCoveragePct: number | null;
+  /** revenue / delivered hours */
   effectiveRate: number | null;
+  /** prepay top-ups / prepay hours purchased (the sold blended rate) */
+  soldRate: number | null;
   grossMargin: number | null;
   grossMarginPct: number | null;
   marginReliable: boolean;
   prepayRevenue: number;
   tmCharge: number;
+  /** delivered hours exceed the prepay block purchased (or, with no prepay, the estimate) */
   overServiced: boolean;
 }
 
 export interface ProjectProfitability {
   note: string;
+  currency: string;
   projects: ProjectProfitabilityRow[];
 }
 
@@ -1022,11 +1034,14 @@ export interface ProjectPortfolio {
   projects: ProjectPortfolioRow[];
 }
 
-/** Per-agent forward resource load: booked appointment hours vs weekly target. */
+/** Per-agent forward resource load: booked appointment hours vs weekly target.
+ *  scheduledHours counts only ticket-linked appointments (client work);
+ *  internalHours are unlinked appointments (internal meetings). */
 export interface ResourceForecastRow {
   agentId: number;
   agent: string;
   scheduledHours: number;
+  internalHours: number;
   appointments: number;
   capacityHours: number | null;
   utilisationPct: number | null;
@@ -1037,4 +1052,55 @@ export interface ResourceForecast {
   startdate: string;
   weeks: number;
   technicians: ResourceForecastRow[];
+}
+
+/** Per-agent utilisation over a past window: booked (calendar) vs worked
+ *  (logged) vs billable, against leave-adjusted capacity. */
+export interface TechnicianUtilizationRow {
+  agentId: number;
+  agent: string;
+  capacityHours: number;
+  leaveHours: number;
+  netCapacityHours: number;
+  /** ticket-linked appointment hours (client work booked on the calendar) */
+  bookedHours: number;
+  /** unlinked appointment hours (internal meetings) */
+  internalMeetingHours: number;
+  workedHours: number;
+  billableHours: number;
+  /** ticket-linked booked hours / net capacity */
+  bookedUtilPct: number | null;
+  /** internal meeting hours / net capacity */
+  internalMeetingPct: number | null;
+  /** logged work hours / net capacity */
+  workedUtilPct: number | null;
+  /** billable hours / net capacity (the revenue-bearing utilisation) */
+  billableUtilPct: number | null;
+  /** billable hours / worked hours (quality of the work mix) */
+  billabilityPct: number | null;
+  status: string;
+}
+
+export interface TechnicianUtilization {
+  startdate: string;
+  enddate: string;
+  workingDays: number;
+  dailyCapacityHours: number;
+  targetUtilisationPct: number;
+  note: string;
+  totals: {
+    capacityHours: number;
+    leaveHours: number;
+    netCapacityHours: number;
+    bookedHours: number;
+    internalMeetingHours: number;
+    workedHours: number;
+    billableHours: number;
+    bookedUtilPct: number | null;
+    internalMeetingPct: number | null;
+    workedUtilPct: number | null;
+    billableUtilPct: number | null;
+    billabilityPct: number | null;
+  };
+  technicians: TechnicianUtilizationRow[];
 }

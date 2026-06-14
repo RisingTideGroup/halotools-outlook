@@ -13,7 +13,7 @@ export function registerGetResourceForecast(server: McpServer): void {
     {
       title: "Get HaloPSA resource forecast (booked vs capacity)",
       description:
-        "Forward resource load per technician: booked appointment hours over the next N weeks (from the APPOINTMENT calendar, excluding all-day/deleted) vs a flat weekly capacity (weeklyCapacityHours × weeks, default 40/wk — no per-tenant custom fields). Flags over-allocated (>100% booked) and under-booked (<40%). Excludes bots and the Unassigned pseudo-agent. Use for capacity planning and spotting who's overloaded vs on the bench.",
+        "Forward resource load per technician: booked CLIENT hours over the next N weeks vs a flat weekly capacity (weeklyCapacityHours × weeks, default 40/wk). scheduledHours counts only ticket-linked appointments (APFaultid>0 = client work); internalHours (unlinked = internal meetings) is reported separately and excluded from utilisation. Flags over-allocated (>100%) and under-booked (<40%). Excludes all-day/deleted appointments, bots, and the Unassigned pseudo-agent. Use for capacity planning and spotting who's overloaded vs on the bench.",
       inputSchema,
     },
     async ({ weeks, weeklyCapacityHours }) => {
