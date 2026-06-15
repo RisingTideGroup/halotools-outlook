@@ -3063,7 +3063,7 @@ offset 0 rows`;
  */
 export async function getPrepayAccountBalance(limit = 500): Promise<PrepayAccountBalance> {
   const top = Math.max(1, Math.min(2000, Math.trunc(limit)));
-  const sql = `select top ${top}
+  const sql = `select
   ch.CHid as contract_id,
   a.aareadesc as client,
   cast(coalesce(a.aisinactive,0) as int) as client_inactive,
@@ -3079,7 +3079,7 @@ join (select PPContractID, sum(PPAmount) as collected, sum(pphours) as purchased
 left join area a on a.aarea = ch.CHarea
 left join (select AContractId, sum(coalesce(ActionPrePayHours,0)) as consumed, sum(coalesce(adefprepayamount,0)) as recognised, count(distinct case when AProjectID > 0 then AProjectID end) as projects from actions group by AContractId) act on act.AContractId = ch.CHid
 order by pp.purchased - coalesce(act.consumed,0)
-offset 0 rows`;
+offset 0 rows fetch next ${top} rows only`;
 
   const [rows, currency] = await Promise.all([reportRows(sql), baseCurrency()]);
   const accounts: PrepayAccountRow[] = rows.map((r) => {
