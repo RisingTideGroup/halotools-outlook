@@ -7,7 +7,7 @@ export function registerGetMrrPerSeatSnapshot(server: McpServer): void {
     {
       title: "Get HaloPSA MRR-per-seat snapshot",
       description:
-        "Return MRR divided by active external user (contact) count — revenue density per managed seat. Returns MRR, active user count, and the derived mrrPerSeat. Note: 'users' here means external Halo users (contacts), NOT internal agents (use getRevenuePerTechSnapshot for the agent-side metric).",
+        "MRR ÷ active end-user (contact) count — revenue density per managed seat (ARPU-ish), WITH `seatsByClient`: clients ranked by seat count and % of seats. Use for 'how many seats per client', 'which clients have the most users', seat concentration. 'Users' = external Halo contacts, NOT internal agents (use getRevenuePerTechSnapshot for the agent-side ratio).",
       inputSchema: {},
     },
     async () => {
