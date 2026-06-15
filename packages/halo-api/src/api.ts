@@ -3050,12 +3050,15 @@ offset 0 rows`;
 
 /**
  * Prepay (deferred-revenue) account balance per contract — the contract-level
- * ledger behind the retainer model. Cash collected (PREPAYHISTORY top-ups,
- * invoiced) and net hours purchased vs hours consumed (ACTIONS.ActionPrePayHours)
- * and revenue recognised (ACTIONS.adefprepayamount, since deferred revenue is on).
- * Computes remainingHours (negative = over-drawn) and deferredBalance (cash not
- * yet earned; negative = recognised beyond collected). Status flags over-drawn,
- * untouched (paid but barely consumed) and low-balance. Grain is the contract
+ * ledger behind the retainer model. PREPAYHISTORY is split by sign rather than
+ * net-summed: positive rows = refills (cash invoiced + hours bought); negative
+ * rows = hours leaving the block, classified by note into expired (note marks
+ * expiry) vs manual deduction (everything else — manual / off-the-books
+ * consumption or write-offs). Logged action draw-down (ACTIONS.ActionPrePayHours)
+ * is separate and adds to those. remainingHours = refills − consumed − manual −
+ * expired (negative = over-drawn); deferredBalance = collected − recognised
+ * (ACTIONS.adefprepayamount). Status flags over-drawn, untouched (paid but
+ * barely used) and low-balance. Grain is the contract
  * because only a minority carry an explicit project link and many span
  * multiple projects — a client may hold several prepay contracts.
  * Answers questions like "which clients have a negative prepay balance" or
@@ -3068,29 +3071,45 @@ export async function getPrepayAccountBalance(limit = 500): Promise<PrepayAccoun
   a.aareadesc as client,
   cast(coalesce(a.aisinactive,0) as int) as client_inactive,
   cast(coalesce(ch.chactive,0) as int) as active,
-  cast(pp.collected as decimal(14,2)) as collected,
-  cast(pp.purchased as decimal(12,2)) as purchased_hrs,
+  cast(pp.refill_amt as decimal(14,2)) as collected,
+  cast(pp.refill_hrs as decimal(12,2)) as purchased_hrs,
   cast(coalesce(act.consumed,0) as decimal(12,2)) as consumed_hrs,
+  cast(pp.manual_hrs as decimal(12,2)) as manual_hrs,
+  cast(pp.expired_hrs as decimal(12,2)) as expired_hrs,
   cast(coalesce(act.recognised,0) as decimal(14,2)) as recognised,
   coalesce(act.projects,0) as projects_on_contract,
   convert(varchar(10), pp.last_topup, 23) as last_topup
 from CONTRACTHEADER ch
-join (select PPContractID, sum(PPAmount) as collected, sum(pphours) as purchased, max(ppdate) as last_topup from PREPAYHISTORY group by PPContractID) pp on pp.PPContractID = ch.CHid
+join (
+  select PPContractID,
+    sum(case when pphours > 0 then pphours else 0 end) as refill_hrs,
+    sum(case when pphours > 0 then PPAmount else 0 end) as refill_amt,
+    -sum(case when pphours < 0 and lower(cast(ppDesc as nvarchar(400))) like '%expir%' then pphours else 0 end) as expired_hrs,
+    -sum(case when pphours < 0 and lower(cast(ppDesc as nvarchar(400))) not like '%expir%' then pphours else 0 end) as manual_hrs,
+    max(case when pphours > 0 then ppdate else null end) as last_topup
+  from PREPAYHISTORY where PPContractID > 0 group by PPContractID
+) pp on pp.PPContractID = ch.CHid
 left join area a on a.aarea = ch.CHarea
 left join (select AContractId, sum(coalesce(ActionPrePayHours,0)) as consumed, sum(coalesce(adefprepayamount,0)) as recognised, count(distinct case when AProjectID > 0 then AProjectID end) as projects from actions group by AContractId) act on act.AContractId = ch.CHid
-order by pp.purchased - coalesce(act.consumed,0)
+order by pp.refill_hrs - pp.expired_hrs - pp.manual_hrs - coalesce(act.consumed,0)
 offset 0 rows fetch next ${top} rows only`;
 
   const [rows, currency] = await Promise.all([reportRows(sql), baseCurrency()]);
   const accounts: PrepayAccountRow[] = rows.map((r) => {
     const collected = round2(num(r.collected));
-    const purchased = round2(num(r.purchased_hrs));
-    const consumed = round2(num(r.consumed_hrs));
+    const purchased = round2(num(r.purchased_hrs)); // gross refill hours
+    const consumed = round2(num(r.consumed_hrs)); // logged via actions
+    const manualDeduction = round2(num(r.manual_hrs)); // negative PREPAYHISTORY rows (manual / off-the-books)
+    const expired = round2(num(r.expired_hrs)); // negative rows the note marks expired (lost)
     const recognised = round2(num(r.recognised));
-    const remaining = round2(purchased - consumed);
+    // Refills minus everything that left the block: action consumption, manual
+    // deductions, and expiry. Negatives are separate from action consumption
+    // (action draw-down never writes a negative PREPAYHISTORY row), so they add.
+    const used = round2(consumed + manualDeduction);
+    const remaining = round2(purchased - used - expired);
     const deferred = round2(collected - recognised);
     const overDrawn = remaining < -0.5;
-    const untouched = purchased > 0.5 && consumed <= purchased * 0.02;
+    const untouched = purchased > 0.5 && used <= purchased * 0.02;
     let status = "healthy";
     if (overDrawn) status = "over-drawn";
     else if (untouched) status = "untouched";
@@ -3103,6 +3122,8 @@ offset 0 rows fetch next ${top} rows only`;
       collectedAmount: collected,
       purchasedHours: purchased,
       consumedHours: consumed,
+      manualDeductionHours: manualDeduction,
+      expiredHours: expired,
       remainingHours: remaining,
       recognisedAmount: recognised,
       deferredBalance: deferred,
@@ -3116,7 +3137,7 @@ offset 0 rows fetch next ${top} rows only`;
   });
   return {
     note:
-      "Per-contract prepay (deferred-revenue) account. collectedAmount/purchasedHours = cash invoiced + net hours added (PREPAYHISTORY); consumedHours/recognisedAmount = drawn down + revenue earned (ACTIONS.ActionPrePayHours/adefprepayamount). remainingHours<0 = over-drawn (delivered past the block); deferredBalance = cash collected not yet earned (negative = recognised beyond collected). status: over-drawn / untouched (paid but ~unused) / low-balance / healthy. clientActive (AREA.aisinactive) flags whether the client account is still active — watch for balances on inactive clients. Grain is the contract — a client may hold several; purchasedHours is net of any adjustments. Amounts in the home currency (see `currency`).",
+      "Per-contract prepay (deferred-revenue) account. PREPAYHISTORY rows are split by sign, NOT net-summed: purchasedHours/collectedAmount = positive refills only (top-ups invoiced); manualDeductionHours = negative rows (manual / off-the-books consumption or write-offs); expiredHours = negative rows whose note marks them expired (lost time). consumedHours = logged action draw-down (ACTIONS.ActionPrePayHours) — separate from the manual negatives, so they add. remainingHours = purchased − consumed − manualDeduction − expired (negative = over-drawn). recognisedAmount = ACTIONS.adefprepayamount; deferredBalance = collected − recognised (negative = recognised beyond cash collected). status: over-drawn / untouched (paid but ~unused) / low-balance / healthy. A high manualDeductionHours vs consumedHours means time is being taken off the block manually rather than via logged work. clientActive (AREA.aisinactive) flags churned clients still holding a balance. Grain is the contract — a client may hold several. Amounts in the home currency (see `currency`).",
     currency,
     accounts,
   };
