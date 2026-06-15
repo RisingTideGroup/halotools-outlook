@@ -8,7 +8,20 @@ rows — so follow-up questions are answered from context, not a fresh `runSql`
 
 ## The contract (applied to every analytics result)
 
-Add a top-level `presentation` field:
+THREE legs — all required. The third is the one that actually gets the tool
+*used*: an agent selects a tool from its **description**, before any call, so
+enriching only the result payload is invisible if the description doesn't
+advertise the drill dimensions (observed: agent skipped getMrrSnapshot and
+hand-rolled listRecurringInvoices because the description didn't mention
+per-client data).
+
+1. **Description advertises the drill dimensions** — name `byClient` /
+   `seatsByClient` / etc. and the questions it answers, and steer away from
+   hand-rolling the raw list tools. THIS drives selection.
+2. **Result carries the raw rows** that compose the KPI (top-N + `others` for
+   unbounded dimensions; full list when bounded).
+3. **`presentation` string** in the result: how to render + which follow-ups the
+   embedded rows already answer (so no relearned runSql).
 
 ```ts
 presentation: string  // concise: how to render + what follow-ups the embedded rows already answer

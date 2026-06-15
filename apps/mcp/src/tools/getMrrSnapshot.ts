@@ -7,7 +7,7 @@ export function registerGetMrrSnapshot(server: McpServer): void {
     {
       title: "Get HaloPSA MRR snapshot",
       description:
-        "Return current Monthly Recurring Revenue across all active HaloPSA contracts, with a breakdown by billing period (monthly, quarterly, semi-annual, annual). Uses the net `revenue` field, not `total` (which includes tax). Excludes contracts marked disabled. Returns one normalized number plus the supporting breakdown — ask this when you want a single MRR figure rather than paginating through invoices.",
+        "Current Monthly Recurring Revenue across active HaloPSA contracts, WITH a full per-client ranking: `byClient` lists every client by monthly recurring (contracts, monthlyRevenue, pctOfMrr) and `topClientPct` is the biggest client's share (concentration risk), plus a billing-period mix. Use this for 'top N clients by MRR', 'revenue concentration / at-risk', 'which clients drive recurring revenue' — it already ranks clients, so do NOT hand-roll listRecurringInvoices/listContracts for that. Net `revenue` (not tax-inclusive `total`); excludes disabled contracts.",
       inputSchema: {},
     },
     async () => {

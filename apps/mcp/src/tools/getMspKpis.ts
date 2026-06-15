@@ -25,7 +25,7 @@ export function registerGetMspKpis(server: McpServer): void {
     {
       title: "Get HaloPSA MSP KPI dashboard",
       description:
-        "Return a one-shot MSP KPI snapshot: MRR, active agent count, active user count, revenue per technician, MRR per seat, and technician utilization for the supplied window (defaults to trailing 30 days). Computes MRR once and shares it across the derived metrics — cheaper than calling each KPI tool separately. Utilization is best-effort: if /Timesheet is unavailable on this tenant, the field is omitted but the rest of the dashboard still returns.",
+        "One-shot MSP KPI dashboard: MRR, active agent/user counts, revenue-per-tech, MRR-per-seat, technician utilization, AND `mrrByClient` (top 25 clients by MRR) — the headline numbers plus the client and per-agent breakdowns inline, so 'top clients' / 'who's under-utilised' / concentration follow-ups are answerable without another call. Window defaults to trailing 30 days. MRR computed once and shared — cheaper than calling each KPI tool. Utilization is best-effort (omitted if /Timesheet is unavailable).",
       inputSchema,
     },
     async ({ utilizationStart, utilizationEnd }) => {
