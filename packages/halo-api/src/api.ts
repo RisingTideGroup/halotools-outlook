@@ -990,10 +990,6 @@ export function periodToMonthlyFactor(period: number | undefined): number {
   return (PERIOD_INFO[period] ?? FALLBACK_PERIOD).factor;
 }
 
-function periodLabel(period: number): string {
-  return (PERIOD_INFO[period] ?? FALLBACK_PERIOD).label;
-}
-
 export async function listRecurringInvoices(): Promise<HaloRecurringInvoice[]> {
   // /RecurringInvoice has no working date filter — fetch all, filter client-side.
   const res = await call<
@@ -1006,53 +1002,84 @@ export async function listRecurringInvoices(): Promise<HaloRecurringInvoice[]> {
  * Net MRR across all active recurring invoices, with a per-period breakdown.
  * Uses `revenue` (net) not `total` (gross). Excludes `disabled: true`.
  */
+/**
+ * Monthly Recurring Revenue from the ACTUAL generated recurring invoices, not
+ * the schedule's nominal amount (which drifts). A recurring invoice schedule
+ * lives in INVOICEHEADER as a master (IHid < 0, IHisRecurringInvoice=1); each
+ * period it generates a real invoice (IHid > 0) carrying IHrecurringInvoiceId =
+ * the master id. True recurring revenue is the net of those generated invoices.
+ *
+ * Method (chosen): trailing-12-months ÷ 12. Sum the net (INVOICEDETAIL.IDNet_Amount)
+ * of every recurring-generated invoice in the last 12 months, divide by 12. This
+ * normalises ANY cadence from real invoiced amounts (monthly bills 12×, quarterly
+ * 4×, annual 1× → all ÷12 give the monthly-equivalent) with no schedule lookup and
+ * no assumed default. Cadence mix is derived from each invoice's period length.
+ */
 export async function getMrrSnapshot(): Promise<MrrSnapshot> {
-  const invoices = await listRecurringInvoices();
-  const active = invoices.filter((i) => i.disabled !== true);
-  let mrr = 0;
-  const grouped = new Map<number, { contracts: number; monthlyRevenue: number }>();
-  const byClientMap = new Map<number, { client: string; contracts: number; monthlyRevenue: number }>();
-  for (const inv of active) {
-    const period = inv.period ?? 3;
-    const factor = periodToMonthlyFactor(period);
-    const monthly = (inv.revenue ?? 0) * factor;
-    mrr += monthly;
-    const bucket = grouped.get(period) ?? { contracts: 0, monthlyRevenue: 0 };
-    bucket.contracts += 1;
-    bucket.monthlyRevenue += monthly;
-    grouped.set(period, bucket);
-    const cid = inv.client_id ?? 0;
-    const cb = byClientMap.get(cid) ?? { client: inv.client_name ?? "(unknown)", contracts: 0, monthlyRevenue: 0 };
-    cb.contracts += 1;
-    cb.monthlyRevenue += monthly;
-    byClientMap.set(cid, cb);
-  }
-  const byPeriod = Array.from(grouped.entries())
-    .sort((a, b) => a[0] - b[0])
-    .map(([period, b]) => ({
-      period,
-      label: periodLabel(period),
-      contracts: b.contracts,
-      monthlyRevenue: round2(b.monthlyRevenue),
-    }));
-  const mrrRounded = round2(mrr);
-  const byClient = Array.from(byClientMap.entries())
-    .map(([clientId, b]) => ({
-      clientId,
-      client: b.client,
-      contracts: b.contracts,
-      monthlyRevenue: round2(b.monthlyRevenue),
-      pctOfMrr: mrr > 0 ? round2((b.monthlyRevenue / mrr) * 100) : null,
-    }))
-    .sort((a, b) => b.monthlyRevenue - a.monthlyRevenue);
+  const ttmMonths = 12;
+  const RECUR =
+    "ih.IHid > 0 and coalesce(ih.IHrecurringInvoiceId,0) <> 0 and ih.IHInvoice_Date >= dateadd(month,-12,getdate())";
+  const byClientSql = `select a.aarea as client_id, a.aareadesc as client,
+    cast(sum(idt.IDNet_Amount) as decimal(14,2)) as ttm_net,
+    count(distinct ih.IHid) as invoices
+  from INVOICEHEADER ih
+  join area a on a.aarea = ih.IHaarea
+  join INVOICEDETAIL idt on idt.IdIHid = ih.IHid
+  where ${RECUR}
+  group by a.aarea, a.aareadesc
+  order by sum(idt.IDNet_Amount) desc
+  offset 0 rows`;
+  const cadenceExpr =
+    "case when datediff(day, ih.IHPeriodStartDate, ih.IHPeriodEndDate) <= 10 then 'weekly'" +
+    " when datediff(day, ih.IHPeriodStartDate, ih.IHPeriodEndDate) <= 45 then 'monthly'" +
+    " when datediff(day, ih.IHPeriodStartDate, ih.IHPeriodEndDate) <= 135 then 'quarterly'" +
+    " when datediff(day, ih.IHPeriodStartDate, ih.IHPeriodEndDate) <= 400 then 'yearly'" +
+    " when datediff(day, ih.IHPeriodStartDate, ih.IHPeriodEndDate) <= 800 then '2-yearly'" +
+    " else 'multi-year' end";
+  const byCadenceSql = `select ${cadenceExpr} as cadence,
+    cast(sum(idt.IDNet_Amount) as decimal(14,2)) as ttm_net,
+    count(distinct ih.IHid) as invoices,
+    count(distinct ih.IHrecurringInvoiceId) as streams
+  from INVOICEHEADER ih
+  join INVOICEDETAIL idt on idt.IdIHid = ih.IHid
+  where ${RECUR}
+  group by ${cadenceExpr}
+  order by sum(idt.IDNet_Amount) desc
+  offset 0 rows`;
+
+  const [clientRows, cadenceRows] = await Promise.all([
+    reportRows(byClientSql),
+    reportRows(byCadenceSql),
+  ]);
+
+  const ttmNet = clientRows.reduce((s, r) => s + num(r.ttm_net), 0);
+  const mrr = round2(ttmNet / ttmMonths);
+  const byClient = clientRows.map((r) => {
+    const monthly = round2(num(r.ttm_net) / ttmMonths);
+    return {
+      clientId: num(r.client_id),
+      client: String(r.client ?? ""),
+      invoices: num(r.invoices),
+      monthlyRevenue: monthly,
+      pctOfMrr: mrr > 0 ? round2((monthly / mrr) * 100) : null,
+    };
+  });
+  const byCadence = cadenceRows.map((r) => ({
+    cadence: String(r.cadence ?? ""),
+    streams: num(r.streams),
+    invoices: num(r.invoices),
+    monthlyRevenue: round2(num(r.ttm_net) / ttmMonths),
+  }));
+  const recurringStreams = cadenceRows.reduce((s, r) => s + num(r.streams), 0);
   return {
-    mrr: mrrRounded,
-    activeContractCount: active.length,
-    byPeriod,
+    mrr,
+    ttmMonths,
+    recurringStreams,
+    byCadence,
     byClient,
     topClientPct: byClient.length > 0 ? byClient[0].pctOfMrr : null,
     presentation:
-      "Dashboard: lead with mrr + activeContractCount, then a table of byClient (client, monthlyRevenue, pctOfMrr) sorted desc — the top rows are the revenue concentration (topClientPct = biggest client's share). byPeriod shows the billing-cadence mix. You hold every client's MRR row here: answer follow-ups (top N clients, concentration, a specific client's contribution, monthly vs annual split) directly from byClient/byPeriod — only use runSql for contract-line detail beyond client+revenue.",
+      "MRR = trailing-12-month net of the ACTUAL recurring-generated invoices (INVOICEHEADER IHid>0 linked to a recurring master) ÷ 12 — real invoiced amounts, normalised across cadence, no schedule estimate. Dashboard: lead with mrr + recurringStreams, then byClient (client, monthlyRevenue, pctOfMrr) sorted desc — top rows are concentration (topClientPct = biggest client's share); byCadence shows the monthly/quarterly/annual mix. You hold every client's MRR row: answer follow-ups (top N clients, concentration, a client's contribution, cadence mix) from byClient/byCadence directly. Note: it's a TTM/12 run-rate, so a client onboarded <12mo ago reads slightly low. runSql only for invoice-line detail.",
   };
 }
 
