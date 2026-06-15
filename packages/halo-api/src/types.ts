@@ -604,6 +604,11 @@ export interface MrrSnapshot {
   activeContractCount: number;
   /** Breakdown by billing period for visibility. */
   byPeriod: { period: number; label: string; contracts: number; monthlyRevenue: number }[];
+  /** Per-client breakdown (the raw rows behind the MRR) sorted by monthlyRevenue desc. */
+  byClient: { clientId: number; client: string; contracts: number; monthlyRevenue: number; pctOfMrr: number | null }[];
+  /** Share of MRR from the single biggest client (concentration risk). */
+  topClientPct: number | null;
+  presentation: string;
 }
 
 /** Utilization snapshot returned by getTechnicianUtilizationSnapshot. */
@@ -624,6 +629,9 @@ export interface MspKpis {
   revenuePerTech: number;
   mrrPerSeat: number;
   utilization?: UtilizationSnapshot;
+  /** Top clients by MRR (the raw rows behind the headline) — for drill-down. */
+  mrrByClient: { clientId: number; client: string; contracts: number; monthlyRevenue: number; pctOfMrr: number | null }[];
+  presentation: string;
 }
 
 // ---------- Service-delivery KPIs (SQL-backed) ----------

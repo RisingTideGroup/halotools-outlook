@@ -1003,6 +1003,7 @@ export async function getMrrSnapshot(): Promise<MrrSnapshot> {
   const active = invoices.filter((i) => i.disabled !== true);
   let mrr = 0;
   const grouped = new Map<number, { contracts: number; monthlyRevenue: number }>();
+  const byClientMap = new Map<number, { client: string; contracts: number; monthlyRevenue: number }>();
   for (const inv of active) {
     const period = inv.period ?? 3;
     const factor = periodToMonthlyFactor(period);
@@ -1012,6 +1013,11 @@ export async function getMrrSnapshot(): Promise<MrrSnapshot> {
     bucket.contracts += 1;
     bucket.monthlyRevenue += monthly;
     grouped.set(period, bucket);
+    const cid = inv.client_id ?? 0;
+    const cb = byClientMap.get(cid) ?? { client: inv.client_name ?? "(unknown)", contracts: 0, monthlyRevenue: 0 };
+    cb.contracts += 1;
+    cb.monthlyRevenue += monthly;
+    byClientMap.set(cid, cb);
   }
   const byPeriod = Array.from(grouped.entries())
     .sort((a, b) => a[0] - b[0])
@@ -1021,10 +1027,24 @@ export async function getMrrSnapshot(): Promise<MrrSnapshot> {
       contracts: b.contracts,
       monthlyRevenue: round2(b.monthlyRevenue),
     }));
+  const mrrRounded = round2(mrr);
+  const byClient = Array.from(byClientMap.entries())
+    .map(([clientId, b]) => ({
+      clientId,
+      client: b.client,
+      contracts: b.contracts,
+      monthlyRevenue: round2(b.monthlyRevenue),
+      pctOfMrr: mrr > 0 ? round2((b.monthlyRevenue / mrr) * 100) : null,
+    }))
+    .sort((a, b) => b.monthlyRevenue - a.monthlyRevenue);
   return {
-    mrr: round2(mrr),
+    mrr: mrrRounded,
     activeContractCount: active.length,
     byPeriod,
+    byClient,
+    topClientPct: byClient.length > 0 ? byClient[0].pctOfMrr : null,
+    presentation:
+      "Dashboard: lead with mrr + activeContractCount, then a table of byClient (client, monthlyRevenue, pctOfMrr) sorted desc — the top rows are the revenue concentration (topClientPct = biggest client's share). byPeriod shows the billing-cadence mix. You hold every client's MRR row here: answer follow-ups (top N clients, concentration, a specific client's contribution, monthly vs annual split) directly from byClient/byPeriod — only use runSql for contract-line detail beyond client+revenue.",
   };
 }
 
@@ -1161,6 +1181,9 @@ export async function getRevenuePerTechSnapshot(): Promise<{
   mrr: number;
   activeAgentCount: number;
   revenuePerTech: number;
+  agents: { id: number; name: string }[];
+  mrrByClient: MrrSnapshot["byClient"];
+  presentation: string;
 }> {
   const [mrrSnap, agents] = await Promise.all([
     getMrrSnapshot(),
@@ -1169,7 +1192,15 @@ export async function getRevenuePerTechSnapshot(): Promise<{
   const activeAgentCount = agents.length;
   const revenuePerTech =
     activeAgentCount > 0 ? round2(mrrSnap.mrr / activeAgentCount) : 0;
-  return { mrr: mrrSnap.mrr, activeAgentCount, revenuePerTech };
+  return {
+    mrr: mrrSnap.mrr,
+    activeAgentCount,
+    revenuePerTech,
+    agents: agents.map((a) => ({ id: a.id, name: a.name })),
+    mrrByClient: mrrSnap.byClient,
+    presentation:
+      "revenuePerTech is a CAPACITY ratio (mrr ÷ headcount), NOT revenue attributed to each tech — MRR isn't tech-attributable. Dashboard: show the ratio, then the agent roster (who's counted) and mrrByClient (where the revenue actually comes from). Answer 'who are the techs' from agents[] and 'which clients fund it' from mrrByClient[] — no re-query needed. For per-tech billable output use getTechnicianUtilization / getTechnicianScorecard instead.",
+  };
 }
 
 /** MRR ÷ active user count. Returns 0 if there are no active users. */
@@ -1177,6 +1208,8 @@ export async function getMrrPerSeatSnapshot(): Promise<{
   mrr: number;
   activeUserCount: number;
   mrrPerSeat: number;
+  seatsByClient: { clientId: number; client: string; seats: number; pctOfSeats: number | null }[];
+  presentation: string;
 }> {
   const [mrrSnap, users] = await Promise.all([
     getMrrSnapshot(),
@@ -1185,7 +1218,29 @@ export async function getMrrPerSeatSnapshot(): Promise<{
   const activeUserCount = users.length;
   const mrrPerSeat =
     activeUserCount > 0 ? round2(mrrSnap.mrr / activeUserCount) : 0;
-  return { mrr: mrrSnap.mrr, activeUserCount, mrrPerSeat };
+  const seatMap = new Map<number, { client: string; seats: number }>();
+  for (const u of users) {
+    const cid = u.client_id ?? 0;
+    const s = seatMap.get(cid) ?? { client: u.client_name ?? "(unknown)", seats: 0 };
+    s.seats += 1;
+    seatMap.set(cid, s);
+  }
+  const seatsByClient = Array.from(seatMap.entries())
+    .map(([clientId, s]) => ({
+      clientId,
+      client: s.client,
+      seats: s.seats,
+      pctOfSeats: activeUserCount > 0 ? round2((s.seats / activeUserCount) * 100) : null,
+    }))
+    .sort((a, b) => b.seats - a.seats);
+  return {
+    mrr: mrrSnap.mrr,
+    activeUserCount,
+    mrrPerSeat,
+    seatsByClient,
+    presentation:
+      "mrrPerSeat = mrr ÷ active end-user count (a blended ARPU-ish figure). Dashboard: show the ratio, then seatsByClient (clients with the most seats, %-of-seats) — that's where seat concentration is. Answer 'how many seats per client' / 'which clients have the most users' from seatsByClient[] directly. Note seats here count active end-users, not billed seats per contract.",
+  };
 }
 
 /**
@@ -1217,6 +1272,9 @@ export async function getMspKpis(
     mrrPerSeat:
       activeUserCount > 0 ? round2(mrrSnap.mrr / activeUserCount) : 0,
     utilization,
+    mrrByClient: mrrSnap.byClient.slice(0, 25),
+    presentation:
+      "One-shot MSP dashboard. Lead with mrr, activeAgentCount, activeUserCount, revenuePerTech (capacity ratio, not per-tech attribution), mrrPerSeat. Then mrrByClient (top 25 — revenue concentration) and utilization.perAgent (each tech's chargeable vs target). Answer follow-ups (top clients, who's under/over-utilised, concentration) from mrrByClient[] and utilization.perAgent[] directly; reach for getMrrSnapshot / getTechnicianUtilization for the full lists, runSql only for detail beyond these.",
   };
 }
 

@@ -1,10 +1,25 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAllTools } from "./tools/index.js";
 
-export function createHaloMcpServer(opts: { suppressTools?: ReadonlySet<string> } = {}): McpServer {
+export interface CreateServerOpts {
+  suppressTools?: ReadonlySet<string>;
+  /** Tenant identity used to label the server in MCP clients. When provided,
+   *  serverInfo.name becomes `<haloBaseUrl> [<clientIdShort>]` so connectors
+   *  showing multiple HaloPSA instances can distinguish them. Falls back to a
+   *  generic name otherwise (stdio mode without a tenant). */
+  tenant?: { haloBaseUrl: string; clientId: string };
+}
+
+function buildServerName(tenant: CreateServerOpts["tenant"]): string {
+  if (!tenant) return "halo-mcp-server";
+  const idShort = tenant.clientId.split("-")[0] ?? tenant.clientId.slice(0, 8);
+  return `${tenant.haloBaseUrl.replace(/\/$/, "")} [${idShort}]`;
+}
+
+export function createHaloMcpServer(opts: CreateServerOpts = {}): McpServer {
   const server = new McpServer(
     {
-      name: "halo-mcp-server",
+      name: buildServerName(opts.tenant),
       version: "0.1.0",
     },
     {
