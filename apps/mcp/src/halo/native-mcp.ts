@@ -40,6 +40,12 @@ function cacheKey(haloBaseUrl: string): string {
   return haloBaseUrl.replace(/\/+$/, "");
 }
 
+/** Evict a tenant's cached detection so the next request re-probes from scratch.
+ *  Called when a request fails, so a transient/mis-detected state self-corrects. */
+export function bustHaloMcpDetection(haloBaseUrl: string): void {
+  detectionCache.delete(cacheKey(haloBaseUrl));
+}
+
 /**
  * Probe `<haloBaseUrl>/api/mcp` with a `tools/list` JSON-RPC call. If Halo
  * returns a well-formed response, the native MCP is enabled and we capture
@@ -54,6 +60,8 @@ export async function detectHaloMcp(
   const key = cacheKey(haloBaseUrl);
   const hit = detectionCache.get(key);
   if (hit && hit.expiresAt > Date.now()) {
+    // Sliding TTL: extend on every successful reuse so hot tenants stay cached.
+    hit.expiresAt = Date.now() + DETECTION_TTL_MS;
     return { enabled: hit.enabled, tools: hit.tools };
   }
 
