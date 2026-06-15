@@ -602,11 +602,14 @@ export interface HaloOpportunity {
 /** MRR snapshot returned by getMrrSnapshot. */
 export interface MrrSnapshot {
   mrr: number;
-  activeContractCount: number;
-  /** Breakdown by billing period for visibility. */
-  byPeriod: { period: number; label: string; contracts: number; monthlyRevenue: number }[];
+  /** trailing-12-month window used to derive MRR (= ttmRecurringNet / 12). */
+  ttmMonths: number;
+  /** distinct recurring streams (masters) that billed in the window. */
+  recurringStreams: number;
+  /** cadence mix of the actual generated invoices (derived from each invoice's period length). */
+  byCadence: { cadence: string; streams: number; invoices: number; monthlyRevenue: number }[];
   /** Per-client breakdown (the raw rows behind the MRR) sorted by monthlyRevenue desc. */
-  byClient: { clientId: number; client: string; contracts: number; monthlyRevenue: number; pctOfMrr: number | null }[];
+  byClient: { clientId: number; client: string; invoices: number; monthlyRevenue: number; pctOfMrr: number | null }[];
   /** Share of MRR from the single biggest client (concentration risk). */
   topClientPct: number | null;
   presentation: string;
@@ -631,7 +634,7 @@ export interface MspKpis {
   mrrPerSeat: number;
   utilization?: UtilizationSnapshot;
   /** Top clients by MRR (the raw rows behind the headline) — for drill-down. */
-  mrrByClient: { clientId: number; client: string; contracts: number; monthlyRevenue: number; pctOfMrr: number | null }[];
+  mrrByClient: MrrSnapshot["byClient"];
   presentation: string;
 }
 
