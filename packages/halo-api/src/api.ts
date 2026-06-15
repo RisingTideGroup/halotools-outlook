@@ -55,6 +55,15 @@ import type {
   CategorizationTicket,
   HaloCategory,
   NoiseTicketAnalysis,
+  ProjectProfitability,
+  ProjectProfitabilityRow,
+  ProjectBillingModel,
+  ProjectPortfolio,
+  ResourceForecast,
+  TechnicianUtilization,
+  TechnicianUtilizationRow,
+  PrepayAccountBalance,
+  PrepayAccountRow,
   SimilarTicketNeighbour,
 } from "./types.js";
 
@@ -1339,6 +1348,17 @@ function numOrNull(v: unknown): number | null {
   return Number.isFinite(n) ? round2(n) : null;
 }
 
+/** Home/base currency code (the CURRENCY row with rate 1.0). Amounts in Halo
+ *  are stored in the home currency, so tools surface this rather than assume a
+ *  symbol. Cached for the process. */
+let baseCurrencyCache: string | null = null;
+async function baseCurrency(): Promise<string> {
+  if (baseCurrencyCache) return baseCurrencyCache;
+  const rows = await reportRows("select top 1 Ccode as code from CURRENCY order by abs(Crate - 1.0)");
+  baseCurrencyCache = (String(rows[0]?.code ?? "").trim() || "USD");
+  return baseCurrencyCache;
+}
+
 function attainment(met: unknown, breached: unknown): SlaAttainment {
   const m = num(met);
   const b = num(breached);
@@ -2607,6 +2627,499 @@ export async function triggerTicketAiSummary(ticketId: number): Promise<unknown>
     method: "POST",
     body: JSON.stringify([{ id: ticketId, _re_index: true }]),
   });
+}
+
+// ---------- Project management / profitability / resourcing ----------
+//
+// Projects = FAULTS where REQUESTTYPE.RTIsProject=1 AND the main-project test
+// (fmainprojectid IS NULL/0/=faultid). Time rolls up via ACTIONS.AProjectID =
+// main project faultid (== FAULTS.FProjectTimeActual). Money links via
+// FAULTS.fcontractid. Revenue has THREE sources, detected per project:
+//   retainer  -> SUM(PREPAYHISTORY.PPAmount>0) on the contract (dominant model)
+//   T&M       -> SUM(ACTIONS.ActionChargeAmount) over the project
+//   else      -> fixed-fee/internal (lump invoice lines are often unlinked here)
+// Cost = ACTIONS hours × the agent's hourly cost rate, taken from standard Halo
+// cost fields only (no per-tenant custom fields): the cost-history rate in
+// UnameCostTracking that was in effect when the work was actually done, falling
+// back to the agent's current cost rate UNAME.ucostPrice. The work-done date is
+// coalesce(Whe_, ActionArrivalDate, ActionDateCreated) — ActionDateCreated can
+// be backdated, so Whe_/ActionArrivalDate (when the work happened) are preferred.
+// Cost coverage is partial (only some agents have a cost rate set) — always
+// surface costCoveragePct before trusting margin. NOTE: this assumes
+// ucostPrice/uctCost is an HOURLY cost rate (the Halo standard). A tenant that
+// instead stores an annual salary in that field will read inflated labour cost —
+// effectiveRate (revenue/hours) is the rate-independent profitability proxy then.
+
+const PROJECT_MAIN = "(p.fmainprojectid is null or p.fmainprojectid = 0 or p.fmainprojectid = p.faultid)";
+
+/** Per-hour agent cost rate: cost-history rate effective when the work was done
+ *  (UnameCostTracking), else the agent's current cost (UNAME.ucostPrice). */
+const AGENT_HOURLY_COST =
+  "coalesce(uct.uctCost, coalesce(try_convert(float, nullif(cast(u.ucostPrice as nvarchar(40)), '')), 0))";
+
+/**
+ * Per-project profitability with auto-detected billing model. For each main
+ * project (default trailing — actually all active with hours), picks the revenue
+ * source by model (retainer prepay top-ups → T&M charges → else unmapped),
+ * computes hours (FProjectTimeActual), pay-type-adjusted labour cost with a
+ * coverage %, effective rate, and gross margin (flagged reliable only when cost
+ * coverage is high). Flags over-servicing (hours >> estimate). Sorted by hours.
+ */
+export async function getProjectProfitability(
+  limit = 50,
+  minHours = 1,
+): Promise<ProjectProfitability> {
+  const top = Math.max(1, Math.min(500, Math.trunc(limit)));
+  const mh = Number.isFinite(minHours) ? minHours : 1;
+  const sql = `select top ${top}
+  p.faultid,
+  left(cast(p.Symptom as nvarchar(90)), 90) as project,
+  a.aareadesc as client,
+  cast(p.FProjectTimeActual as decimal(12,2)) as hours,
+  cast(p.estimate as decimal(10,2)) as est_hrs,
+  cast(coalesce(pp.prepay_rev, 0) as decimal(12,2)) as prepay_rev,
+  cast(coalesce(pp.purchased_hrs, 0) as decimal(12,2)) as purchased_hrs,
+  cast(coalesce(con.consumed_hrs, 0) as decimal(12,2)) as consumed_hrs,
+  cast(coalesce(act.billable_hours, 0) as decimal(12,2)) as billable_hrs,
+  cast(coalesce(act.uncharged_hours, 0) as decimal(12,2)) as uncharged_hrs,
+  cast(coalesce(act.prepay_recognised, 0) as decimal(14,2)) as prepay_recognised,
+  cast(coalesce(rev.recognised, 0) as decimal(14,2)) as recognised_rev,
+  cast(coalesce(act.tm_charge, 0) as decimal(12,2)) as tm_charge,
+  cast(coalesce(act.labour_cost, 0) as decimal(12,2)) as labour_cost,
+  cast(coalesce(act.costed_hours, 0) as decimal(12,2)) as costed_hours
+from faults p
+join requesttype rt on p.requesttypenew = rt.RTid
+left join area a on a.aarea = p.areaint
+left join (select PPContractID, sum(case when PPAmount > 0 then PPAmount else 0 end) as prepay_rev, sum(PPHours) as purchased_hrs from PREPAYHISTORY group by PPContractID) pp on pp.PPContractID = p.fcontractid
+left join (select AContractId, sum(ActionPrePayHours) as consumed_hrs from actions group by AContractId) con on con.AContractId = p.fcontractid
+left join (select proj, sum(net) as recognised from (select distinct ac.AProjectID as proj, ac.actioninvoicelineid as lineid, idt.IDNet_Amount as net from actions ac join INVOICEDETAIL idt on idt.IDid = ac.actioninvoicelineid where ac.actioninvoicelineid > 0 and ac.AProjectID > 0) d group by proj) rev on rev.proj = p.faultid
+left join (
+  select ac.AProjectID,
+    sum(ac.ActionChargeAmount) as tm_charge,
+    sum(coalesce(ac.adefprepayamount,0)) as prepay_recognised,
+    sum(case when coalesce(ac.ActionCode,-1) + 1 > 0 then ac.timetaken else 0 end) as billable_hours,
+    sum(case when coalesce(ac.ActionCode,-1) + 1 > 0 and coalesce(ac.ActionPrePayHours,0) = 0 and coalesce(ac.ActionChargeAmount,0) = 0 then ac.timetaken else 0 end) as uncharged_hours,
+    sum(ac.timetaken * (${AGENT_HOURLY_COST})) as labour_cost,
+    sum(case when (${AGENT_HOURLY_COST}) > 0 then ac.timetaken else 0 end) as costed_hours
+  from actions ac
+  join uname u on u.unum = ac.whoagentid
+  left join UnameCostTracking uct on uct.uctAgentId = ac.whoagentid and coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) >= uct.uctStartDate and coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) < uct.uctEndDate
+  group by ac.AProjectID
+) act on act.AProjectID = p.faultid
+where rt.RTIsProject = 1 and ${PROJECT_MAIN}
+  and coalesce(p.fdeleted,0) = coalesce(p.fmergedintofaultid,0)
+  and p.FProjectTimeActual > ${mh}
+order by p.FProjectTimeActual desc`;
+
+  const [rows, currency] = await Promise.all([reportRows(sql), baseCurrency()]);
+  const projects: ProjectProfitabilityRow[] = rows.map((r) => {
+    const hours = num(r.hours);
+    const billableHours = round2(num(r.billable_hrs));
+    const prepay = num(r.prepay_rev);
+    const purchased = round2(num(r.purchased_hrs));
+    const consumed = round2(num(r.consumed_hrs));
+    const tm = num(r.tm_charge);
+    const labourCost = round2(num(r.labour_cost));
+    const costedHours = num(r.costed_hours);
+    const est = num(r.est_hrs);
+    const estimateHours = est > 1 ? est : null; // <=1 is the 0.75 template placeholder
+    const coverage = hours > 0 ? round2((costedHours / hours) * 100) : null;
+
+    // Revenue = recognised, from DISTINCT linked invoice lines (the unified
+    // recognition key covers BOTH T&M and prepay deferred-revenue, so no double
+    // count); the prepay-DR slice (adefprepayamount) is broken out, T&M = the rest.
+    const revenue = round2(num(r.recognised_rev));
+    const prepayRecognised = round2(num(r.prepay_recognised));
+    const tmRecognised = round2(Math.max(revenue - prepayRecognised, 0));
+    let model: ProjectBillingModel;
+    let source: string;
+    if (prepayRecognised > 0 && tmRecognised > 0) {
+      model = "mixed";
+      source = "recognised invoice lines — both prepay deferred-revenue and T&M";
+    } else if (prepayRecognised > 0) {
+      model = "retainer";
+      source = "recognised prepay deferred-revenue (adefprepayamount)";
+    } else if (tmRecognised > 0) {
+      model = "time-and-materials";
+      source = "recognised T&M invoice lines";
+    } else {
+      model = "fixed-fee-or-internal";
+      source = "no recognised invoice lines — fixed-fee (often unlinked) or internal";
+    }
+    const marginReliable = coverage != null && coverage >= 80;
+    const grossMargin = revenue > 0 ? round2(revenue - labourCost) : null;
+    const effectiveRate = revenue > 0 && hours > 0 ? round2(revenue / hours) : null;
+    const soldRate = purchased > 0 && prepay > 0 ? round2(prepay / purchased) : null;
+    // Billable hours that were neither deducted from the prepay block NOR billed
+    // as a direct charge amount = genuinely uncharged labour. (Time can be billed
+    // either by drawing down prepay OR via ActionChargeAmount, so subtracting only
+    // prepay-consumed would wrongly count T&M-charged hours as a leak.)
+    const unchargedHours = round2(num(r.uncharged_hrs));
+    const rateForValue = soldRate ?? effectiveRate;
+    const unchargedValue = rateForValue != null ? round2(unchargedHours * rateForValue) : 0;
+    // Over-serviced = delivered beyond what was sold: vs the prepay block when there
+    // is one (the refilled budget), else vs the stale estimate.
+    const overServiced =
+      purchased > 0 ? hours > purchased : estimateHours != null && hours > estimateHours * 1.5;
+    return {
+      projectId: num(r.faultid),
+      project: String(r.project ?? "").trim(),
+      client: String(r.client ?? ""),
+      billingModel: model,
+      revenue: round2(revenue),
+      revenueSource: source,
+      prepayRecognised,
+      tmRecognised,
+      hours,
+      billableHours,
+      estimateHours,
+      prepayPurchasedHours: purchased,
+      prepayConsumedHours: consumed,
+      unchargedHours,
+      unchargedValue,
+      labourCost,
+      costCoveragePct: coverage,
+      effectiveRate,
+      soldRate,
+      grossMargin,
+      grossMarginPct: grossMargin != null && revenue > 0 ? round2((grossMargin / revenue) * 100) : null,
+      marginReliable,
+      prepayRevenue: round2(prepay),
+      tmCharge: round2(tm),
+      overServiced,
+    };
+  });
+  return {
+    note:
+      "revenue = RECOGNISED revenue from DISTINCT linked invoice lines (ACTIONS.actioninvoicelineid → INVOICEDETAIL.IDNet_Amount); this one key covers BOTH prepay deferred-revenue and T&M, so it is not double-counted. prepayRecognised (adefprepayamount) is the prepay-DR slice; tmRecognised is the rest. effectiveRate = revenue/delivered hours. Projects are refilled PREPAY BLOCKS, not fixed-fee: prepayPurchasedHours (PREPAYHISTORY top-ups) is the real budget — the estimate field is usually a stale placeholder; prepayRevenue is the cash collected (top-ups). For the deferred-revenue ACCOUNT BALANCE (collected vs recognised vs remaining/over-drawn) use getPrepayAccountBalance — it's a contract-level concept and prepay often spans multiple projects. unchargedHours = billable hours NEITHER drawn from prepay NOR billed via a charge amount (genuinely leaked labour). overServiced = delivered hours exceed the purchased block (or, with no prepay, 1.5x the estimate). Labour cost is PARTIAL — trust grossMargin only when marginReliable=true. Amounts in the home currency (see `currency`).",
+    currency,
+    projects,
+  };
+}
+
+/**
+ * Project portfolio health board: active main projects with % complete (child
+ * tasks closed / total), rolled-up hours, estimate, age, and status. Optionally
+ * include completed projects. Sorted by child-task count (biggest first).
+ */
+export async function getProjectPortfolio(
+  includeCompleted = false,
+  limit = 100,
+): Promise<ProjectPortfolio> {
+  const top = Math.max(1, Math.min(500, Math.trunc(limit)));
+  const statusFilter = includeCompleted ? "" : "and p.status not in (8,9)";
+  const sql = `select top ${top}
+  p.faultid,
+  left(cast(p.Symptom as nvarchar(90)), 90) as project,
+  a.aareadesc as client,
+  s.tstatusdesc as status,
+  coalesce(ch.child_total, 0) as child_total,
+  coalesce(ch.child_closed, 0) as child_closed,
+  cast(p.FProjectTimeActual as decimal(12,2)) as hours,
+  cast(p.estimate as decimal(10,2)) as est_hrs,
+  datediff(day, p.FProjectStartDate, getdate()) as age_days
+from faults p
+join requesttype rt on p.requesttypenew = rt.RTid
+left join area a on a.aarea = p.areaint
+left join tstatus s on s.Tstatus = p.status
+left join (
+  select c.fmainprojectid as pid,
+    count(*) as child_total,
+    sum(case when c.status in (8,9) then 1 else 0 end) as child_closed
+  from faults c where c.fmainprojectid > 0 and c.faultid <> c.fmainprojectid
+  group by c.fmainprojectid
+) ch on ch.pid = p.faultid
+where rt.RTIsProject = 1 and ${PROJECT_MAIN}
+  and coalesce(p.fdeleted,0) = coalesce(p.fmergedintofaultid,0) ${statusFilter}
+order by coalesce(ch.child_total, 0) desc`;
+
+  const rows = await reportRows(sql);
+  return {
+    projects: rows.map((r) => {
+      const total = num(r.child_total);
+      const closed = num(r.child_closed);
+      const est = num(r.est_hrs);
+      return {
+        projectId: num(r.faultid),
+        project: String(r.project ?? "").trim(),
+        client: String(r.client ?? ""),
+        status: String(r.status ?? ""),
+        childTasks: total,
+        tasksClosed: closed,
+        percentComplete: total > 0 ? round2((closed / total) * 100) : null,
+        hours: round2(num(r.hours)),
+        estimateHours: est > 1 ? est : null,
+        ageDays: numOrNull(r.age_days),
+      };
+    }),
+  };
+}
+
+/**
+ * Forward resource load per technician: booked appointment hours over the next
+ * `weeks` (from APPOINTMENT start/end, excluding all-day and deleted) vs a flat
+ * weekly capacity (`weeklyCapacityHours`, default 40 — no per-tenant custom
+ * fields). scheduledHours counts only TICKET-LINKED appointments (APFaultid>0 =
+ * client work); unlinked appointments are internal meetings, reported
+ * separately. Utilisation is computed off ticket-linked hours. Flags
+ * over-allocated / under-booked. Excludes bots and the Unassigned pseudo-agent.
+ */
+export async function getResourceForecast(
+  weeks = 4,
+  weeklyCapacityHours = 40,
+): Promise<ResourceForecast> {
+  const w = Math.max(1, Math.min(26, Math.trunc(weeks)));
+  const weeklyTarget = weeklyCapacityHours > 0 ? weeklyCapacityHours : 40;
+  const capacity = round2(weeklyTarget * w);
+  const start = new Date().toISOString().slice(0, 10);
+  const endD = new Date();
+  endD.setUTCDate(endD.getUTCDate() + w * 7);
+  const end = endD.toISOString().slice(0, 10);
+  const sql = `select
+  u.unum as agent_id,
+  u.uname as agent,
+  count(*) as appointments,
+  cast(sum(case when ap.APFaultid > 0 then datediff(minute, ap.APStartDate, ap.APEndDate) / 60.0 else 0 end) as decimal(12,1)) as scheduled_hours,
+  cast(sum(case when coalesce(ap.APFaultid,0) = 0 then datediff(minute, ap.APStartDate, ap.APEndDate) / 60.0 else 0 end) as decimal(12,1)) as internal_hours
+from APPOINTMENT ap
+join uname u on u.unum = ap.APunum
+where coalesce(ap.APdeleted,0) = 0 and coalesce(ap.APAllDayEvent,0) = 0
+  and coalesce(u.uisapiagent,0) = 0 and u.unum <> 1
+  and ap.APStartDate >= '${start}' and ap.APStartDate < '${end}'
+group by u.unum, u.uname
+order by sum(case when ap.APFaultid > 0 then datediff(minute, ap.APStartDate, ap.APEndDate) / 60.0 else 0 end) desc
+offset 0 rows`;
+
+  const rows = await reportRows(sql);
+  const technicians = rows.map((r) => {
+    const scheduled = round2(num(r.scheduled_hours));
+    const util = capacity > 0 ? round2((scheduled / capacity) * 100) : null;
+    let status = "ok";
+    if (util != null) {
+      if (util > 100) status = "over-allocated";
+      else if (util < 40) status = "under-booked";
+    }
+    return {
+      agentId: num(r.agent_id),
+      agent: String(r.agent ?? ""),
+      scheduledHours: scheduled,
+      internalHours: round2(num(r.internal_hours)),
+      appointments: num(r.appointments),
+      capacityHours: capacity,
+      utilisationPct: util,
+      status,
+    };
+  });
+  return { startdate: start, weeks: w, technicians };
+}
+
+/** Count weekdays (Mon–Fri) in an inclusive [start, end] date window. */
+function weekdaysBetween(start: string, end: string): number {
+  const s = new Date(`${start}T00:00:00Z`);
+  const e = new Date(`${end}T00:00:00Z`);
+  if (e < s) return 0;
+  let days = 0;
+  for (const d = new Date(s); d <= e; d.setUTCDate(d.getUTCDate() + 1)) {
+    const dow = d.getUTCDay();
+    if (dow !== 0 && dow !== 6) days++;
+  }
+  return days;
+}
+
+/**
+ * Per-technician utilisation over a past window, combining three standard
+ * sources: booked calendar time (APPOINTMENT), actually-logged work and its
+ * billable share (ACTIONS timetaken; billable = a real charge code, i.e.
+ * ActionCode + 1 > 0 — non-billable time is stored as ActionCode = -1; the
+ * charge-hours columns are unreliable/empty in many tenants), and leave
+ * (HOLIDAYS) which reduces capacity. Capacity = working weekdays × dailyCapacityHours,
+ * minus each agent's leave hours. Returns per-agent and rolled-up:
+ *   bookedUtil  = booked / net capacity  (calendar fill)
+ *   workedUtil  = worked / net capacity  (effort actually logged)
+ *   billableUtil= billable / net capacity (revenue-bearing utilisation)
+ *   billability = billable / worked      (quality of the work mix)
+ * Flags over-allocated (booked > 100%), under-utilised (worked below target),
+ * and low-billability. Only agents with booked or worked hours are returned
+ * (excludes bots and the Unassigned pseudo-agent).
+ */
+export async function getTechnicianUtilization(
+  startdate?: string,
+  enddate?: string,
+  dailyCapacityHours = 8,
+  targetUtilisationPct = 75,
+): Promise<TechnicianUtilization> {
+  const { start, end } = resolveWindow(startdate, enddate, 30);
+  const dch = dailyCapacityHours > 0 ? dailyCapacityHours : 8;
+  const target = targetUtilisationPct > 0 ? targetUtilisationPct : 75;
+  const workingDays = weekdaysBetween(start, end);
+  const grossCapacity = round2(workingDays * dch);
+  const ex = exclusiveEnd(end);
+  const sql = `select
+  u.unum as agent_id,
+  u.uname as agent,
+  cast(coalesce(ap.booked,0) as decimal(14,2)) as booked_hrs,
+  cast(coalesce(ap.internal,0) as decimal(14,2)) as internal_hrs,
+  cast(coalesce(wk.worked,0) as decimal(14,2)) as worked_hrs,
+  cast(coalesce(wk.billable,0) as decimal(14,2)) as billable_hrs,
+  cast(coalesce(h.leave_hrs,0) as decimal(14,2)) as leave_hrs
+from uname u
+left join (select APunum,
+    sum(case when APFaultid > 0 then datediff(minute, APStartDate, APEndDate)/60.0 else 0 end) as booked,
+    sum(case when coalesce(APFaultid,0) = 0 then datediff(minute, APStartDate, APEndDate)/60.0 else 0 end) as internal
+  from APPOINTMENT where coalesce(APdeleted,0)=0 and coalesce(APAllDayEvent,0)=0 and APStartDate >= '${start}' and APStartDate < '${ex}' group by APunum) ap on ap.APunum = u.unum
+left join (select ac.whoagentid, sum(ac.timetaken) as worked, sum(case when coalesce(ac.ActionCode, -1) + 1 > 0 then ac.timetaken else 0 end) as billable from actions ac where coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) >= '${start}' and coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) < '${ex}' group by ac.whoagentid) wk on wk.whoagentid = u.unum
+left join (select HTechnicianID, sum(Hduration) as leave_hrs from HOLIDAYS where Hdate >= '${start}' and Hdate < '${ex}' group by HTechnicianID) h on h.HTechnicianID = u.unum
+where coalesce(u.uisapiagent,0) = 0 and u.unum <> 1 and (coalesce(ap.booked,0) > 0 or coalesce(wk.worked,0) > 0)
+order by coalesce(wk.worked,0) desc
+offset 0 rows`;
+
+  const rows = await reportRows(sql);
+  const tot = { capacity: 0, leave: 0, net: 0, booked: 0, internal: 0, worked: 0, billable: 0 };
+  const technicians: TechnicianUtilizationRow[] = rows.map((r) => {
+    const leave = round2(num(r.leave_hrs));
+    const net = round2(Math.max(grossCapacity - leave, 0));
+    const booked = round2(num(r.booked_hrs));
+    const internal = round2(num(r.internal_hrs));
+    const worked = round2(num(r.worked_hrs));
+    const billable = round2(num(r.billable_hrs));
+    const bookedUtil = net > 0 ? round2((booked / net) * 100) : null;
+    const internalPct = net > 0 ? round2((internal / net) * 100) : null;
+    const workedUtil = net > 0 ? round2((worked / net) * 100) : null;
+    const billableUtil = net > 0 ? round2((billable / net) * 100) : null;
+    const billability = worked > 0 ? round2((billable / worked) * 100) : null;
+    tot.capacity += grossCapacity;
+    tot.leave += leave;
+    tot.net += net;
+    tot.booked += booked;
+    tot.internal += internal;
+    tot.worked += worked;
+    tot.billable += billable;
+    let status = "ok";
+    if (workedUtil != null && workedUtil < target * 0.5) status = "under-utilised";
+    else if (workedUtil != null && workedUtil < target) status = "below-target";
+    if (internalPct != null && internalPct >= 30) {
+      status = status === "ok" ? "meeting-heavy" : `${status}, meeting-heavy`;
+    }
+    if (billability != null && billability < 50 && worked > 0) {
+      status = status === "ok" ? "low-billability" : `${status}, low-billability`;
+    }
+    return {
+      agentId: num(r.agent_id),
+      agent: String(r.agent ?? ""),
+      capacityHours: grossCapacity,
+      leaveHours: leave,
+      netCapacityHours: net,
+      bookedHours: booked,
+      internalMeetingHours: internal,
+      workedHours: worked,
+      billableHours: billable,
+      bookedUtilPct: bookedUtil,
+      internalMeetingPct: internalPct,
+      workedUtilPct: workedUtil,
+      billableUtilPct: billableUtil,
+      billabilityPct: billability,
+      status,
+    };
+  });
+
+  return {
+    startdate: start,
+    enddate: end,
+    workingDays,
+    dailyCapacityHours: dch,
+    targetUtilisationPct: target,
+    note:
+      "Capacity = working weekdays in window × dailyCapacityHours, minus each agent's leave (HOLIDAYS). Booked = TICKET-LINKED appointment hours (APFaultid>0 = client work); internalMeetingHours = unlinked appointments (internal meetings). worked = ACTIONS timetaken (logged effort); billable = worked hours carrying a real charge code (ActionCode + 1 > 0; non-billable is ActionCode = -1; don't use ActIsBillable/ActionChargeHours — unreliable). billability (billable/worked) measures the work mix; billableUtil (billable/capacity) is the revenue-bearing utilisation. Note worked often exceeds ticket-linked booked because delivery time is logged without a matching calendar appointment. Flags: meeting-heavy (internal ≥30% of capacity), below-target/under-utilised, low-billability. This matches the charge_hours a timesheet day/range summary reports.",
+    totals: {
+      capacityHours: round2(tot.capacity),
+      leaveHours: round2(tot.leave),
+      netCapacityHours: round2(tot.net),
+      bookedHours: round2(tot.booked),
+      internalMeetingHours: round2(tot.internal),
+      workedHours: round2(tot.worked),
+      billableHours: round2(tot.billable),
+      bookedUtilPct: tot.net > 0 ? round2((tot.booked / tot.net) * 100) : null,
+      internalMeetingPct: tot.net > 0 ? round2((tot.internal / tot.net) * 100) : null,
+      workedUtilPct: tot.net > 0 ? round2((tot.worked / tot.net) * 100) : null,
+      billableUtilPct: tot.net > 0 ? round2((tot.billable / tot.net) * 100) : null,
+      billabilityPct: tot.worked > 0 ? round2((tot.billable / tot.worked) * 100) : null,
+    },
+    technicians,
+  };
+}
+
+/**
+ * Prepay (deferred-revenue) account balance per contract — the contract-level
+ * ledger behind the retainer model. Cash collected (PREPAYHISTORY top-ups,
+ * invoiced) and net hours purchased vs hours consumed (ACTIONS.ActionPrePayHours)
+ * and revenue recognised (ACTIONS.adefprepayamount, since deferred revenue is on).
+ * Computes remainingHours (negative = over-drawn) and deferredBalance (cash not
+ * yet earned; negative = recognised beyond collected). Status flags over-drawn,
+ * untouched (paid but barely consumed) and low-balance. Grain is the contract
+ * because only a minority carry an explicit project link and many span
+ * multiple projects — a client may hold several prepay contracts.
+ * Answers questions like "which clients have a negative prepay balance" or
+ * "who has untouched prepay". Sorted lowest remaining first (over-drawn on top).
+ */
+export async function getPrepayAccountBalance(limit = 500): Promise<PrepayAccountBalance> {
+  const top = Math.max(1, Math.min(2000, Math.trunc(limit)));
+  const sql = `select top ${top}
+  ch.CHid as contract_id,
+  a.aareadesc as client,
+  cast(coalesce(a.aisinactive,0) as int) as client_inactive,
+  cast(coalesce(ch.chactive,0) as int) as active,
+  cast(pp.collected as decimal(14,2)) as collected,
+  cast(pp.purchased as decimal(12,2)) as purchased_hrs,
+  cast(coalesce(act.consumed,0) as decimal(12,2)) as consumed_hrs,
+  cast(coalesce(act.recognised,0) as decimal(14,2)) as recognised,
+  coalesce(act.projects,0) as projects_on_contract,
+  convert(varchar(10), pp.last_topup, 23) as last_topup
+from CONTRACTHEADER ch
+join (select PPContractID, sum(PPAmount) as collected, sum(pphours) as purchased, max(ppdate) as last_topup from PREPAYHISTORY group by PPContractID) pp on pp.PPContractID = ch.CHid
+left join area a on a.aarea = ch.CHarea
+left join (select AContractId, sum(coalesce(ActionPrePayHours,0)) as consumed, sum(coalesce(adefprepayamount,0)) as recognised, count(distinct case when AProjectID > 0 then AProjectID end) as projects from actions group by AContractId) act on act.AContractId = ch.CHid
+order by pp.purchased - coalesce(act.consumed,0)
+offset 0 rows`;
+
+  const [rows, currency] = await Promise.all([reportRows(sql), baseCurrency()]);
+  const accounts: PrepayAccountRow[] = rows.map((r) => {
+    const collected = round2(num(r.collected));
+    const purchased = round2(num(r.purchased_hrs));
+    const consumed = round2(num(r.consumed_hrs));
+    const recognised = round2(num(r.recognised));
+    const remaining = round2(purchased - consumed);
+    const deferred = round2(collected - recognised);
+    const overDrawn = remaining < -0.5;
+    const untouched = purchased > 0.5 && consumed <= purchased * 0.02;
+    let status = "healthy";
+    if (overDrawn) status = "over-drawn";
+    else if (untouched) status = "untouched";
+    else if (purchased > 0 && remaining <= purchased * 0.1) status = "low-balance";
+    return {
+      contractId: num(r.contract_id),
+      client: String(r.client ?? ""),
+      clientActive: num(r.client_inactive) === 0,
+      active: num(r.active) === 1,
+      collectedAmount: collected,
+      purchasedHours: purchased,
+      consumedHours: consumed,
+      remainingHours: remaining,
+      recognisedAmount: recognised,
+      deferredBalance: deferred,
+      blendedRate: purchased > 0 ? round2(collected / purchased) : null,
+      projectsOnContract: num(r.projects_on_contract),
+      lastTopUp: r.last_topup ? String(r.last_topup) : null,
+      status,
+      overDrawn,
+      untouched,
+    };
+  });
+  return {
+    note:
+      "Per-contract prepay (deferred-revenue) account. collectedAmount/purchasedHours = cash invoiced + net hours added (PREPAYHISTORY); consumedHours/recognisedAmount = drawn down + revenue earned (ACTIONS.ActionPrePayHours/adefprepayamount). remainingHours<0 = over-drawn (delivered past the block); deferredBalance = cash collected not yet earned (negative = recognised beyond collected). status: over-drawn / untouched (paid but ~unused) / low-balance / healthy. clientActive (AREA.aisinactive) flags whether the client account is still active — watch for balances on inactive clients. Grain is the contract — a client may hold several; purchasedHours is net of any adjustments. Amounts in the home currency (see `currency`).",
+    currency,
+    accounts,
+  };
 }
 
 export { HaloApiError };

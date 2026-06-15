@@ -970,3 +970,180 @@ export interface NoiseTicketAnalysis {
   }[];
   byMailbox: { mailboxId: number; tickets: number }[];
 }
+
+// ---------- Project management / profitability / resourcing ----------
+
+export type ProjectBillingModel = "retainer" | "time-and-materials" | "mixed" | "fixed-fee-or-internal";
+
+/** Per-project profitability with auto-detected billing model. Revenue source is
+ *  chosen per project: prepay top-ups (retainer) → ACTIONS charge (T&M) → else
+ *  unmapped. Cost is pay-type-adjusted ucostPrice and is PARTIAL — always read
+ *  costCoveragePct before trusting margin. */
+export interface ProjectProfitabilityRow {
+  projectId: number;
+  project: string;
+  client: string;
+  billingModel: ProjectBillingModel;
+  /** recognised revenue = distinct linked invoice lines (T&M + prepay-DR) */
+  revenue: number;
+  revenueSource: string;
+  /** prepay deferred-revenue recognised on this project (ACTIONS.adefprepayamount) */
+  prepayRecognised: number;
+  /** pure time-and-materials recognised (revenue − prepayRecognised) */
+  tmRecognised: number;
+  hours: number;
+  billableHours: number;
+  estimateHours: number | null;
+  prepayPurchasedHours: number;
+  prepayConsumedHours: number;
+  /** billable hours that were neither drawn from the prepay block nor billed as
+   *  a direct charge amount (ActionPrePayHours=0 AND ActionChargeAmount=0) —
+   *  genuinely uncharged labour. */
+  unchargedHours: number;
+  unchargedValue: number;
+  labourCost: number;
+  costCoveragePct: number | null;
+  /** revenue / delivered hours */
+  effectiveRate: number | null;
+  /** prepay top-ups / prepay hours purchased (the sold blended rate) */
+  soldRate: number | null;
+  grossMargin: number | null;
+  grossMarginPct: number | null;
+  marginReliable: boolean;
+  prepayRevenue: number;
+  tmCharge: number;
+  /** delivered hours exceed the prepay block purchased (or, with no prepay, the estimate) */
+  overServiced: boolean;
+}
+
+export interface ProjectProfitability {
+  note: string;
+  currency: string;
+  projects: ProjectProfitabilityRow[];
+}
+
+/** Prepay (deferred-revenue) account balance for one contract. The prepay
+ *  account is a contract-level ledger: cash collected via PREPAYHISTORY top-ups
+ *  vs hours consumed / revenue recognised on ACTIONS. */
+export interface PrepayAccountRow {
+  contractId: number;
+  client: string;
+  /** the client account is active (AREA.aisinactive = 0) */
+  clientActive: boolean;
+  active: boolean;
+  /** cash invoiced into the block (PREPAYHISTORY.PPAmount) */
+  collectedAmount: number;
+  /** net hours added to the block (PREPAYHISTORY.pphours; can be net of adjustments) */
+  purchasedHours: number;
+  /** hours drawn down (ACTIONS.ActionPrePayHours) */
+  consumedHours: number;
+  /** purchasedHours − consumedHours; negative = over-drawn */
+  remainingHours: number;
+  /** prepay revenue recognised as consumed (ACTIONS.adefprepayamount) */
+  recognisedAmount: number;
+  /** collectedAmount − recognisedAmount = unearned deferred revenue still on the books (negative = recognised beyond cash collected) */
+  deferredBalance: number;
+  /** collectedAmount / purchasedHours (blended sold rate) */
+  blendedRate: number | null;
+  projectsOnContract: number;
+  lastTopUp: string | null;
+  /** healthy | low-balance | over-drawn | untouched */
+  status: string;
+  overDrawn: boolean;
+  untouched: boolean;
+}
+
+export interface PrepayAccountBalance {
+  note: string;
+  currency: string;
+  accounts: PrepayAccountRow[];
+}
+
+/** One project in the portfolio health board. */
+export interface ProjectPortfolioRow {
+  projectId: number;
+  project: string;
+  client: string;
+  status: string;
+  childTasks: number;
+  tasksClosed: number;
+  percentComplete: number | null;
+  hours: number;
+  estimateHours: number | null;
+  ageDays: number | null;
+}
+
+export interface ProjectPortfolio {
+  projects: ProjectPortfolioRow[];
+}
+
+/** Per-agent forward resource load: booked appointment hours vs weekly target.
+ *  scheduledHours counts only ticket-linked appointments (client work);
+ *  internalHours are unlinked appointments (internal meetings). */
+export interface ResourceForecastRow {
+  agentId: number;
+  agent: string;
+  scheduledHours: number;
+  internalHours: number;
+  appointments: number;
+  capacityHours: number | null;
+  utilisationPct: number | null;
+  status: string;
+}
+
+export interface ResourceForecast {
+  startdate: string;
+  weeks: number;
+  technicians: ResourceForecastRow[];
+}
+
+/** Per-agent utilisation over a past window: booked (calendar) vs worked
+ *  (logged) vs billable, against leave-adjusted capacity. */
+export interface TechnicianUtilizationRow {
+  agentId: number;
+  agent: string;
+  capacityHours: number;
+  leaveHours: number;
+  netCapacityHours: number;
+  /** ticket-linked appointment hours (client work booked on the calendar) */
+  bookedHours: number;
+  /** unlinked appointment hours (internal meetings) */
+  internalMeetingHours: number;
+  workedHours: number;
+  billableHours: number;
+  /** ticket-linked booked hours / net capacity */
+  bookedUtilPct: number | null;
+  /** internal meeting hours / net capacity */
+  internalMeetingPct: number | null;
+  /** logged work hours / net capacity */
+  workedUtilPct: number | null;
+  /** billable hours / net capacity (the revenue-bearing utilisation) */
+  billableUtilPct: number | null;
+  /** billable hours / worked hours (quality of the work mix) */
+  billabilityPct: number | null;
+  status: string;
+}
+
+export interface TechnicianUtilization {
+  startdate: string;
+  enddate: string;
+  workingDays: number;
+  dailyCapacityHours: number;
+  targetUtilisationPct: number;
+  note: string;
+  totals: {
+    capacityHours: number;
+    leaveHours: number;
+    netCapacityHours: number;
+    bookedHours: number;
+    internalMeetingHours: number;
+    workedHours: number;
+    billableHours: number;
+    bookedUtilPct: number | null;
+    internalMeetingPct: number | null;
+    workedUtilPct: number | null;
+    billableUtilPct: number | null;
+    billabilityPct: number | null;
+  };
+  technicians: TechnicianUtilizationRow[];
+}
