@@ -105,6 +105,90 @@ const TOOL_REGISTRY: Array<{ name: string; register: (s: McpServer) => void }> =
   { name: "haloApiRaw", register: registerHaloApiRaw },
 ];
 
+/**
+ * Per-tool display metadata applied as MCP `annotations` after registration.
+ *
+ *  - `title` is the human-readable label shown in MCP client UIs (Claude's
+ *    connector panel reads `annotations.title`, falling back to the tool
+ *    name). The colon convention soft-categorises tools even when clients
+ *    render them flat — see Hecher's MCP for the same convention.
+ *  - `readOnly` drives Claude's "Read-only tools / Write tools" bucketing.
+ *    Tools that POST/PATCH/DELETE go into the write bucket; everything else
+ *    is read-only. haloApiRaw is intentionally NOT marked read-only — it
+ *    can do anything, including writes.
+ */
+interface ToolMetadata {
+  title: string;
+  readOnly: boolean;
+}
+
+const TOOL_METADATA: Record<string, ToolMetadata> = {
+  // Operational
+  findContact: { title: "Contact: Find by email", readOnly: true },
+  listOpenTickets: { title: "Tickets: List open for client/user", readOnly: true },
+  searchTickets: { title: "Tickets: Free-text search", readOnly: true },
+  createTicket: { title: "Tickets: Create new", readOnly: false },
+  appendActionToTicket: { title: "Tickets: Append action (note/email/time)", readOnly: false },
+  logNote: { title: "CRM: Log non-ticket note", readOnly: false },
+  searchCannedText: { title: "Snippets: Search canned text", readOnly: true },
+  getActivityFeed: { title: "CRM: Get activity feed", readOnly: true },
+
+  // Analytics — foundation reads
+  listRecurringInvoices: { title: "Financial: List recurring invoices", readOnly: true },
+  listTimesheets: { title: "Time: List timesheet rows", readOnly: true },
+  listContracts: { title: "Financial: List client contracts", readOnly: true },
+  listOpportunities: { title: "Sales: List opportunities", readOnly: true },
+
+  // Analytics — composite KPIs
+  getMrrSnapshot: { title: "Analytics: MRR snapshot", readOnly: true },
+  getTechnicianUtilizationSnapshot: { title: "Analytics: Technician utilisation (snapshot)", readOnly: true },
+  getRevenuePerTechSnapshot: { title: "Analytics: Revenue per technician", readOnly: true },
+  getMrrPerSeatSnapshot: { title: "Analytics: MRR per seat", readOnly: true },
+  getMspKpis: { title: "Analytics: MSP KPI dashboard", readOnly: true },
+
+  // Service-delivery KPIs (SQL-backed)
+  getServiceDeskHealth: { title: "Service desk: Health overview", readOnly: true },
+  getTechnicianScorecard: { title: "Service desk: Technician scorecard", readOnly: true },
+  getClientHealthScorecard: { title: "Service desk: Client health scorecard", readOnly: true },
+  getTicketBacklog: { title: "Service desk: Backlog & at-risk tickets", readOnly: true },
+  getCategoryInsights: { title: "Service desk: Category insights", readOnly: true },
+  getTechnicianRiskSignals: { title: "Service desk: Technician risk signals", readOnly: true },
+
+  // Similarity / embeddings
+  getRecurringProblemClusters: { title: "Insights: Recurring problem clusters", readOnly: true },
+  getDuplicateTickets: { title: "Insights: Duplicate tickets", readOnly: true },
+  getClientDejaVu: { title: "Insights: Clients with repeat issues", readOnly: true },
+  getSimilarTicketInsights: { title: "Insights: Similar resolved tickets", readOnly: true },
+  getKnowledgeGaps: { title: "Insights: Knowledge base gaps", readOnly: true },
+
+  // Categorisation
+  getTicketsToCategorize: { title: "Categorisation: Tickets to categorise", readOnly: true },
+  setTicketCategory: { title: "Categorisation: Set ticket category", readOnly: false },
+  createCategory: { title: "Categorisation: Create new category", readOnly: false },
+  triggerTicketAiSummary: { title: "Categorisation: Trigger AI summary on ticket", readOnly: false },
+  getNoiseTicketAnalysis: { title: "Categorisation: Noise ticket analysis", readOnly: true },
+
+  // Projects & resourcing
+  getProjectPortfolio: { title: "Projects: Portfolio overview", readOnly: true },
+  getProjectProfitability: { title: "Projects: Profitability analysis", readOnly: true },
+  getResourceForecast: { title: "Projects: Resource forecast", readOnly: true },
+  getTechnicianUtilization: { title: "Projects: Technician utilisation (window)", readOnly: true },
+  getPrepayAccountBalance: { title: "Projects: Prepay account balance", readOnly: true },
+
+  // Database + escape hatch
+  listReports: { title: "Database: List saved reports", readOnly: true },
+  runSql: { title: "Database: Run SQL SELECT", readOnly: true },
+  haloApiRaw: { title: "API: Raw Halo REST call (read or write)", readOnly: false },
+};
+
+/** Internal shape of the SDK's registered-tool record. The MCP SDK exposes
+ *  `RegisteredTool.update()` for changing config post-registration, which is
+ *  how we apply annotations from a central catalogue without editing 40+
+ *  individual tool files. */
+interface RegisteredToolLike {
+  update: (cfg: { annotations?: Record<string, unknown> }) => void;
+}
+
 export function registerAllTools(
   server: McpServer,
   suppress?: ReadonlySet<string>,
@@ -112,5 +196,30 @@ export function registerAllTools(
   for (const tool of TOOL_REGISTRY) {
     if (suppress?.has(tool.name)) continue;
     tool.register(server);
+  }
+
+  // Walk the SDK's internal registered-tools record and patch annotations
+  // from the central catalogue. Annotations:
+  //   - title          → human-readable display name (Claude shows this)
+  //   - readOnlyHint   → drives the Read-only vs Write/destructive bucketing
+  //   - destructiveHint → inverse of readOnlyHint for completeness
+  // SDK doesn't expose a typed accessor for the registered-tools map; the cast
+  // is the minimum surface-area required and is bounded to the update API.
+  const registeredTools = (
+    server as unknown as { _registeredTools?: Record<string, RegisteredToolLike> }
+  )._registeredTools;
+  if (!registeredTools) return;
+
+  for (const [name, meta] of Object.entries(TOOL_METADATA)) {
+    if (suppress?.has(name)) continue;
+    const rt = registeredTools[name];
+    if (!rt || typeof rt.update !== "function") continue;
+    rt.update({
+      annotations: {
+        title: meta.title,
+        readOnlyHint: meta.readOnly,
+        destructiveHint: !meta.readOnly,
+      },
+    });
   }
 }
