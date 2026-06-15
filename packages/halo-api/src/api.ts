@@ -3022,9 +3022,9 @@ function weekdaysBetween(start: string, end: string): number {
 /**
  * Per-technician utilisation over a past window, combining three standard
  * sources: booked calendar time (APPOINTMENT), actually-logged work and its
- * billable share (ACTIONS timetaken; billable = a real charge code, i.e.
- * ActionCode + 1 > 0 — non-billable time is stored as ActionCode = -1; the
- * charge-hours columns are unreliable/empty in many tenants), and leave
+ * billable share (worked = ACTIONS timetaken raw; billable = the billed-hour
+ * buckets actionchargehours + actionnonchargehours + actionprepayhours, i.e.
+ * invoiceable + agreement-covered + prepay-covered — all billable), and leave
  * (HOLIDAYS) which reduces capacity. Capacity = working weekdays × dailyCapacityHours,
  * minus each agent's leave hours. Returns per-agent and rolled-up:
  *   bookedUtil  = booked / net capacity  (calendar fill)
@@ -3060,7 +3060,7 @@ left join (select APunum,
     sum(case when APFaultid > 0 then datediff(minute, APStartDate, APEndDate)/60.0 else 0 end) as booked,
     sum(case when coalesce(APFaultid,0) = 0 then datediff(minute, APStartDate, APEndDate)/60.0 else 0 end) as internal
   from APPOINTMENT where coalesce(APdeleted,0)=0 and coalesce(APAllDayEvent,0)=0 and APStartDate >= '${start}' and APStartDate < '${ex}' group by APunum) ap on ap.APunum = u.unum
-left join (select ac.whoagentid, sum(ac.timetaken) as worked, sum(case when coalesce(ac.ActionCode, -1) + 1 > 0 then ac.timetaken else 0 end) as billable from actions ac where coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) >= '${start}' and coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) < '${ex}' group by ac.whoagentid) wk on wk.whoagentid = u.unum
+left join (select ac.whoagentid, sum(ac.timetaken) as worked, sum(coalesce(ac.actionchargehours,0) + coalesce(ac.actionnonchargehours,0) + coalesce(ac.actionprepayhours,0)) as billable from actions ac where coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) >= '${start}' and coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) < '${ex}' group by ac.whoagentid) wk on wk.whoagentid = u.unum
 left join (select HTechnicianID, sum(Hduration) as leave_hrs from HOLIDAYS where Hdate >= '${start}' and Hdate < '${ex}' group by HTechnicianID) h on h.HTechnicianID = u.unum
 where coalesce(u.uisapiagent,0) = 0 and u.unum <> 1 and (coalesce(ap.booked,0) > 0 or coalesce(wk.worked,0) > 0)
 order by coalesce(wk.worked,0) desc
@@ -3122,7 +3122,7 @@ offset 0 rows`;
     dailyCapacityHours: dch,
     targetUtilisationPct: target,
     note:
-      "Capacity = working weekdays in window × dailyCapacityHours, minus each agent's leave (HOLIDAYS). Booked = TICKET-LINKED appointment hours (APFaultid>0 = client work); internalMeetingHours = unlinked appointments (internal meetings). worked = ACTIONS timetaken (logged effort); billable = worked hours carrying a real charge code (ActionCode + 1 > 0; non-billable is ActionCode = -1; don't use ActIsBillable/ActionChargeHours — unreliable). billability (billable/worked) measures the work mix; billableUtil (billable/capacity) is the revenue-bearing utilisation. Note worked often exceeds ticket-linked booked because delivery time is logged without a matching calendar appointment. Flags: meeting-heavy (internal ≥30% of capacity), below-target/under-utilised, low-billability. This matches the charge_hours a timesheet day/range summary reports.",
+      "Capacity = working weekdays in window × dailyCapacityHours, minus each agent's leave (HOLIDAYS). Booked = TICKET-LINKED appointment hours (APFaultid>0 = client work); internalMeetingHours = unlinked appointments (internal meetings). worked = ACTIONS timetaken (raw logged effort); billable = the billed-hour buckets actionchargehours (invoiceable) + actionnonchargehours (covered by an agreement) + actionprepayhours (prepay-covered) — all three are billable, just to different places. billability (billable/worked) measures the work mix; billableUtil (billable/capacity) is the revenue-bearing utilisation. Note worked often exceeds ticket-linked booked because delivery time is logged without a matching calendar appointment. Flags: meeting-heavy (internal ≥30% of capacity), below-target/under-utilised, low-billability.",
     totals: {
       capacityHours: round2(tot.capacity),
       leaveHours: round2(tot.leave),
