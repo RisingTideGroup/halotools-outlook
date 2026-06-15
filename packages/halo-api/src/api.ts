@@ -1487,17 +1487,19 @@ const NOT_STUB =
 /** SQL fragments shared by the windowed service-delivery queries. */
 function deliverySql(start: string, end: string, scope: TicketScope, clientId?: number) {
   const ex = exclusiveEnd(end);
-  const join = scope === "reactive" ? "join requesttype rt on f.RequestTypeNew = rt.RTid" : "";
   const filters = [
-    "f.fdeleted = f.fmergedintofaultid",
+    "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)",
     NOT_STUB,
-    scope === "reactive" ? "rt.RTIsProject = 0 and rt.RTIsOpportunity = 0" : "",
+    // Reactive = standard ITIL Incident (1) + Service Request (3) on the ticket
+    // itself (FAULTS.RequestType). For a professional-services shop this is a
+    // small slice — most work is projects/opportunities.
+    scope === "reactive" ? "f.RequestType in (1,3)" : "",
     clientId != null ? `f.areaint = ${Math.trunc(clientId)}` : "",
   ]
     .filter(Boolean)
     .join(" and ");
   return {
-    join,
+    join: "",
     filters,
     createdIn: `f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`,
     clearedIn: `f.datecleared >= '${start}' and f.datecleared < '${ex}'`,
@@ -1691,11 +1693,11 @@ export async function getTicketBacklog(
   scope: TicketScope = "reactive",
   clientId?: number,
 ): Promise<TicketBacklog> {
-  const join = scope === "reactive" ? "join requesttype rt on f.RequestTypeNew = rt.RTid" : "";
+  const join = "";
   const filters = [
-    "f.fdeleted = f.fmergedintofaultid",
+    "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)",
     "(f.datecleared is null or f.datecleared < '1900-01-01')",
-    scope === "reactive" ? "rt.RTIsProject = 0 and rt.RTIsOpportunity = 0" : "",
+    scope === "reactive" ? "f.RequestType in (1,3)" : "",
     clientId != null ? `f.areaint = ${Math.trunc(clientId)}` : "",
   ]
     .filter(Boolean)
@@ -1777,8 +1779,8 @@ export async function getCategoryInsights(
 ): Promise<CategoryInsights> {
   const { start, end } = resolveWindow(startdate, enddate, 30);
   const ex = exclusiveEnd(end);
-  const join = scope === "reactive" ? "join requesttype rt on f.requesttypenew = rt.RTid" : "";
-  const reactive = scope === "reactive" ? "and rt.RTIsProject = 0 and rt.RTIsOpportunity = 0" : "";
+  const join = "";
+  const reactive = scope === "reactive" ? "and f.RequestType in (1,3)" : "";
   const base = `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0) and ${NOT_STUB} ${reactive} and f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`;
   const cat = `coalesce(nullif(ltrim(rtrim(f.category2)), ''), '(uncategorised)')`;
 
@@ -1845,8 +1847,8 @@ export async function getTechnicianRiskSignals(
 ): Promise<TechnicianRiskSignals> {
   const { start, end } = resolveWindow(startdate, enddate, 30);
   const ex = exclusiveEnd(end);
-  const join = scope === "reactive" ? "join requesttype rt on f.requesttypenew = rt.RTid" : "";
-  const reactive = scope === "reactive" ? "and rt.RTIsProject = 0 and rt.RTIsOpportunity = 0" : "";
+  const join = "";
+  const reactive = scope === "reactive" ? "and f.RequestType in (1,3)" : "";
   const notDeleted = "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)";
   const realAgent = "coalesce(u.uisapiagent,0) = 0";
   const top = Math.max(1, Math.trunc(limit));
@@ -2074,7 +2076,7 @@ export async function getRecurringProblemClusters(
   // NOT_STUB + non-noise + in-window on dateoccured.
   const edgeWhere =
     `v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSScore >= ${ms}` +
-    ` and rta.RTIsProject = 0 and rta.RTIsOpportunity = 0 and rtb.RTIsProject = 0 and rtb.RTIsOpportunity = 0` +
+    ` and fa.RequestType in (1,3) and fb.RequestType in (1,3)` +
     ` and (fa.datecleared > fa.dateoccured or fa.datecleared is null or fa.datecleared < '1900-01-01')` +
     ` and (fb.datecleared > fb.dateoccured or fb.datecleared is null or fb.datecleared < '1900-01-01')` +
     ` and fa.dateoccured >= '${start}' and fa.dateoccured < '${ex}'` +
@@ -2149,8 +2151,8 @@ export async function getDuplicateTickets(
 ): Promise<DuplicateTickets> {
   const top = Math.max(1, Math.trunc(limit));
   const ms = Number.isFinite(minScore) ? minScore : 0.9;
-  const rtJoin = scope === "reactive" ? "join requesttype rto on o.RequestTypeNew = rto.RTid" : "";
-  const reactive = scope === "reactive" ? "and rto.RTIsProject = 0 and rto.RTIsOpportunity = 0" : "";
+  const rtJoin = "";
+  const reactive = scope === "reactive" ? "and o.RequestType in (1,3)" : "";
   const edgeWhere = `v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSScore >= ${ms}`;
 
   const sql = `select top ${top}
@@ -2242,7 +2244,7 @@ from (
       join faults fb on fb.faultid = v.FVSSimiliarfaultid join requesttype rtb on fb.RequestTypeNew = rtb.RTid
       where v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSScore >= ${ms} and v.FVSfaultid < v.FVSSimiliarfaultid
         and fa.areaint = fb.areaint
-        and rta.RTIsProject = 0 and rta.RTIsOpportunity = 0 and rtb.RTIsProject = 0 and rtb.RTIsOpportunity = 0
+        and fa.RequestType in (1,3) and fb.RequestType in (1,3)
         and fa.dateoccured >= '${start}' and fa.dateoccured < '${ex}'
         and fb.dateoccured >= '${start}' and fb.dateoccured < '${ex}'
         and ${noiseFilter("fa")} and ${noiseFilter("fb")}
@@ -2379,7 +2381,7 @@ export async function getKnowledgeGaps(
   const top = Math.max(1, Math.trunc(limit));
   const base =
     `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)` +
-    ` and rt.RTIsProject = 0 and rt.RTIsOpportunity = 0` +
+    ` and f.RequestType in (1,3)` +
     ` and (f.datecleared > f.dateoccured or f.datecleared is null or f.datecleared < '1900-01-01')` +
     ` and f.dateoccured >= '${start}' and f.dateoccured < '${ex}' and ${noiseFilter("f")}`;
   const kbJoin =
@@ -2489,7 +2491,7 @@ export async function getTicketsToCategorize(opts: {
     "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)",
     NOT_STUB,
   ];
-  if (scope === "reactive") where.push("rt.RTIsProject = 0 and rt.RTIsOpportunity = 0");
+  if (scope === "reactive") where.push("f.RequestType in (1,3)");
   if (opts.startdate) where.push(`f.dateoccured >= '${opts.startdate}'`);
   if (opts.enddate) where.push(`f.dateoccured < '${exclusiveEnd(opts.enddate)}'`);
   if (opts.category != null && opts.category !== "") {
@@ -2642,7 +2644,7 @@ export async function getNoiseTicketAnalysis(
   const sym = "cast(f.Symptom as nvarchar(400))";
   const base =
     `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)` +
-    ` and rt.RTIsProject = 0 and rt.RTIsOpportunity = 0` +
+    ` and f.RequestType in (1,3)` +
     ` and f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`;
   const isNoise =
     `(${sym} like 'Automatic reply%' or ${sym} like 'Automatische Antwort%' or ${sym} like '%out of office%' or ${sym} like '%auto-reply%' or ${sym} like '%automatic reply%'` +
