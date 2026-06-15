@@ -248,7 +248,10 @@ async function handleMcpTransport(
   const haloMcp = await detectHaloMcp(tenant.halo, accessToken);
   const suppress = haloMcp.enabled ? OVERLAPPING_TOOL_NAMES : undefined;
 
-  const server = createHaloMcpServer({ suppressTools: suppress });
+  const server = createHaloMcpServer({
+    suppressTools: suppress,
+    tenant: { haloBaseUrl: tenant.halo, clientId: tenant.clientId },
+  });
   if (haloMcp.enabled) {
     registerHaloProxyTools(server, haloMcp.tools, tenant.halo);
   }
