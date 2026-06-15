@@ -257,6 +257,24 @@ async function handleMcpTransport(
   if (!session) {
     // No session id, or unknown id. Only an initialize request may bootstrap.
     if (!isInitializeRequest(parsedBody)) {
+      if (sessionId) {
+        // The client holds a session id we don't have — the process restarted
+        // (in-memory session pool wiped) or the session expired. Per the MCP
+        // Streamable HTTP spec, HTTP 404 on a request carrying an Mcp-Session-Id
+        // tells the client to start a new session with a fresh InitializeRequest
+        // — so it auto-recovers after a redeploy instead of erroring until the
+        // user manually reconnects.
+        res.writeHead(404, {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        });
+        res.end(JSON.stringify({
+          jsonrpc: "2.0",
+          error: { code: -32001, message: "Session not found — reinitialize." },
+          id: null,
+        }));
+        return;
+      }
       writeJson(res, 400, {
         jsonrpc: "2.0",
         error: { code: -32000, message: "No active session — send initialize first." },
