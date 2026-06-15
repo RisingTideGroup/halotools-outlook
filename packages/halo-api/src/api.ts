@@ -1238,43 +1238,67 @@ export async function getRevenuePerTechSnapshot(): Promise<{
   };
 }
 
-/** MRR ÷ active user count. Returns 0 if there are no active users. */
+/** Active managed user seats: external users excluding service accounts and the
+ *  per-client "General User" placeholder (named per settings; ~1 per client). */
+const USER_SEAT_FILTER =
+  "coalesce(u.uinactive,0)=0 and coalesce(u.uisserviceaccount,0)=0 and u.uusername not like 'General%'";
+
+async function countUserSeats(): Promise<number> {
+  const rows = await reportRows(`select count(*) as n from USERS u where ${USER_SEAT_FILTER}`);
+  return num(rows[0]?.n);
+}
+
+/** MRR ÷ managed seats — both ways (users and assets). */
 export async function getMrrPerSeatSnapshot(): Promise<{
   mrr: number;
-  activeUserCount: number;
-  mrrPerSeat: number;
-  seatsByClient: { clientId: number; client: string; seats: number; pctOfSeats: number | null }[];
+  userSeats: number;
+  assetSeats: number;
+  mrrPerUserSeat: number;
+  mrrPerAssetSeat: number;
+  seatsByClient: { clientId: number; client: string; userSeats: number; assetSeats: number; pctOfUserSeats: number | null }[];
   presentation: string;
 }> {
-  const [mrrSnap, users] = await Promise.all([
+  const userSql = `select u.uarea as client_id, max(a.aareadesc) as client, count(*) as user_seats from USERS u join area a on a.aarea = u.uarea where ${USER_SEAT_FILTER} group by u.uarea`;
+  const assetSql = `select d.darea as client_id, max(a.aareadesc) as client, count(*) as asset_seats from DEVICE d join area a on a.aarea = d.darea where coalesce(d.dinactive,0)=0 group by d.darea`;
+  const [mrrSnap, userRows, assetRows] = await Promise.all([
     getMrrSnapshot(),
-    listActiveUsers(),
+    reportRows(userSql),
+    reportRows(assetSql),
   ]);
-  const activeUserCount = users.length;
-  const mrrPerSeat =
-    activeUserCount > 0 ? round2(mrrSnap.mrr / activeUserCount) : 0;
-  const seatMap = new Map<number, { client: string; seats: number }>();
-  for (const u of users) {
-    const cid = u.client_id ?? 0;
-    const s = seatMap.get(cid) ?? { client: u.client_name ?? "(unknown)", seats: 0 };
-    s.seats += 1;
-    seatMap.set(cid, s);
+  const merged = new Map<number, { client: string; userSeats: number; assetSeats: number }>();
+  for (const r of userRows) {
+    const cid = num(r.client_id);
+    const m = merged.get(cid) ?? { client: String(r.client ?? ""), userSeats: 0, assetSeats: 0 };
+    m.userSeats = num(r.user_seats);
+    merged.set(cid, m);
   }
-  const seatsByClient = Array.from(seatMap.entries())
-    .map(([clientId, s]) => ({
+  for (const r of assetRows) {
+    const cid = num(r.client_id);
+    const m = merged.get(cid) ?? { client: String(r.client ?? ""), userSeats: 0, assetSeats: 0 };
+    m.assetSeats = num(r.asset_seats);
+    if (!m.client) m.client = String(r.client ?? "");
+    merged.set(cid, m);
+  }
+  const userSeats = userRows.reduce((s, r) => s + num(r.user_seats), 0);
+  const assetSeats = assetRows.reduce((s, r) => s + num(r.asset_seats), 0);
+  const seatsByClient = Array.from(merged.entries())
+    .map(([clientId, m]) => ({
       clientId,
-      client: s.client,
-      seats: s.seats,
-      pctOfSeats: activeUserCount > 0 ? round2((s.seats / activeUserCount) * 100) : null,
+      client: m.client,
+      userSeats: m.userSeats,
+      assetSeats: m.assetSeats,
+      pctOfUserSeats: userSeats > 0 ? round2((m.userSeats / userSeats) * 100) : null,
     }))
-    .sort((a, b) => b.seats - a.seats);
+    .sort((a, b) => b.userSeats - a.userSeats);
   return {
     mrr: mrrSnap.mrr,
-    activeUserCount,
-    mrrPerSeat,
+    userSeats,
+    assetSeats,
+    mrrPerUserSeat: userSeats > 0 ? round2(mrrSnap.mrr / userSeats) : 0,
+    mrrPerAssetSeat: assetSeats > 0 ? round2(mrrSnap.mrr / assetSeats) : 0,
     seatsByClient,
     presentation:
-      "mrrPerSeat = mrr ÷ active end-user count (a blended ARPU-ish figure). Dashboard: show the ratio, then seatsByClient (clients with the most seats, %-of-seats) — that's where seat concentration is. Answer 'how many seats per client' / 'which clients have the most users' from seatsByClient[] directly. Note seats here count active end-users, not billed seats per contract.",
+      "Seats reflected BOTH ways: userSeats = active end-users EXCLUDING service accounts and the per-client 'General User' placeholder (~1/client — a big exclusion); assetSeats = active devices. mrrPerUserSeat / mrrPerAssetSeat are MRR ÷ each. Dashboard: show both ratios, then seatsByClient (userSeats + assetSeats + pctOfUserSeats per client). Answer 'how many seats per client', 'which clients have the most users/devices' from seatsByClient[] directly. Note: this tenant tracks few devices, so user-seats is the meaningful number.",
   };
 }
 
@@ -1288,16 +1312,16 @@ export async function getMspKpis(
   utilizationStart?: string,
   utilizationEnd?: string,
 ): Promise<MspKpis> {
-  const [mrrSnap, agents, users, utilization] = await Promise.all([
+  const [mrrSnap, agents, userSeats, utilization] = await Promise.all([
     getMrrSnapshot(),
     listAgents().catch(() => [] as HaloAgent[]),
-    listActiveUsers().catch(() => [] as HaloUser[]),
+    countUserSeats().catch(() => 0),
     getTechnicianUtilizationSnapshot(utilizationStart, utilizationEnd).catch(
       () => undefined,
     ),
   ]);
   const activeAgentCount = agents.length;
-  const activeUserCount = users.length;
+  const activeUserCount = userSeats;
   return {
     mrr: mrrSnap.mrr,
     activeAgentCount,
@@ -1309,7 +1333,7 @@ export async function getMspKpis(
     utilization,
     mrrByClient: mrrSnap.byClient.slice(0, 25),
     presentation:
-      "One-shot MSP dashboard. Lead with mrr, activeAgentCount, activeUserCount, revenuePerTech (capacity ratio, not per-tech attribution), mrrPerSeat. Then mrrByClient (top 25 — revenue concentration) and utilization.perAgent (each tech's chargeable vs target). Answer follow-ups (top clients, who's under/over-utilised, concentration) from mrrByClient[] and utilization.perAgent[] directly; reach for getMrrSnapshot / getTechnicianUtilization for the full lists, runSql only for detail beyond these.",
+      "One-shot MSP dashboard. Lead with mrr, activeAgentCount, activeUserCount (managed seats — excludes service accounts + the per-client 'General User' placeholder), revenuePerTech (capacity ratio, not per-tech attribution), mrrPerSeat. Then mrrByClient (top 25 — revenue concentration) and utilization.perAgent (each tech's chargeable vs target). Answer follow-ups (top clients, who's under/over-utilised, concentration) from mrrByClient[] and utilization.perAgent[] directly; reach for getMrrSnapshot / getTechnicianUtilization for the full lists, runSql only for detail beyond these.",
   };
 }
 
