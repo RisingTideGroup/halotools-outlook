@@ -549,7 +549,8 @@ export interface HaloRecurringInvoice {
   client_name?: string;
   revenue?: number;
   total?: number;
-  /** Period enum: 3=monthly, 4=quarterly, 5=semi-annual, 6=annual. */
+  /** Cadence (STDREQUEST.StdPeriod): 1=weekly, 2=monthly, 3=yearly, 4=quarterly,
+   *  7=3-yearly, 8=2-yearly, 9=4-yearly, else 5-yearly. See periodToMonthlyFactor. */
   period?: number;
   disabled?: boolean;
   contract_id?: number;
