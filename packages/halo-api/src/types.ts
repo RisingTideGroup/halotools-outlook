@@ -1037,7 +1037,11 @@ export interface PrepayAccountRow {
   purchasedHours: number;
   /** hours drawn down (ACTIONS.ActionPrePayHours) */
   consumedHours: number;
-  /** purchasedHours − consumedHours; negative = over-drawn */
+  /** hours removed via negative PREPAYHISTORY rows that aren't expiry — manual / off-the-books consumption or write-offs */
+  manualDeductionHours: number;
+  /** hours lost to expiry (negative PREPAYHISTORY rows whose note marks them expired) */
+  expiredHours: number;
+  /** purchasedHours − consumedHours − manualDeductionHours − expiredHours; negative = over-drawn */
   remainingHours: number;
   /** prepay revenue recognised as consumed (ACTIONS.adefprepayamount) */
   recognisedAmount: number;
