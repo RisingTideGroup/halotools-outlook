@@ -965,26 +965,34 @@ export async function haloApiRaw<T = unknown>(
 // ---------- Analytics: recurring invoices (MRR source) ----------
 
 /**
- * Period enum → monthly-revenue multiplier. Values confirmed against a
- * Halo demo instance (3=monthly, 5=semi-annual, 6=annual). 4=quarterly is
- * inferred — flag if your tenant's data doesn't match.
+ * HaloPSA recurring-invoice cadence (STDREQUEST.StdPeriod, surfaced as the REST
+ * `period` field) → months-per-period and label. Mapping confirmed against a
+ * Rising Tide Report Center report:
+ *   1=Weekly · 2=Monthly · 3=Yearly · 4=Quarterly · 8=2-Yearly · 7=3-Yearly ·
+ *   9=4-Yearly · else=5-Yearly.
+ * MRR = per-period revenue × monthly factor, where factor = 1 / months-per-period
+ * (weekly = 52/12). NOTE: an earlier mapping wrongly assumed 3=monthly, which
+ * counted yearly contracts at 12× — fixed here.
  */
+const PERIOD_INFO: Record<number, { label: string; factor: number }> = {
+  1: { label: "weekly", factor: 52 / 12 },
+  2: { label: "monthly", factor: 1 },
+  3: { label: "yearly", factor: 1 / 12 },
+  4: { label: "quarterly", factor: 1 / 3 },
+  7: { label: "3-yearly", factor: 1 / 36 },
+  8: { label: "2-yearly", factor: 1 / 24 },
+  9: { label: "4-yearly", factor: 1 / 48 },
+};
+const FALLBACK_PERIOD = { label: "5-yearly", factor: 1 / 60 };
+
 export function periodToMonthlyFactor(period: number | undefined): number {
-  switch (period) {
-    case 3: return 1;
-    case 4: return 1 / 3;
-    case 5: return 1 / 6;
-    case 6: return 1 / 12;
-    default: return 1;
-  }
+  if (period === undefined) return 1; // missing cadence → assume already monthly
+  return (PERIOD_INFO[period] ?? FALLBACK_PERIOD).factor;
 }
 
-const PERIOD_LABELS: Record<number, string> = {
-  3: "monthly",
-  4: "quarterly",
-  5: "semi-annual",
-  6: "annual",
-};
+function periodLabel(period: number): string {
+  return (PERIOD_INFO[period] ?? FALLBACK_PERIOD).label;
+}
 
 export async function listRecurringInvoices(): Promise<HaloRecurringInvoice[]> {
   // /RecurringInvoice has no working date filter — fetch all, filter client-side.
@@ -1023,7 +1031,7 @@ export async function getMrrSnapshot(): Promise<MrrSnapshot> {
     .sort((a, b) => a[0] - b[0])
     .map(([period, b]) => ({
       period,
-      label: PERIOD_LABELS[period] ?? `period ${period}`,
+      label: periodLabel(period),
       contracts: b.contracts,
       monthlyRevenue: round2(b.monthlyRevenue),
     }));
