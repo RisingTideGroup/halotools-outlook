@@ -2015,13 +2015,19 @@ order by count(*) desc`;
 //   FaultVectorScore.FVSSimiliarfaultid  -> the matched item; a TICKET id when FVSuse=0,
 //                                            a KB-article id (KBENTRY.id) when FVSuse=1.
 //   FaultVectorScore.FVSScore            -> cosine similarity (~0.62–1.0)
-//   FaultVectorScore.fvsSearchMethod     -> embedding method; we ONLY trust method 1.
+//   FaultVectorScore.fvsSearchMethod     -> the vector-search BACKEND the row was
+//                                            written by (0=Halo internal store,
+//                                            1=Azure AI Search, 2=OpenSearch). Filter
+//                                            to the tenant's ACTIVE backend =
+//                                            Control4.rTicketEmbeddingsDB (old backends
+//                                            leave stale rows behind after a switch).
 //   FaultVectorScore.FVSuse              -> match TYPE: 0 = ticket↔ticket, 1 = ticket↔KB.
 //     (KB ids 1..N collide with low faultids, so without this split a KB match looks
 //      like an unrelated old ticket — the trap that hides KB matches.)
 //
-// CRITICAL: always filter `fvsSearchMethod = 1 AND FVSuse = 0` for ticket↔ticket. Other methods are stale /
-// garbage (method '' scores unrelated tickets at 1.0). The graph is directional
+// CRITICAL: always filter `fvsSearchMethod = (active backend) AND FVSuse = 0` for ticket↔ticket,
+// where the active backend = Control4.rTicketEmbeddingsDB (0/1/2). Other backends are stale /
+// garbage (the NULL/'' method scores unrelated tickets at 1.0). The graph is directional
 // (source -> similar); for clustering we treat edges as undirected.
 
 /**
@@ -2068,7 +2074,7 @@ function median(values: number[]): number | null {
  * worth a KB article / automation / problem record, plus a handling-consistency
  * signal (how many distinct resolvers, how spread the resolution time is).
  *
- * Uses Halo's ticket embeddings (FaultVectorScore, method 1 only), noise-filtered
+ * Uses Halo's ticket embeddings (FaultVectorScore, active backend only), noise-filtered
  * on both endpoints.
  *
  * APPROXIMATE CLUSTERING: a true connected-component (transitive-closure)
@@ -2099,7 +2105,7 @@ export async function getRecurringProblemClusters(
   // Shared edge predicate: method 1, score gate, both endpoints reactive +
   // NOT_STUB + non-noise + in-window on dateoccured.
   const edgeWhere =
-    `v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSScore >= ${ms}` +
+    `v.fvsSearchMethod = (select max(rTicketEmbeddingsDB) from Control4) and v.FVSuse = 0 and v.FVSScore >= ${ms}` +
     ` and fa.RequestType in (1,3) and fb.RequestType in (1,3)` +
     ` and (fa.datecleared > fa.dateoccured or fa.datecleared is null or fa.datecleared < '1900-01-01')` +
     ` and (fb.datecleared > fb.dateoccured or fb.datecleared is null or fb.datecleared < '1900-01-01')` +
@@ -2177,7 +2183,7 @@ export async function getDuplicateTickets(
   const ms = Number.isFinite(minScore) ? minScore : 0.9;
   const rtJoin = "";
   const reactive = scope === "reactive" ? "and o.RequestType in (1,3)" : "";
-  const edgeWhere = `v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSScore >= ${ms}`;
+  const edgeWhere = `v.fvsSearchMethod = (select max(rTicketEmbeddingsDB) from Control4) and v.FVSuse = 0 and v.FVSScore >= ${ms}`;
 
   const sql = `select top ${top}
   o.faultid as open_ticket_id,
@@ -2266,7 +2272,7 @@ from (
       from FaultVectorScore v
       join faults fa on fa.faultid = v.FVSfaultid join requesttype rta on fa.RequestTypeNew = rta.RTid
       join faults fb on fb.faultid = v.FVSSimiliarfaultid join requesttype rtb on fb.RequestTypeNew = rtb.RTid
-      where v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSScore >= ${ms} and v.FVSfaultid < v.FVSSimiliarfaultid
+      where v.fvsSearchMethod = (select max(rTicketEmbeddingsDB) from Control4) and v.FVSuse = 0 and v.FVSScore >= ${ms} and v.FVSfaultid < v.FVSSimiliarfaultid
         and fa.areaint = fb.areaint
         and fa.RequestType in (1,3) and fb.RequestType in (1,3)
         and fa.dateoccured >= '${start}' and fa.dateoccured < '${ex}'
@@ -2323,9 +2329,9 @@ export async function getSimilarTicketInsights(
   f.category2 as category2,
   try_convert(float, nullif(f.faisatisfactionlevel, '')) as csat
 from (
-  select v.FVSSimiliarfaultid as faultid, v.FVSScore as score from FaultVectorScore v where v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSfaultid = ${id} and v.FVSScore >= 0.8
+  select v.FVSSimiliarfaultid as faultid, v.FVSScore as score from FaultVectorScore v where v.fvsSearchMethod = (select max(rTicketEmbeddingsDB) from Control4) and v.FVSuse = 0 and v.FVSfaultid = ${id} and v.FVSScore >= 0.8
   union all
-  select v.FVSfaultid as faultid, v.FVSScore as score from FaultVectorScore v where v.fvsSearchMethod = 1 and v.FVSuse = 0 and v.FVSSimiliarfaultid = ${id} and v.FVSScore >= 0.8
+  select v.FVSfaultid as faultid, v.FVSScore as score from FaultVectorScore v where v.fvsSearchMethod = (select max(rTicketEmbeddingsDB) from Control4) and v.FVSuse = 0 and v.FVSSimiliarfaultid = ${id} and v.FVSScore >= 0.8
 ) n
 join faults f on f.faultid = n.faultid
 left join uname u on f.clearwhoint = u.unum
@@ -2409,7 +2415,7 @@ export async function getKnowledgeGaps(
     ` and (f.datecleared > f.dateoccured or f.datecleared is null or f.datecleared < '1900-01-01')` +
     ` and f.dateoccured >= '${start}' and f.dateoccured < '${ex}' and ${noiseFilter("f")}`;
   const kbJoin =
-    `left join (select FVSfaultid, max(FVSScore) as best_kb from FaultVectorScore where FVSuse = 1 group by FVSfaultid) kb on kb.FVSfaultid = f.faultid`;
+    `left join (select FVSfaultid, max(FVSScore) as best_kb from FaultVectorScore where fvsSearchMethod = (select max(rTicketEmbeddingsDB) from Control4) and FVSuse = 1 group by FVSfaultid) kb on kb.FVSfaultid = f.faultid`;
 
   const coverageSql = `select
   count(*) as tickets,
@@ -2429,7 +2435,7 @@ from FaultVectorScore fvs
 join KBENTRY k on k.id = fvs.FVSSimiliarfaultid
 join faults f on f.faultid = fvs.FVSfaultid
 join requesttype rt on f.requesttypenew = rt.RTid
-where fvs.FVSuse = 1 and fvs.FVSScore >= ${th} and ${base}
+where fvs.fvsSearchMethod = (select max(rTicketEmbeddingsDB) from Control4) and fvs.FVSuse = 1 and fvs.FVSScore >= ${th} and ${base}
 group by k.id
 order by count(distinct fvs.FVSfaultid) desc`;
 
