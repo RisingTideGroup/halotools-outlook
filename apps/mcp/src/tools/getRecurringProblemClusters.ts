@@ -28,6 +28,12 @@ const inputSchema = {
     .max(100)
     .optional()
     .describe("Max clusters to return. Default 25."),
+  searchMethod: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Optional vector backend filter: 0=Halo internal store, 1=Azure AI Search, 2=OpenSearch. Omit (default) to use all real backends (only NULL/junk rows excluded); set to isolate one backend's embeddings."),
 };
 
 export function registerGetRecurringProblemClusters(server: McpServer): void {
@@ -39,12 +45,13 @@ export function registerGetRecurringProblemClusters(server: McpServer): void {
         "Clusters semantically-similar REACTIVE tickets to surface recurring problems worth a KB article, automation, or problem record, with a handling-consistency signal. Uses Halo's ticket embeddings (FaultVectorScore, backend-agnostic — garbage NULL-method rows excluded; minScore is tunable, adjust per task), noise-filtered on both endpoints (auto-replies / OTP / test / newsletter subjects are removed). Per cluster: anchor ticket, a representative summary, distinct ticket count, distinct clients, total hours logged, average resolution hours, distinct resolver count (many resolvers for one recurring problem = knowledge not captured), and average similarity score. Ranked by tickets × total hours. IMPORTANT: clustering is APPROXIMATE — tickets are grouped by the lowest faultid among each similar pair (Report Center can't do recursive transitive closure), so a long similarity chain can fragment across anchors. Defaults to the trailing 365 days.",
       inputSchema,
     },
-    async ({ startdate, enddate, minScore, limit }) => {
+    async ({ startdate, enddate, minScore, limit, searchMethod }) => {
       const snap = await getRecurringProblemClusters(
         startdate,
         enddate,
         minScore ?? 0.85,
         limit ?? 25,
+        searchMethod,
       );
       return { content: [{ type: "text", text: JSON.stringify(snap, null, 2) }] };
     },
