@@ -2015,20 +2015,20 @@ order by count(*) desc`;
 //   FaultVectorScore.FVSSimiliarfaultid  -> the matched item; a TICKET id when FVSuse=0,
 //                                            a KB-article id (KBENTRY.id) when FVSuse=1.
 //   FaultVectorScore.FVSScore            -> cosine similarity (~0.62–1.0)
-//   FaultVectorScore.fvsSearchMethod     -> the vector-search BACKEND the row was
-//                                            written by (0=Halo internal store,
-//                                            1=Azure AI Search, 2=OpenSearch). Filter
-//                                            to the tenant's ACTIVE backend =
-//                                            Control4.rTicketEmbeddingsDB (old backends
-//                                            leave stale rows behind after a switch).
+//   FaultVectorScore.fvsSearchMethod     -> the vector-search BACKEND that wrote the
+//                                            row (0=Halo internal store, 1=Azure AI
+//                                            Search, 2=OpenSearch). WHICH backend is
+//                                            configured is irrelevant — just drop the
+//                                            garbage NULL/'' method rows (they score
+//                                            unrelated tickets at 1.0); keep the rest.
 //   FaultVectorScore.FVSuse              -> match TYPE: 0 = ticket↔ticket, 1 = ticket↔KB.
 //     (KB ids 1..N collide with low faultids, so without this split a KB match looks
 //      like an unrelated old ticket — the trap that hides KB matches.)
 //
-// CRITICAL: always filter `fvsSearchMethod = (active backend) AND FVSuse = 0` for ticket↔ticket,
-// where the active backend = Control4.rTicketEmbeddingsDB (0/1/2). Other backends are stale /
-// garbage (the NULL/'' method scores unrelated tickets at 1.0). The graph is directional
-// (source -> similar); for clustering we treat edges as undirected.
+// CRITICAL: filter `coalesce(cast(fvsSearchMethod as nvarchar(20)),'') <> '' AND FVSuse = 0`
+// for ticket↔ticket (drop the NULL/'' garbage backend; don't pin a specific backend). The
+// score threshold (minScore) is the caller's to tune per task — not a fixed baked range.
+// The graph is directional (source -> similar); for clustering we treat edges as undirected.
 
 /**
  * Non-actionable-noise predicate on FAULTS.Symptom. The strongest similar
@@ -2105,7 +2105,7 @@ export async function getRecurringProblemClusters(
   // Shared edge predicate: method 1, score gate, both endpoints reactive +
   // NOT_STUB + non-noise + in-window on dateoccured.
   const edgeWhere =
-    `v.fvsSearchMethod = (select max(rTicketEmbeddingsDB) from Control4) and v.FVSuse = 0 and v.FVSScore >= ${ms}` +
+    `coalesce(cast(v.fvsSearchMethod as nvarchar(20)),'') <> '' and v.FVSuse = 0 and v.FVSScore >= ${ms}` +
     ` and fa.RequestType in (1,3) and fb.RequestType in (1,3)` +
     ` and (fa.datecleared > fa.dateoccured or fa.datecleared is null or fa.datecleared < '1900-01-01')` +
     ` and (fb.datecleared > fb.dateoccured or fb.datecleared is null or fb.datecleared < '1900-01-01')` +
@@ -2172,7 +2172,7 @@ order by count(*) * sum(coalesce(h.hrs, 0)) desc`;
  * matched ticket's id / summary / state (open or closed) / score. Ordered by
  * score desc.
  *
- * Uses Halo's ticket embeddings (method 1 only), noise-filtered.
+ * Uses Halo's ticket embeddings (backend-agnostic; garbage NULL-method rows excluded), noise-filtered.
  */
 export async function getDuplicateTickets(
   scope: TicketScope = "reactive",
@@ -2183,7 +2183,7 @@ export async function getDuplicateTickets(
   const ms = Number.isFinite(minScore) ? minScore : 0.9;
   const rtJoin = "";
   const reactive = scope === "reactive" ? "and o.RequestType in (1,3)" : "";
-  const edgeWhere = `v.fvsSearchMethod = (select max(rTicketEmbeddingsDB) from Control4) and v.FVSuse = 0 and v.FVSScore >= ${ms}`;
+  const edgeWhere = `coalesce(cast(v.fvsSearchMethod as nvarchar(20)),'') <> '' and v.FVSuse = 0 and v.FVSScore >= ${ms}`;
 
   const sql = `select top ${top}
   o.faultid as open_ticket_id,
@@ -2241,7 +2241,7 @@ order by m.score desc`;
  * Same-client recurrence is the signal here; cross-client similarity (a problem
  * affecting many customers) is what getRecurringProblemClusters surfaces instead.
  *
- * Uses Halo's ticket embeddings (method 1 only), noise-filtered.
+ * Uses Halo's ticket embeddings (backend-agnostic; garbage NULL-method rows excluded), noise-filtered.
  */
 export async function getClientDejaVu(
   startdate?: string,
@@ -2272,7 +2272,7 @@ from (
       from FaultVectorScore v
       join faults fa on fa.faultid = v.FVSfaultid join requesttype rta on fa.RequestTypeNew = rta.RTid
       join faults fb on fb.faultid = v.FVSSimiliarfaultid join requesttype rtb on fb.RequestTypeNew = rtb.RTid
-      where v.fvsSearchMethod = (select max(rTicketEmbeddingsDB) from Control4) and v.FVSuse = 0 and v.FVSScore >= ${ms} and v.FVSfaultid < v.FVSSimiliarfaultid
+      where coalesce(cast(v.fvsSearchMethod as nvarchar(20)),'') <> '' and v.FVSuse = 0 and v.FVSScore >= ${ms} and v.FVSfaultid < v.FVSSimiliarfaultid
         and fa.areaint = fb.areaint
         and fa.RequestType in (1,3) and fb.RequestType in (1,3)
         and fa.dateoccured >= '${start}' and fa.dateoccured < '${ex}'
@@ -2312,13 +2312,15 @@ order by max(p.pair_count) desc`;
  * summary block: median predicted resolution hours, the most common category2,
  * and the resolvers who handled the most neighbours.
  *
- * Uses Halo's ticket embeddings (method 1 only). Per-ticket lookup, so it is
+ * Uses Halo's ticket embeddings (backend-agnostic; garbage NULL-method rows excluded). Per-ticket lookup, so it is
  * NOT noise-filtered — you asked about one specific ticket.
  */
 export async function getSimilarTicketInsights(
   faultid: number,
+  minScore = 0.8,
 ): Promise<SimilarTicketInsights> {
   const id = Math.trunc(faultid);
+  const ms = Number.isFinite(minScore) ? minScore : 0.8;
   const sql = `select top 10
   n.faultid,
   cast(f.Symptom as nvarchar(300)) as summary,
@@ -2329,9 +2331,9 @@ export async function getSimilarTicketInsights(
   f.category2 as category2,
   try_convert(float, nullif(f.faisatisfactionlevel, '')) as csat
 from (
-  select v.FVSSimiliarfaultid as faultid, v.FVSScore as score from FaultVectorScore v where v.fvsSearchMethod = (select max(rTicketEmbeddingsDB) from Control4) and v.FVSuse = 0 and v.FVSfaultid = ${id} and v.FVSScore >= 0.8
+  select v.FVSSimiliarfaultid as faultid, v.FVSScore as score from FaultVectorScore v where coalesce(cast(v.fvsSearchMethod as nvarchar(20)),'') <> '' and v.FVSuse = 0 and v.FVSfaultid = ${id} and v.FVSScore >= ${ms}
   union all
-  select v.FVSfaultid as faultid, v.FVSScore as score from FaultVectorScore v where v.fvsSearchMethod = (select max(rTicketEmbeddingsDB) from Control4) and v.FVSuse = 0 and v.FVSSimiliarfaultid = ${id} and v.FVSScore >= 0.8
+  select v.FVSfaultid as faultid, v.FVSScore as score from FaultVectorScore v where coalesce(cast(v.fvsSearchMethod as nvarchar(20)),'') <> '' and v.FVSuse = 0 and v.FVSSimiliarfaultid = ${id} and v.FVSScore >= ${ms}
 ) n
 join faults f on f.faultid = n.faultid
 left join uname u on f.clearwhoint = u.unum
@@ -2415,7 +2417,7 @@ export async function getKnowledgeGaps(
     ` and (f.datecleared > f.dateoccured or f.datecleared is null or f.datecleared < '1900-01-01')` +
     ` and f.dateoccured >= '${start}' and f.dateoccured < '${ex}' and ${noiseFilter("f")}`;
   const kbJoin =
-    `left join (select FVSfaultid, max(FVSScore) as best_kb from FaultVectorScore where fvsSearchMethod = (select max(rTicketEmbeddingsDB) from Control4) and FVSuse = 1 group by FVSfaultid) kb on kb.FVSfaultid = f.faultid`;
+    `left join (select FVSfaultid, max(FVSScore) as best_kb from FaultVectorScore where coalesce(cast(fvsSearchMethod as nvarchar(20)),'') <> '' and FVSuse = 1 group by FVSfaultid) kb on kb.FVSfaultid = f.faultid`;
 
   const coverageSql = `select
   count(*) as tickets,
@@ -2435,7 +2437,7 @@ from FaultVectorScore fvs
 join KBENTRY k on k.id = fvs.FVSSimiliarfaultid
 join faults f on f.faultid = fvs.FVSfaultid
 join requesttype rt on f.requesttypenew = rt.RTid
-where fvs.fvsSearchMethod = (select max(rTicketEmbeddingsDB) from Control4) and fvs.FVSuse = 1 and fvs.FVSScore >= ${th} and ${base}
+where coalesce(cast(fvs.fvsSearchMethod as nvarchar(20)),'') <> '' and fvs.FVSuse = 1 and fvs.FVSScore >= ${th} and ${base}
 group by k.id
 order by count(distinct fvs.FVSfaultid) desc`;
 
