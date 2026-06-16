@@ -28,6 +28,12 @@ const inputSchema = {
     .max(200)
     .optional()
     .describe("Max rows for the top-KB and gap-candidate lists. Default 20."),
+  searchMethod: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Optional vector backend filter: 0=Halo internal store, 1=Azure AI Search, 2=OpenSearch. Omit (default) to use all real backends (only NULL/junk rows excluded); set to isolate one backend's embeddings."),
 };
 
 export function registerGetKnowledgeGaps(server: McpServer): void {
@@ -39,8 +45,8 @@ export function registerGetKnowledgeGaps(server: McpServer): void {
         "Knowledge-base coverage and gaps from Halo's ticket↔KB embedding matches (FaultVectorScore where the match is a KB article). For a window (default trailing 365 days) of reactive, non-stub, noise-filtered tickets: KB coverage % (tickets with a matching article at/above matchThreshold), the most-matched KB articles (your workhorse docs), and the highest-effort UNCOVERED tickets ranked by hours logged — the articles worth writing first. Requires KB embeddings enabled in Halo; if absent, coverage reads zero. Pairs with getRecurringProblemClusters (which recurring issues need documenting).",
       inputSchema,
     },
-    async ({ startdate, enddate, matchThreshold, limit }) => {
-      const snap = await getKnowledgeGaps(startdate, enddate, matchThreshold ?? 0.8, limit ?? 20);
+    async ({ startdate, enddate, matchThreshold, limit, searchMethod }) => {
+      const snap = await getKnowledgeGaps(startdate, enddate, matchThreshold ?? 0.8, limit ?? 20, searchMethod);
       return { content: [{ type: "text", text: JSON.stringify(snap, null, 2) }] };
     },
   );

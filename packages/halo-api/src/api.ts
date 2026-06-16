@@ -2030,6 +2030,16 @@ order by count(*) desc`;
 // score threshold (minScore) is the caller's to tune per task — not a fixed baked range.
 // The graph is directional (source -> similar); for clustering we treat edges as undirected.
 
+/** FaultVectorScore method predicate. When the caller pins a backend
+ *  (0=Halo store, 1=Azure, 2=OpenSearch) we filter to it; otherwise we just drop
+ *  the garbage NULL/'' method rows (which score unrelated tickets at 1.0). `col`
+ *  is the qualified column, e.g. "v.fvsSearchMethod". */
+function vectorMethodFilter(col: string, method?: number): string {
+  return method !== undefined && Number.isFinite(method)
+    ? `${col} = ${Math.trunc(method)}`
+    : `coalesce(cast(${col} as nvarchar(20)),'') <> ''`;
+}
+
 /**
  * Non-actionable-noise predicate on FAULTS.Symptom. The strongest similar
  * clusters in an embedding graph are auto-replies, OTP / verification emails,
@@ -2096,16 +2106,17 @@ export async function getRecurringProblemClusters(
   enddate?: string,
   minScore = 0.85,
   limit = 25,
+  searchMethod?: number,
 ): Promise<RecurringProblemClusters> {
   const { start, end } = resolveWindow(startdate, enddate, 365);
   const ex = exclusiveEnd(end);
   const top = Math.max(1, Math.trunc(limit));
   const ms = Number.isFinite(minScore) ? minScore : 0.85;
   const anchor = "case when v.FVSfaultid < v.FVSSimiliarfaultid then v.FVSfaultid else v.FVSSimiliarfaultid end";
-  // Shared edge predicate: method 1, score gate, both endpoints reactive +
-  // NOT_STUB + non-noise + in-window on dateoccured.
+  // Shared edge predicate: vector method (caller-pinned or just non-garbage),
+  // score gate, both endpoints reactive + NOT_STUB + non-noise + in-window.
   const edgeWhere =
-    `coalesce(cast(v.fvsSearchMethod as nvarchar(20)),'') <> '' and v.FVSuse = 0 and v.FVSScore >= ${ms}` +
+    `${vectorMethodFilter("v.fvsSearchMethod", searchMethod)} and v.FVSuse = 0 and v.FVSScore >= ${ms}` +
     ` and fa.RequestType in (1,3) and fb.RequestType in (1,3)` +
     ` and (fa.datecleared > fa.dateoccured or fa.datecleared is null or fa.datecleared < '1900-01-01')` +
     ` and (fb.datecleared > fb.dateoccured or fb.datecleared is null or fb.datecleared < '1900-01-01')` +
@@ -2178,12 +2189,13 @@ export async function getDuplicateTickets(
   scope: TicketScope = "reactive",
   minScore = 0.9,
   limit = 50,
+  searchMethod?: number,
 ): Promise<DuplicateTickets> {
   const top = Math.max(1, Math.trunc(limit));
   const ms = Number.isFinite(minScore) ? minScore : 0.9;
   const rtJoin = "";
   const reactive = scope === "reactive" ? "and o.RequestType in (1,3)" : "";
-  const edgeWhere = `coalesce(cast(v.fvsSearchMethod as nvarchar(20)),'') <> '' and v.FVSuse = 0 and v.FVSScore >= ${ms}`;
+  const edgeWhere = `${vectorMethodFilter("v.fvsSearchMethod", searchMethod)} and v.FVSuse = 0 and v.FVSScore >= ${ms}`;
 
   const sql = `select top ${top}
   o.faultid as open_ticket_id,
@@ -2248,6 +2260,7 @@ export async function getClientDejaVu(
   enddate?: string,
   minScore = 0.85,
   limit = 50,
+  searchMethod?: number,
 ): Promise<ClientDejaVu> {
   const { start, end } = resolveWindow(startdate, enddate, 365);
   const ex = exclusiveEnd(end);
@@ -2272,7 +2285,7 @@ from (
       from FaultVectorScore v
       join faults fa on fa.faultid = v.FVSfaultid join requesttype rta on fa.RequestTypeNew = rta.RTid
       join faults fb on fb.faultid = v.FVSSimiliarfaultid join requesttype rtb on fb.RequestTypeNew = rtb.RTid
-      where coalesce(cast(v.fvsSearchMethod as nvarchar(20)),'') <> '' and v.FVSuse = 0 and v.FVSScore >= ${ms} and v.FVSfaultid < v.FVSSimiliarfaultid
+      where ${vectorMethodFilter("v.fvsSearchMethod", searchMethod)} and v.FVSuse = 0 and v.FVSScore >= ${ms} and v.FVSfaultid < v.FVSSimiliarfaultid
         and fa.areaint = fb.areaint
         and fa.RequestType in (1,3) and fb.RequestType in (1,3)
         and fa.dateoccured >= '${start}' and fa.dateoccured < '${ex}'
@@ -2318,9 +2331,11 @@ order by max(p.pair_count) desc`;
 export async function getSimilarTicketInsights(
   faultid: number,
   minScore = 0.8,
+  searchMethod?: number,
 ): Promise<SimilarTicketInsights> {
   const id = Math.trunc(faultid);
   const ms = Number.isFinite(minScore) ? minScore : 0.8;
+  const mf = vectorMethodFilter("v.fvsSearchMethod", searchMethod);
   const sql = `select top 10
   n.faultid,
   cast(f.Symptom as nvarchar(300)) as summary,
@@ -2331,9 +2346,9 @@ export async function getSimilarTicketInsights(
   f.category2 as category2,
   try_convert(float, nullif(f.faisatisfactionlevel, '')) as csat
 from (
-  select v.FVSSimiliarfaultid as faultid, v.FVSScore as score from FaultVectorScore v where coalesce(cast(v.fvsSearchMethod as nvarchar(20)),'') <> '' and v.FVSuse = 0 and v.FVSfaultid = ${id} and v.FVSScore >= ${ms}
+  select v.FVSSimiliarfaultid as faultid, v.FVSScore as score from FaultVectorScore v where ${mf} and v.FVSuse = 0 and v.FVSfaultid = ${id} and v.FVSScore >= ${ms}
   union all
-  select v.FVSfaultid as faultid, v.FVSScore as score from FaultVectorScore v where coalesce(cast(v.fvsSearchMethod as nvarchar(20)),'') <> '' and v.FVSuse = 0 and v.FVSSimiliarfaultid = ${id} and v.FVSScore >= ${ms}
+  select v.FVSfaultid as faultid, v.FVSScore as score from FaultVectorScore v where ${mf} and v.FVSuse = 0 and v.FVSSimiliarfaultid = ${id} and v.FVSScore >= ${ms}
 ) n
 join faults f on f.faultid = n.faultid
 left join uname u on f.clearwhoint = u.unum
@@ -2406,6 +2421,7 @@ export async function getKnowledgeGaps(
   enddate?: string,
   matchThreshold = 0.8,
   limit = 20,
+  searchMethod?: number,
 ): Promise<KnowledgeGaps> {
   const { start, end } = resolveWindow(startdate, enddate, 365);
   const ex = exclusiveEnd(end);
@@ -2417,7 +2433,7 @@ export async function getKnowledgeGaps(
     ` and (f.datecleared > f.dateoccured or f.datecleared is null or f.datecleared < '1900-01-01')` +
     ` and f.dateoccured >= '${start}' and f.dateoccured < '${ex}' and ${noiseFilter("f")}`;
   const kbJoin =
-    `left join (select FVSfaultid, max(FVSScore) as best_kb from FaultVectorScore where coalesce(cast(fvsSearchMethod as nvarchar(20)),'') <> '' and FVSuse = 1 group by FVSfaultid) kb on kb.FVSfaultid = f.faultid`;
+    `left join (select FVSfaultid, max(FVSScore) as best_kb from FaultVectorScore where ${vectorMethodFilter("fvsSearchMethod", searchMethod)} and FVSuse = 1 group by FVSfaultid) kb on kb.FVSfaultid = f.faultid`;
 
   const coverageSql = `select
   count(*) as tickets,
@@ -2437,7 +2453,7 @@ from FaultVectorScore fvs
 join KBENTRY k on k.id = fvs.FVSSimiliarfaultid
 join faults f on f.faultid = fvs.FVSfaultid
 join requesttype rt on f.requesttypenew = rt.RTid
-where coalesce(cast(fvs.fvsSearchMethod as nvarchar(20)),'') <> '' and fvs.FVSuse = 1 and fvs.FVSScore >= ${th} and ${base}
+where ${vectorMethodFilter("fvs.fvsSearchMethod", searchMethod)} and fvs.FVSuse = 1 and fvs.FVSScore >= ${th} and ${base}
 group by k.id
 order by count(distinct fvs.FVSfaultid) desc`;
 
