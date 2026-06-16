@@ -28,6 +28,12 @@ const inputSchema = {
     .max(200)
     .optional()
     .describe("Max clients to return. Default 50."),
+  searchMethod: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Optional vector backend filter: 0=Halo internal store, 1=Azure AI Search, 2=OpenSearch. Omit (default) to use all real backends (only NULL/junk rows excluded); set to isolate one backend's embeddings."),
 };
 
 export function registerGetClientDejaVu(server: McpServer): void {
@@ -39,8 +45,8 @@ export function registerGetClientDejaVu(server: McpServer): void {
         "Clients who repeatedly log the SAME issue — chronic-pain / root-cause / training targets. Counts high-similarity REACTIVE ticket pairs where BOTH tickets belong to the same client, within the window. Per client: number of recurring pairs, distinct tickets involved, and total hours logged across those tickets. Ranked by recurring pair count desc. Same-client recurrence is the signal here — cross-client similarity (one problem hitting many customers) is what getRecurringProblemClusters surfaces. Uses Halo's ticket embeddings (FaultVectorScore, backend-agnostic — garbage NULL-method rows excluded), noise-filtered (auto-replies / OTP / test / newsletter subjects removed). Defaults to the trailing 365 days.",
       inputSchema,
     },
-    async ({ startdate, enddate, minScore, limit }) => {
-      const snap = await getClientDejaVu(startdate, enddate, minScore ?? 0.85, limit ?? 50);
+    async ({ startdate, enddate, minScore, limit, searchMethod }) => {
+      const snap = await getClientDejaVu(startdate, enddate, minScore ?? 0.85, limit ?? 50, searchMethod);
       return { content: [{ type: "text", text: JSON.stringify(snap, null, 2) }] };
     },
   );
