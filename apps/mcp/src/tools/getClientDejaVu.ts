@@ -36,7 +36,7 @@ export function registerGetClientDejaVu(server: McpServer): void {
     {
       title: "Get HaloPSA client deja vu — clients re-logging the same issue (ticket embeddings)",
       description:
-        "Clients who repeatedly log the SAME issue — chronic-pain / root-cause / training targets. Counts high-similarity REACTIVE ticket pairs where BOTH tickets belong to the same client, within the window. Per client: number of recurring pairs, distinct tickets involved, and total hours logged across those tickets. Ranked by recurring pair count desc. Same-client recurrence is the signal here — cross-client similarity (one problem hitting many customers) is what getRecurringProblemClusters surfaces. Uses Halo's ticket embeddings (FaultVectorScore, method 1 only), noise-filtered (auto-replies / OTP / test / newsletter subjects removed). Defaults to the trailing 365 days.",
+        "Clients who repeatedly log the SAME issue — chronic-pain / root-cause / training targets. Counts high-similarity REACTIVE ticket pairs where BOTH tickets belong to the same client, within the window. Per client: number of recurring pairs, distinct tickets involved, and total hours logged across those tickets. Ranked by recurring pair count desc. Same-client recurrence is the signal here — cross-client similarity (one problem hitting many customers) is what getRecurringProblemClusters surfaces. Uses Halo's ticket embeddings (FaultVectorScore, backend-agnostic — garbage NULL-method rows excluded), noise-filtered (auto-replies / OTP / test / newsletter subjects removed). Defaults to the trailing 365 days.",
       inputSchema,
     },
     async ({ startdate, enddate, minScore, limit }) => {

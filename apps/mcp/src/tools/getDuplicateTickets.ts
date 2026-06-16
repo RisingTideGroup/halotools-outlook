@@ -28,7 +28,7 @@ export function registerGetDuplicateTickets(server: McpServer): void {
     {
       title: "Get HaloPSA near-duplicate open tickets (ticket embeddings)",
       description:
-        "OPEN tickets that are near-duplicates of another ticket — merge candidates and double-logging. For each open ticket it returns its single highest-scoring neighbour (in either direction) at or above minScore (default 0.9 = near-duplicate), with the matched ticket's id, summary, state (open or closed), and score, plus the open ticket's client and age in days. Uses Halo's ticket embeddings (FaultVectorScore, method 1 only), noise-filtered (auto-replies / OTP / test / newsletter subjects removed). Ordered by score desc.",
+        "OPEN tickets that are near-duplicates of another ticket — merge candidates and double-logging. For each open ticket it returns its single highest-scoring neighbour (in either direction) at or above minScore (default 0.9 = near-duplicate), with the matched ticket's id, summary, state (open or closed), and score, plus the open ticket's client and age in days. Uses Halo's ticket embeddings (FaultVectorScore, backend-agnostic — garbage NULL-method rows excluded), noise-filtered (auto-replies / OTP / test / newsletter subjects removed). minScore is tunable — adjust if matches look too loose/tight. Ordered by score desc.",
       inputSchema,
     },
     async ({ scope, minScore, limit }) => {
