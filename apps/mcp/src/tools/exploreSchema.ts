@@ -40,7 +40,7 @@ export function registerExploreSchema(server: McpServer): void {
   server.registerTool(
     "exploreSchema",
     {
-      title: "Database: Explore schema (START HERE before runSql)",
+      title: "Explore the HaloPSA database schema (tables, columns, sample rows)",
       description: [
         "Learn your way around HaloPSA's database BEFORE writing a report query. Halo's schema is huge and uses 25-year-old NetHelpDesk + ITIL naming — guessing column names wastes a query and produces wrong numbers. Use this to discover tables, inspect a table's columns, and look at real sample rows; THEN write the report with runSql.",
         "",

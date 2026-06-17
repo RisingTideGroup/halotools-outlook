@@ -21,7 +21,7 @@ export function registerHaloApiGet(server: McpServer): void {
   server.registerTool(
     "haloApiGet",
     {
-      title: "API: Read a HaloPSA REST endpoint (GET only)",
+      title: "Read a HaloPSA REST endpoint (GET only)",
       description:
         "Read-only passthrough to any HaloPSA REST endpoint (GET only), using the user's current OAuth token. Safe to use freely — it cannot write. Prefer the typed tools (findContact, searchTickets, listOpenTickets, getMspKpis, etc.) where they exist; reach for this to probe an endpoint or inspect field shapes no typed tool covers. For writes (POST/PUT/PATCH/DELETE) use haloApiRaw instead.\n\nSCHEMA DISCOVERY: the REST API is a second lens on the same data as runSql/exploreSchema, and the two cross-reference. The endpoint name is more often than not the database table name (e.g. /Site ↔ SITE, /Faults ↔ FAULTS, /Users ↔ USERS), and a report's `mainEntity` confirms it. When a database column's meaning is unclear, GET the matching endpoint for one record and compare the API field names/values against the row from exploreSchema(action:'sample') — the friendly API label next to the raw column value tells you what the column means. Returns the raw parsed JSON response.",
       inputSchema,
