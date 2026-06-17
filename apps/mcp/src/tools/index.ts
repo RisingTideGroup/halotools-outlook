@@ -201,10 +201,34 @@ interface RegisteredToolLike {
   update: (cfg: { annotations?: Record<string, unknown> }) => void;
 }
 
+/**
+ * Fail fast if the two static catalogues drift apart: every TOOL_REGISTRY entry
+ * must have a TOOL_METADATA entry (else the tool registers with no title /
+ * read-only annotation) and vice versa (else a stale metadata key). Runs on
+ * every server creation — there's no separate test runner here. Throws with the
+ * offending names so the fix is obvious.
+ */
+function assertToolCatalogueParity(): void {
+  const registered = new Set(TOOL_REGISTRY.map((t) => t.name));
+  const documented = new Set(Object.keys(TOOL_METADATA));
+  const missingMetadata = [...registered].filter((n) => !documented.has(n));
+  const orphanMetadata = [...documented].filter((n) => !registered.has(n));
+  if (missingMetadata.length || orphanMetadata.length) {
+    const parts: string[] = [];
+    if (missingMetadata.length)
+      parts.push(`in TOOL_REGISTRY but missing from TOOL_METADATA: ${missingMetadata.join(", ")}`);
+    if (orphanMetadata.length)
+      parts.push(`in TOOL_METADATA but not registered: ${orphanMetadata.join(", ")}`);
+    throw new Error(`Tool catalogue mismatch — ${parts.join("; ")}`);
+  }
+}
+
 export function registerAllTools(
   server: McpServer,
   suppress?: ReadonlySet<string>,
 ): void {
+  assertToolCatalogueParity();
+
   for (const tool of TOOL_REGISTRY) {
     if (suppress?.has(tool.name)) continue;
     tool.register(server);
