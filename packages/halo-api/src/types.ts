@@ -1085,14 +1085,19 @@ export interface RecurringContractTech {
   labourCostMonthly: number;
 }
 
-/** Per-client recurring (managed-services) profitability. Recurring revenue is
- *  client-grained in Halo (recurring invoices don't carry a contract id), so
- *  this is reported at the client = de-facto managed-services agreement, with
- *  activeContracts for context. */
+/** Recurring (managed-services) profitability for one grouping — either a whole
+ *  client (grain='client') or a single contract (grain='contract'). The contract
+ *  is carried per generated recurring invoice line (INVOICEDETAIL.IDCHID), so
+ *  per-contract revenue is real; client grain rolls those up. */
 export interface RecurringContractProfitabilityRow {
+  /** present when grain='contract' */
+  contractId?: number;
+  contractRef?: string;
+  contractActive?: boolean;
   clientId: number;
   client: string;
-  activeContracts: number;
+  /** present when grain='client' — count of the client's active contracts */
+  activeContracts?: number;
   /** monthly recurring revenue = trailing-12-month recurring net ÷ 12 */
   recurringRevenueMonthly: number;
   recurringInvoices: number;
@@ -1116,10 +1121,14 @@ export interface RecurringContractProfitabilityRow {
 }
 
 export interface RecurringContractProfitability {
+  grain: "client" | "contract";
   trailingMonths: number;
   currency: string;
+  /** monthly recurring revenue NOT tied to any contract (grain='contract' only;
+   *  null for grain='client'). Lets the per-contract rows reconcile to total MRR. */
+  unattributedRevenueMonthly: number | null;
   note: string;
-  clients: RecurringContractProfitabilityRow[];
+  rows: RecurringContractProfitabilityRow[];
 }
 
 /** One project in the portfolio health board. */

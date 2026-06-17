@@ -65,6 +65,7 @@ import type {
   PrepayAccountBalance,
   PrepayAccountRow,
   RecurringContractProfitability,
+  RecurringContractProfitabilityRow,
   RecurringContractTech,
   SimilarTicketNeighbour,
 } from "./types.js";
@@ -3382,27 +3383,30 @@ offset 0 rows`;
 }
 
 /**
- * Per-client recurring (managed-services) contract profitability: monthly
- * recurring revenue vs the support effort delivered for it, with best-effort
- * labour cost / margin and the techs who logged the time.
+ * Recurring (managed-services) profitability: monthly recurring revenue vs the
+ * support effort delivered for it, with best-effort labour cost / margin and the
+ * techs who logged the time. Two grains (`groupBy`):
  *
- * GRAIN = client. Recurring revenue is client-grained in Halo — recurring
- * invoices carry IHaarea but no contract id (and this tenant doesn't use
- * CONTRACTHEADER.CHconvertedToRecurringInvoiceId), so per-contract revenue
- * isn't derivable; the client is the de-facto managed-services agreement
- * (~1.2 contracts/client here) and activeContracts is surfaced for context.
+ *  - "client" (default): the whole-client view some MSPs want — recurring
+ *    revenue rolled up per client (INVOICEHEADER recurring-generated invoices by
+ *    IHaarea ÷ 12) vs ALL time logged on the client's tickets
+ *    (ACTIONS.timetaken via faultid → FAULTS.areaint). activeContracts is
+ *    surfaced for context.
+ *  - "contract": the per-contract breakdown — recurring revenue per contract
+ *    (the contract is stamped on each generated recurring invoice LINE,
+ *    INVOICEDETAIL.IDCHID → CONTRACTHEADER.CHid) vs time logged against that
+ *    contract (ACTIONS.AContractId). Revenue not tied to any contract is
+ *    reported once as unattributedRevenueMonthly so the rows reconcile to MRR.
  *
- * Revenue = trailing-12-month net of recurring-generated invoices (INVOICEHEADER
- * IHid>0 linked to a recurring master) ÷ 12. Support effort = all time logged
- * on the client's tickets (ACTIONS.timetaken via faultid → FAULTS.areaint) in
- * the trailing 12 months, monthly-ised. revenuePerSupportHour (= revenue ÷
- * hours) is the reliable margin proxy and needs no cost data. Labour cost uses
- * the normalised agent rate but is PARTIAL — most tenants cost only a few agents
- * — so grossMargin is returned only when costCoveragePct is high enough to trust
- * (marginReliable); otherwise lead with revenuePerSupportHour.
+ * revenuePerSupportHour (= revenue ÷ support hours) is the reliable margin proxy
+ * and needs no cost data. Labour cost uses the normalised agent rate but is
+ * PARTIAL — most tenants cost only a few agents — so grossMargin is returned
+ * only when costCoveragePct is high enough to trust (marginReliable); otherwise
+ * lead with revenuePerSupportHour.
  */
 export async function getRecurringContractProfitability(
   limit = 50,
+  groupBy: "client" | "contract" = "client",
 ): Promise<RecurringContractProfitability> {
   const months = 12;
   const top = Math.max(1, Math.min(500, Math.trunc(limit)));
@@ -3411,9 +3415,47 @@ export async function getRecurringContractProfitability(
   const workDate = "coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated)";
   const cost = AGENT_HOURLY_COST_NORM;
   const labWhere = `ac.timetaken > 0 and ${realAgentFilter("u")} and ${workDate} >= dateadd(month,-${months},getdate())`;
+  // Shared per-agent labour aggregate columns (need the `ac`/`u`/`uct` aliases).
+  const labCols =
+    `sum(ac.timetaken) as hours,` +
+    ` sum(coalesce(ac.actionchargehours,0) + coalesce(ac.actionnonchargehours,0) + coalesce(ac.actionprepayhours,0)) as billable_hours,` +
+    ` sum(ac.timetaken * ${cost}) as labour_cost,` +
+    ` sum(case when ${cost} > 0 then ac.timetaken else 0 end) as costed_hours`;
+  const uctJoin = `left join UnameCostTracking uct on uct.uctAgentId = ac.whoagentid and ${workDate} >= uct.uctStartDate and ${workDate} < uct.uctEndDate`;
 
-  const sql = `select top ${top}
+  const byContract = groupBy === "contract";
+
+  // Per-grain SQL. `gid` is the grouping key (client area, or contract CHid).
+  const sql = byContract
+    ? `select top ${top}
+  ch.CHid as gid,
+  ch.CHcontractRef as label,
+  cast(coalesce(ch.chactive,0) as int) as contract_active,
   a.aarea as client_id,
+  a.aareadesc as client,
+  cast(rev.ttm_net as decimal(14,2)) as ttm_net,
+  rev.invoices as invoices,
+  cast(coalesce(lab.hours,0) as decimal(14,2)) as hours,
+  cast(coalesce(lab.billable_hours,0) as decimal(14,2)) as billable_hours,
+  cast(coalesce(lab.labour_cost,0) as decimal(14,2)) as labour_cost,
+  cast(coalesce(lab.costed_hours,0) as decimal(14,2)) as costed_hours
+from CONTRACTHEADER ch
+join (
+  select idt.IDCHID as gid, sum(idt.IDNet_Amount) as ttm_net, count(distinct idt.IdIHid) as invoices
+  from INVOICEDETAIL idt join INVOICEHEADER ih on ih.IHid = idt.IdIHid
+  where ${recur} and coalesce(idt.IDCHID,0) <> 0
+  group by idt.IDCHID
+) rev on rev.gid = ch.CHid
+left join (
+  select ac.AContractId as gid, ${labCols}
+  from actions ac join uname u on u.unum = ac.whoagentid ${uctJoin}
+  where ${labWhere} and coalesce(ac.AContractId,0) <> 0
+  group by ac.AContractId
+) lab on lab.gid = ch.CHid
+left join area a on a.aarea = ch.CHarea
+order by rev.ttm_net desc`
+    : `select top ${top}
+  a.aarea as gid,
   a.aareadesc as client,
   cast(rev.ttm_net as decimal(14,2)) as ttm_net,
   rev.invoices as invoices,
@@ -3424,62 +3466,65 @@ export async function getRecurringContractProfitability(
   cast(coalesce(lab.costed_hours,0) as decimal(14,2)) as costed_hours
 from area a
 join (
-  select ih.IHaarea as area, sum(idt.IDNet_Amount) as ttm_net, count(distinct ih.IHid) as invoices
+  select ih.IHaarea as gid, sum(idt.IDNet_Amount) as ttm_net, count(distinct ih.IHid) as invoices
   from INVOICEHEADER ih join INVOICEDETAIL idt on idt.IdIHid = ih.IHid
   where ${recur}
   group by ih.IHaarea
-) rev on rev.area = a.aarea
+) rev on rev.gid = a.aarea
 left join (
-  select f.areaint as area,
-    sum(ac.timetaken) as hours,
-    sum(coalesce(ac.actionchargehours,0) + coalesce(ac.actionnonchargehours,0) + coalesce(ac.actionprepayhours,0)) as billable_hours,
-    sum(ac.timetaken * ${cost}) as labour_cost,
-    sum(case when ${cost} > 0 then ac.timetaken else 0 end) as costed_hours
-  from actions ac
-  join faults f on f.faultid = ac.faultid
-  join uname u on u.unum = ac.whoagentid
-  left join UnameCostTracking uct on uct.uctAgentId = ac.whoagentid and ${workDate} >= uct.uctStartDate and ${workDate} < uct.uctEndDate
+  select f.areaint as gid, ${labCols}
+  from actions ac join faults f on f.faultid = ac.faultid join uname u on u.unum = ac.whoagentid ${uctJoin}
   where ${labWhere}
   group by f.areaint
-) lab on lab.area = a.aarea
+) lab on lab.gid = a.aarea
 left join (
-  select CHarea as area, count(*) as active_contracts from CONTRACTHEADER where coalesce(chactive,0) = 1 group by CHarea
-) con on con.area = a.aarea
+  select CHarea as gid, count(*) as active_contracts from CONTRACTHEADER where coalesce(chactive,0) = 1 group by CHarea
+) con on con.gid = a.aarea
 order by rev.ttm_net desc`;
 
-  const techSql = `select f.areaint as client_id, ac.whoagentid as agent_id, max(u.uname) as agent,
-  cast(sum(ac.timetaken) as decimal(14,2)) as hours,
-  cast(sum(ac.timetaken * ${cost}) as decimal(14,2)) as cost
-from actions ac
-join faults f on f.faultid = ac.faultid
-join uname u on u.unum = ac.whoagentid
-left join UnameCostTracking uct on uct.uctAgentId = ac.whoagentid and ${workDate} >= uct.uctStartDate and ${workDate} < uct.uctEndDate
+  const techSql = byContract
+    ? `select ac.AContractId as gid, ac.whoagentid as agent_id, max(u.uname) as agent,
+  cast(sum(ac.timetaken) as decimal(14,2)) as hours, cast(sum(ac.timetaken * ${cost}) as decimal(14,2)) as cost
+from actions ac join uname u on u.unum = ac.whoagentid ${uctJoin}
+where ${labWhere} and coalesce(ac.AContractId,0) <> 0
+group by ac.AContractId, ac.whoagentid
+order by sum(ac.timetaken) desc
+offset 0 rows`
+    : `select f.areaint as gid, ac.whoagentid as agent_id, max(u.uname) as agent,
+  cast(sum(ac.timetaken) as decimal(14,2)) as hours, cast(sum(ac.timetaken * ${cost}) as decimal(14,2)) as cost
+from actions ac join faults f on f.faultid = ac.faultid join uname u on u.unum = ac.whoagentid ${uctJoin}
 where ${labWhere}
 group by f.areaint, ac.whoagentid
 order by sum(ac.timetaken) desc
 offset 0 rows`;
 
-  const [rows, techRows, currency] = await Promise.all([
+  // Recurring revenue not tied to any contract — only meaningful per-contract.
+  const unattributedSql = `select cast(coalesce(sum(idt.IDNet_Amount),0) as decimal(14,2)) as net
+from INVOICEDETAIL idt join INVOICEHEADER ih on ih.IHid = idt.IdIHid
+where ${recur} and coalesce(idt.IDCHID,0) = 0`;
+
+  const [rows, techRows, currency, unattributedRows] = await Promise.all([
     reportRows(sql),
     reportRows(techSql),
     baseCurrency(),
+    byContract ? reportRows(unattributedSql) : Promise.resolve([]),
   ]);
 
-  const techByClient = new Map<number, RecurringContractTech[]>();
+  const techByGid = new Map<number, RecurringContractTech[]>();
   for (const t of techRows) {
-    const cid = num(t.client_id);
-    const arr = techByClient.get(cid) ?? [];
+    const gid = num(t.gid);
+    const arr = techByGid.get(gid) ?? [];
     arr.push({
       agentId: num(t.agent_id),
       agent: String(t.agent ?? ""),
       supportHoursMonthly: round2(num(t.hours) / months),
       labourCostMonthly: round2(num(t.cost) / months),
     });
-    techByClient.set(cid, arr);
+    techByGid.set(gid, arr);
   }
 
-  const clients = rows.map((r) => {
-    const cid = num(r.client_id);
+  const resultRows = rows.map((r) => {
+    const gid = num(r.gid);
     const revenue = round2(num(r.ttm_net) / months);
     const totalHours = num(r.hours);
     const hours = round2(totalHours / months);
@@ -3500,14 +3545,13 @@ offset 0 rows`;
     if (coverage != null && coverage < 80) flags.push("low-cost-coverage");
     if (revenuePerSupportHour != null && revenuePerSupportHour < 75) flags.push("low-revenue-per-hour");
 
-    const topTechs = (techByClient.get(cid) ?? [])
+    const topTechs = (techByGid.get(gid) ?? [])
       .sort((a, b) => b.supportHoursMonthly - a.supportHoursMonthly)
       .slice(0, 6);
 
-    return {
-      clientId: cid,
+    const row: RecurringContractProfitabilityRow = {
+      clientId: byContract ? num(r.client_id) : gid,
       client: String(r.client ?? ""),
-      activeContracts: num(r.active_contracts),
       recurringRevenueMonthly: revenue,
       recurringInvoices: num(r.invoices),
       supportHoursMonthly: hours,
@@ -3522,14 +3566,29 @@ offset 0 rows`;
       topTechs,
       flags,
     };
+    if (byContract) {
+      row.contractId = gid;
+      row.contractRef = String(r.label ?? "").trim();
+      row.contractActive = num(r.contract_active) === 1;
+    } else {
+      row.activeContracts = num(r.active_contracts);
+    }
+    return row;
   });
 
   return {
+    grain: groupBy,
     trailingMonths: months,
     currency,
+    unattributedRevenueMonthly: byContract
+      ? round2(num(unattributedRows[0]?.net) / months)
+      : null,
     note:
-      "Per-CLIENT recurring (managed-services) profitability — recurring revenue is client-grained in Halo (recurring invoices carry no contract id), so the client is the de-facto agreement; activeContracts is context. recurringRevenueMonthly = trailing-12-month recurring net ÷ 12. revenuePerSupportHour (recurring revenue ÷ all support hours logged on the client's tickets) is the RELIABLE margin proxy — low means lots of support delivered per dollar of fee (margin risk), high means light-touch; no agent-cost data needed. labourCostMonthly uses a normalised agent rate (annual salaries ÷ 2080) but is PARTIAL: most agents have no cost on file (see costCoveragePct), so grossMargin is only populated when marginReliable (cost coverage ≥ 80%) — otherwise lead with revenuePerSupportHour. topTechs are who logged the most time. Flags: negative-margin / thin-margin (reliable only), low-cost-coverage, low-revenue-per-hour (<75/hr heuristic), no-support-logged. Amounts in the home currency (see currency).",
-    clients,
+      (byContract
+        ? "Per-CONTRACT recurring profitability. Revenue is tied to each contract via the generated recurring invoice LINE (INVOICEDETAIL.IDCHID → CONTRACTHEADER.CHid); labour is time logged against that contract (ACTIONS.AContractId). unattributedRevenueMonthly is recurring revenue on lines with no contract id (so rows reconcile to total MRR). "
+        : "Per-CLIENT recurring profitability (whole-client view; call with groupBy='contract' for the per-contract breakdown). Revenue is the client's recurring-invoice net; support effort is ALL time logged on the client's tickets; activeContracts is context. ") +
+      "recurringRevenueMonthly = trailing-12-month recurring net ÷ 12. revenuePerSupportHour (recurring revenue ÷ support hours) is the RELIABLE margin proxy — low = lots of support per dollar of fee (margin risk), high = light-touch; no agent-cost data needed. labourCostMonthly uses a normalised agent rate (annual salaries ÷ 2080) but is PARTIAL: most agents have no cost on file (see costCoveragePct), so grossMargin is only populated when marginReliable (cost coverage ≥ 80%) — otherwise lead with revenuePerSupportHour. topTechs = who logged the most time. Flags: negative-margin / thin-margin (reliable only), low-cost-coverage, low-revenue-per-hour (<75/hr heuristic), no-support-logged. Amounts in the home currency (see currency).",
+    rows: resultRows,
   };
 }
 
