@@ -1422,6 +1422,48 @@ export async function listReports(): Promise<unknown[]> {
   return [];
 }
 
+export interface ReportDefinition {
+  id: number;
+  name: string;
+  group: string | null;
+  /** Halo's primary entity for the report — almost always a DB table name
+   *  (e.g. "Faults" = FAULTS), a handy bridge from REST naming to the schema. */
+  mainEntity: string | null;
+  sql: string | null;
+  usesDynamicSql: boolean;
+  /** Whether the report's SQL actually runs right now. A report with
+   *  `validates.error` (or hand-edited/dynamic SQL) is NOT a trustworthy worked
+   *  example — read it for ideas, but verify the logic and columns before reuse. */
+  validates: { loaded: boolean; error: string | null };
+}
+
+/**
+ * Fetch one saved report's full definition, including its SQL, so the query can
+ * be read and learned from (Guideline 6: reverse-engineer from existing
+ * reports). The GET auto-runs the report, so we surface whether it currently
+ * loads (validates) as a real-or-broken signal — don't trust a report blindly.
+ * The bulky column / permission / schedule / chart metadata and the rendered
+ * table_html are dropped.
+ */
+export async function getReport(id: number): Promise<ReportDefinition> {
+  const r = await call<Record<string, unknown>>(
+    `/Report/${Math.trunc(id)}?includedetails=true`,
+  );
+  const run = (r.report ?? {}) as { loaded?: boolean; load_error?: string };
+  return {
+    id: num(r.id),
+    name: String(r.name ?? ""),
+    group: r.group_name ? String(r.group_name) : null,
+    mainEntity: r.mainentity ? String(r.mainentity) : null,
+    sql: r.sql != null ? String(r.sql) : null,
+    usesDynamicSql: Boolean(r.usesdynamicsql),
+    validates: {
+      loaded: Boolean(run.loaded),
+      error: run.load_error ? String(run.load_error) : null,
+    },
+  };
+}
+
 // ---------- Report Center: schema discovery ----------
 //
 // `exploreSchema` is the "learn the database before you query it" tool. Halo's
