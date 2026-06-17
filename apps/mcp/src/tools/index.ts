@@ -10,8 +10,11 @@ import { registerSearchCannedText } from "./searchCannedText.js";
 import { registerGetActivityFeed } from "./getActivityFeed.js";
 
 import { registerHaloApiRaw } from "./haloApiRaw.js";
+import { registerHaloApiGet } from "./haloApiGet.js";
+import { registerExploreSchema } from "./exploreSchema.js";
 import { registerRunSql } from "./runSql.js";
 import { registerListReports } from "./listReports.js";
+import { registerGetReport } from "./getReport.js";
 import { registerListRecurringInvoices } from "./listRecurringInvoices.js";
 import { registerListTimesheets } from "./listTimesheets.js";
 import { registerListContracts } from "./listContracts.js";
@@ -42,6 +45,7 @@ import { registerGetProjectProfitability } from "./getProjectProfitability.js";
 import { registerGetResourceForecast } from "./getResourceForecast.js";
 import { registerGetTechnicianUtilization } from "./getTechnicianUtilization.js";
 import { registerGetPrepayAccountBalance } from "./getPrepayAccountBalance.js";
+import { registerGetRecurringContractProfitability } from "./getRecurringContractProfitability.js";
 
 /** Map of tool name → register function so suppression can decide per-tool
  *  whether to wire it up. The order here defines the order the agent sees
@@ -98,10 +102,14 @@ const TOOL_REGISTRY: Array<{ name: string; register: (s: McpServer) => void }> =
   { name: "getResourceForecast", register: registerGetResourceForecast },
   { name: "getTechnicianUtilization", register: registerGetTechnicianUtilization },
   { name: "getPrepayAccountBalance", register: registerGetPrepayAccountBalance },
+  { name: "getRecurringContractProfitability", register: registerGetRecurringContractProfitability },
 
   // Database access + REST escape hatch
   { name: "listReports", register: registerListReports },
+  { name: "getReport", register: registerGetReport },
+  { name: "exploreSchema", register: registerExploreSchema },
   { name: "runSql", register: registerRunSql },
+  { name: "haloApiGet", register: registerHaloApiGet },
   { name: "haloApiRaw", register: registerHaloApiRaw },
 ];
 
@@ -174,11 +182,15 @@ const TOOL_METADATA: Record<string, ToolMetadata> = {
   getResourceForecast: { title: "Projects: Resource forecast", readOnly: true },
   getTechnicianUtilization: { title: "Projects: Technician utilisation (window)", readOnly: true },
   getPrepayAccountBalance: { title: "Projects: Prepay account balance", readOnly: true },
+  getRecurringContractProfitability: { title: "Financial: Recurring contract profitability", readOnly: true },
 
   // Database + escape hatch
   listReports: { title: "Database: List saved reports", readOnly: true },
+  getReport: { title: "Database: Read a saved report's SQL", readOnly: true },
+  exploreSchema: { title: "Database: Explore schema (start here)", readOnly: true },
   runSql: { title: "Database: Run SQL SELECT", readOnly: true },
-  haloApiRaw: { title: "API: Raw Halo REST call (read or write)", readOnly: false },
+  haloApiGet: { title: "API: Read Halo REST endpoint (GET only)", readOnly: true },
+  haloApiRaw: { title: "API: Raw Halo REST call (writes / escape hatch)", readOnly: false },
 };
 
 /** Internal shape of the SDK's registered-tool record. The MCP SDK exposes
@@ -189,10 +201,34 @@ interface RegisteredToolLike {
   update: (cfg: { annotations?: Record<string, unknown> }) => void;
 }
 
+/**
+ * Fail fast if the two static catalogues drift apart: every TOOL_REGISTRY entry
+ * must have a TOOL_METADATA entry (else the tool registers with no title /
+ * read-only annotation) and vice versa (else a stale metadata key). Runs on
+ * every server creation — there's no separate test runner here. Throws with the
+ * offending names so the fix is obvious.
+ */
+function assertToolCatalogueParity(): void {
+  const registered = new Set(TOOL_REGISTRY.map((t) => t.name));
+  const documented = new Set(Object.keys(TOOL_METADATA));
+  const missingMetadata = [...registered].filter((n) => !documented.has(n));
+  const orphanMetadata = [...documented].filter((n) => !registered.has(n));
+  if (missingMetadata.length || orphanMetadata.length) {
+    const parts: string[] = [];
+    if (missingMetadata.length)
+      parts.push(`in TOOL_REGISTRY but missing from TOOL_METADATA: ${missingMetadata.join(", ")}`);
+    if (orphanMetadata.length)
+      parts.push(`in TOOL_METADATA but not registered: ${orphanMetadata.join(", ")}`);
+    throw new Error(`Tool catalogue mismatch — ${parts.join("; ")}`);
+  }
+}
+
 export function registerAllTools(
   server: McpServer,
   suppress?: ReadonlySet<string>,
 ): void {
+  assertToolCatalogueParity();
+
   for (const tool of TOOL_REGISTRY) {
     if (suppress?.has(tool.name)) continue;
     tool.register(server);

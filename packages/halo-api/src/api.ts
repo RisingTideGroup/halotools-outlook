@@ -64,6 +64,9 @@ import type {
   TechnicianUtilizationRow,
   PrepayAccountBalance,
   PrepayAccountRow,
+  RecurringContractProfitability,
+  RecurringContractProfitabilityRow,
+  RecurringContractTech,
   SimilarTicketNeighbour,
 } from "./types.js";
 
@@ -1238,10 +1241,12 @@ export async function getRevenuePerTechSnapshot(): Promise<{
   };
 }
 
-/** Active managed user seats: external users excluding service accounts and the
- *  per-client "General User" placeholder (named per settings; ~1 per client). */
+/** Active managed user seats = billable users: external users that are active
+ *  (uinactive=0), not service accounts (uisserviceaccount=0), not flagged out of
+ *  automated billing (uignoreautomatedbilling=0), excluding the per-client
+ *  "General User" placeholder (named per settings; ~1 per client). */
 const USER_SEAT_FILTER =
-  "coalesce(u.uinactive,0)=0 and coalesce(u.uisserviceaccount,0)=0 and u.uusername not like 'General%'";
+  "coalesce(u.uinactive,0)=0 and coalesce(u.uisserviceaccount,0)=0 and coalesce(u.uignoreautomatedbilling,0)=0 and u.uusername not like 'General%'";
 
 async function countUserSeats(): Promise<number> {
   const rows = await reportRows(`select count(*) as n from USERS u where ${USER_SEAT_FILTER}`);
@@ -1420,6 +1425,164 @@ export async function listReports(): Promise<unknown[]> {
   return [];
 }
 
+export interface ReportDefinition {
+  id: number;
+  name: string;
+  group: string | null;
+  /** Halo's primary entity for the report — almost always a DB table name
+   *  (e.g. "Faults" = FAULTS), a handy bridge from REST naming to the schema. */
+  mainEntity: string | null;
+  sql: string | null;
+  usesDynamicSql: boolean;
+  /** Whether the report's SQL actually runs right now. A report with
+   *  `validates.error` (or hand-edited/dynamic SQL) is NOT a trustworthy worked
+   *  example — read it for ideas, but verify the logic and columns before reuse. */
+  validates: { loaded: boolean; error: string | null };
+}
+
+/**
+ * Fetch one saved report's full definition, including its SQL, so the query can
+ * be read and learned from (Guideline 6: reverse-engineer from existing
+ * reports). The GET auto-runs the report, so we surface whether it currently
+ * loads (validates) as a real-or-broken signal — don't trust a report blindly.
+ * The bulky column / permission / schedule / chart metadata and the rendered
+ * table_html are dropped.
+ */
+export async function getReport(id: number): Promise<ReportDefinition> {
+  const r = await call<Record<string, unknown>>(
+    `/Report/${Math.trunc(id)}?includedetails=true`,
+  );
+  const run = (r.report ?? {}) as { loaded?: boolean; load_error?: string };
+  return {
+    id: num(r.id),
+    name: String(r.name ?? ""),
+    group: r.group_name ? String(r.group_name) : null,
+    mainEntity: r.mainentity ? String(r.mainentity) : null,
+    sql: r.sql != null ? String(r.sql) : null,
+    usesDynamicSql: Boolean(r.usesdynamicsql),
+    validates: {
+      loaded: Boolean(run.loaded),
+      error: run.load_error ? String(run.load_error) : null,
+    },
+  };
+}
+
+// ---------- Report Center: schema discovery ----------
+//
+// `exploreSchema` is the "learn the database before you query it" tool. Halo's
+// schema is huge and uses 25-year-old NetHelpDesk naming, so the right flow is
+// to discover tables → inspect a table's columns → look at real sample rows,
+// THEN write the report query. All three actions run through Report Center (the
+// same SELECT path as runSql) with the ORDER-BY-needs-OFFSET gotcha handled and
+// the table identifier validated.
+
+/** Bare SQL identifier (table name) — letters, digits, underscore. Guards the
+ *  one place we interpolate a name into a FROM/WHERE clause. */
+const SQL_IDENTIFIER_RE = /^[A-Za-z0-9_]+$/;
+
+export interface SchemaExploreResult {
+  action: string;
+  /** The exact SQL run — surfaced so the caller learns the idioms. */
+  sql: string;
+  rowCount: number;
+  rows: Record<string, unknown>[];
+  note: string;
+}
+
+/**
+ * Schema discovery for Halo's database. Three actions:
+ *  - "tables":  list base-table names (optionally filtered by a name substring).
+ *  - "columns": list one table's columns + types (pass `table`), OR search
+ *               column names across every table (pass `filter`).
+ *  - "sample":  `select top N *` from a table (optionally with a `where`), to
+ *               see real values and reverse-engineer which column holds what.
+ */
+export async function exploreSchema(opts: {
+  action: "tables" | "columns" | "sample";
+  table?: string;
+  filter?: string;
+  where?: string;
+  limit?: number;
+}): Promise<SchemaExploreResult> {
+  const { action } = opts;
+  const table = opts.table?.trim();
+  const filter = opts.filter?.trim();
+  const where = opts.where?.trim();
+  const lit = (s: string) => s.replace(/'/g, "''");
+
+  if (table && !SQL_IDENTIFIER_RE.test(table)) {
+    throw new HaloApiError(
+      400,
+      `Invalid table name '${table}' — letters, digits and underscore only.`,
+    );
+  }
+
+  if (action === "tables") {
+    const cap = Math.max(1, Math.min(2000, Math.trunc(opts.limit ?? 500)));
+    const like = filter ? ` and TABLE_NAME like '%${lit(filter)}%'` : "";
+    const sql = `select TABLE_NAME from INFORMATION_SCHEMA.TABLES where TABLE_TYPE = 'BASE TABLE'${like} order by TABLE_NAME offset 0 rows fetch next ${cap} rows only`;
+    const rows = await reportRows(sql);
+    return {
+      action,
+      sql,
+      rowCount: rows.length,
+      rows,
+      note: filter
+        ? `Base tables whose name contains '${filter}'. Halo idioms: tickets/projects/opportunities all live in FAULTS; notes/time/emails in ACTIONS; clients in AREA; sites in SITE; contacts in USERS; agents in UNAME; assets in DEVICE.`
+        : `First ${cap} base tables (names only). Narrow with a 'filter' substring — Guideline 7, always filter first. Tickets = FAULTS, notes/time/emails = ACTIONS, assets = DEVICE.`,
+    };
+  }
+
+  if (action === "columns") {
+    if (!table && !filter) {
+      throw new HaloApiError(
+        400,
+        "exploreSchema columns needs either 'table' (list that table's columns) or 'filter' (search column names across all tables).",
+      );
+    }
+    if (table) {
+      const sql = `select COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH as max_len, IS_NULLABLE as nullable from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = '${lit(table)}' order by ORDINAL_POSITION offset 0 rows`;
+      const rows = await reportRows(sql);
+      return {
+        action,
+        sql,
+        rowCount: rows.length,
+        rows,
+        note: `Columns of ${table}. Guideline 3: a column's prefix marks its origin table (e.g. SArea on SITE → AREA; USite on USERS → SITE; QHID → quotation header). Guideline 4: a primary key reused elsewhere (faultid, aarea, DID, UID…) is your join key. Use action 'sample' to see real values.`,
+      };
+    }
+    const cap = Math.max(1, Math.min(2000, Math.trunc(opts.limit ?? 300)));
+    const sql = `select TABLE_NAME, COLUMN_NAME, DATA_TYPE from INFORMATION_SCHEMA.COLUMNS where COLUMN_NAME like '%${lit(filter!)}%' order by TABLE_NAME, COLUMN_NAME offset 0 rows fetch next ${cap} rows only`;
+    const rows = await reportRows(sql);
+    return {
+      action,
+      sql,
+      rowCount: rows.length,
+      rows,
+      note: `Columns across all tables whose NAME contains '${filter}' — the agent equivalent of Halo's "Database Tables & Columns" schema report (Guideline 7). To find a column by its VALUE instead (Guideline 8), use action 'sample' with a 'where' that pins a row you recognise.`,
+    };
+  }
+
+  if (action === "sample") {
+    if (!table) {
+      throw new HaloApiError(400, "exploreSchema sample needs a 'table'.");
+    }
+    const top = Math.max(1, Math.min(25, Math.trunc(opts.limit ?? 5)));
+    const whereSql = where ? ` where ${where}` : "";
+    const sql = `select top ${top} * from ${table}${whereSql}`;
+    const rows = await reportRows(sql);
+    return {
+      action,
+      sql,
+      rowCount: rows.length,
+      rows,
+      note: `Top ${top} row(s) of ${table}${where ? ` where ${where}` : ""}. Guideline 8: if you know a real-world value (asset tag, email, ticket subject) put it in 'where' to pull that row, then read across the columns to find which one stores it (e.g. an asset's tag turned out to live in DEVICE.INVNO).`,
+    };
+  }
+
+  throw new HaloApiError(400, `Unknown exploreSchema action '${String(action)}'.`);
+}
+
 // ---------- Service-delivery KPIs (SQL-backed) ----------
 //
 // These compose Halo's Report Center (runReportSql) into canonical MSP
@@ -1508,11 +1671,27 @@ function exclusiveEnd(end: string): string {
 const NOT_STUB =
   "(f.datecleared > f.dateoccured or f.datecleared is null or f.datecleared < '1900-01-01')";
 
+/** FAULTS "live ticket" predicate — the standard exclusion that must guard
+ *  EVERY query reading FAULTS: not soft-deleted AND not merged into another
+ *  ticket (Halo's `fdeleted = fmergedintofaultid` idiom; merged tickets carry
+ *  the target id in both columns). `alias` is the FAULTS table alias (e.g.
+ *  "f", "fa", "fb", "o"). */
+function liveFault(alias: string): string {
+  return `coalesce(${alias}.fdeleted,0) = coalesce(${alias}.fmergedintofaultid,0)`;
+}
+
+/** AGENT (UNAME) "real agent" predicate — the standard exclusion for staff
+ *  rollups: drop API/bot agents and the Unassigned pseudo-agent (unum=1).
+ *  `alias` is the UNAME table alias (e.g. "u"). */
+function realAgentFilter(alias: string): string {
+  return `coalesce(${alias}.uisapiagent,0) = 0 and ${alias}.unum <> 1`;
+}
+
 /** SQL fragments shared by the windowed service-delivery queries. */
 function deliverySql(start: string, end: string, scope: TicketScope, clientId?: number) {
   const ex = exclusiveEnd(end);
   const filters = [
-    "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)",
+    liveFault("f"),
     NOT_STUB,
     // Reactive = standard ITIL Incident (1) + Service Request (3) on the ticket
     // itself (FAULTS.RequestType). For a professional-services shop this is a
@@ -1630,7 +1809,7 @@ left join (
   where ActionDateCreated >= '${start}' and ActionDateCreated < '${ex}'
   group by whoagentid
 ) act on act.whoagentid = f.clearwhoint
-where ${s.filters} and (${s.clearedIn})
+where ${s.filters} and ${realAgentFilter("u")} and (${s.clearedIn})
 group by u.unum, u.uname
 order by count(*) desc`;
 
@@ -1719,7 +1898,7 @@ export async function getTicketBacklog(
 ): Promise<TicketBacklog> {
   const join = "";
   const filters = [
-    "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)",
+    liveFault("f"),
     "(f.datecleared is null or f.datecleared < '1900-01-01')",
     scope === "reactive" ? "f.RequestType in (1,3)" : "",
     clientId != null ? `f.areaint = ${Math.trunc(clientId)}` : "",
@@ -1805,7 +1984,7 @@ export async function getCategoryInsights(
   const ex = exclusiveEnd(end);
   const join = "";
   const reactive = scope === "reactive" ? "and f.RequestType in (1,3)" : "";
-  const base = `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0) and ${NOT_STUB} ${reactive} and f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`;
+  const base = `${liveFault("f")} and ${NOT_STUB} ${reactive} and f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`;
   const cat = `coalesce(nullif(ltrim(rtrim(f.category2)), ''), '(uncategorised)')`;
 
   const summarySql = `select
@@ -1873,8 +2052,8 @@ export async function getTechnicianRiskSignals(
   const ex = exclusiveEnd(end);
   const join = "";
   const reactive = scope === "reactive" ? "and f.RequestType in (1,3)" : "";
-  const notDeleted = "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)";
-  const realAgent = "coalesce(u.uisapiagent,0) = 0";
+  const notDeleted = liveFault("f");
+  const realAgent = realAgentFilter("u");
   const top = Math.max(1, Math.trunc(limit));
 
   // Closed-by-tech cohort: throughput + zero-time closes + SLA breach + CSAT.
@@ -1903,7 +2082,7 @@ order by count(*) desc`;
 from faults f
 join uname u on f.assignedtoint = u.unum
 ${join}
-where ${notDeleted} ${reactive} and ${realAgent} and u.unum <> 1 and (f.datecleared is null or f.datecleared < '1900-01-01')
+where ${notDeleted} ${reactive} and ${realAgent} and (f.datecleared is null or f.datecleared < '1900-01-01')
 group by u.unum, u.uname
 order by count(*) desc`;
 
@@ -2117,6 +2296,7 @@ export async function getRecurringProblemClusters(
   // score gate, both endpoints reactive + NOT_STUB + non-noise + in-window.
   const edgeWhere =
     `${vectorMethodFilter("v.fvsSearchMethod", searchMethod)} and v.FVSuse = 0 and v.FVSScore >= ${ms}` +
+    ` and ${liveFault("fa")} and ${liveFault("fb")}` +
     ` and fa.RequestType in (1,3) and fb.RequestType in (1,3)` +
     ` and (fa.datecleared > fa.dateoccured or fa.datecleared is null or fa.datecleared < '1900-01-01')` +
     ` and (fb.datecleared > fb.dateoccured or fb.datecleared is null or fb.datecleared < '1900-01-01')` +
@@ -2195,7 +2375,8 @@ export async function getDuplicateTickets(
   const ms = Number.isFinite(minScore) ? minScore : 0.9;
   const rtJoin = "";
   const reactive = scope === "reactive" ? "and o.RequestType in (1,3)" : "";
-  const edgeWhere = `${vectorMethodFilter("v.fvsSearchMethod", searchMethod)} and v.FVSuse = 0 and v.FVSScore >= ${ms}`;
+  // edgeWhere guards both union subqueries (each joins the matched ticket as fm).
+  const edgeWhere = `${vectorMethodFilter("v.fvsSearchMethod", searchMethod)} and v.FVSuse = 0 and v.FVSScore >= ${ms} and ${liveFault("fm")}`;
 
   const sql = `select top ${top}
   o.faultid as open_ticket_id,
@@ -2226,7 +2407,7 @@ join (
     where ${edgeWhere}
   ) edges
 ) m on m.open_id = o.faultid and m.rn = 1
-where o.status not in (8,9) ${reactive} and ${noiseFilter("o")}
+where ${liveFault("o")} and o.status not in (8,9) ${reactive} and ${noiseFilter("o")}
 order by m.score desc`;
 
   const rows = await reportRows(sql);
@@ -2286,6 +2467,7 @@ from (
       join faults fa on fa.faultid = v.FVSfaultid join requesttype rta on fa.RequestTypeNew = rta.RTid
       join faults fb on fb.faultid = v.FVSSimiliarfaultid join requesttype rtb on fb.RequestTypeNew = rtb.RTid
       where ${vectorMethodFilter("v.fvsSearchMethod", searchMethod)} and v.FVSuse = 0 and v.FVSScore >= ${ms} and v.FVSfaultid < v.FVSSimiliarfaultid
+        and ${liveFault("fa")} and ${liveFault("fb")}
         and fa.areaint = fb.areaint
         and fa.RequestType in (1,3) and fb.RequestType in (1,3)
         and fa.dateoccured >= '${start}' and fa.dateoccured < '${ex}'
@@ -2352,7 +2534,7 @@ from (
 ) n
 join faults f on f.faultid = n.faultid
 left join uname u on f.clearwhoint = u.unum
-where f.status in (8,9) and f.datecleared > f.dateoccured
+where ${liveFault("f")} and f.status in (8,9) and f.datecleared > f.dateoccured
 order by n.score desc`;
 
   const rows = await reportRows(sql);
@@ -2428,7 +2610,7 @@ export async function getKnowledgeGaps(
   const th = Number.isFinite(matchThreshold) ? matchThreshold : 0.8;
   const top = Math.max(1, Math.trunc(limit));
   const base =
-    `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)` +
+    `${liveFault("f")}` +
     ` and f.RequestType in (1,3)` +
     ` and (f.datecleared > f.dateoccured or f.datecleared is null or f.datecleared < '1900-01-01')` +
     ` and f.dateoccured >= '${start}' and f.dateoccured < '${ex}' and ${noiseFilter("f")}`;
@@ -2536,7 +2718,7 @@ export async function getTicketsToCategorize(opts: {
   const join = scope === "reactive" ? "join requesttype rt on f.requesttypenew = rt.RTid" : "";
 
   const where: string[] = [
-    "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)",
+    liveFault("f"),
     NOT_STUB,
   ];
   if (scope === "reactive") where.push("f.RequestType in (1,3)");
@@ -2691,7 +2873,7 @@ export async function getNoiseTicketAnalysis(
   const ex = exclusiveEnd(end);
   const sym = "cast(f.Symptom as nvarchar(400))";
   const base =
-    `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)` +
+    `${liveFault("f")}` +
     ` and f.RequestType in (1,3)` +
     ` and f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`;
   const isNoise =
@@ -2850,7 +3032,7 @@ left join (
   group by ac.AProjectID
 ) act on act.AProjectID = p.faultid
 where rt.RTIsProject = 1 and ${PROJECT_MAIN}
-  and coalesce(p.fdeleted,0) = coalesce(p.fmergedintofaultid,0)
+  and ${liveFault("p")}
   and p.FProjectTimeActual > ${mh}
 order by p.FProjectTimeActual desc`;
 
@@ -2969,11 +3151,11 @@ left join (
   select c.fmainprojectid as pid,
     count(*) as child_total,
     sum(case when c.status in (8,9) then 1 else 0 end) as child_closed
-  from faults c where c.fmainprojectid > 0 and c.faultid <> c.fmainprojectid
+  from faults c where c.fmainprojectid > 0 and c.faultid <> c.fmainprojectid and ${liveFault("c")}
   group by c.fmainprojectid
 ) ch on ch.pid = p.faultid
 where rt.RTIsProject = 1 and ${PROJECT_MAIN}
-  and coalesce(p.fdeleted,0) = coalesce(p.fmergedintofaultid,0) ${statusFilter}
+  and ${liveFault("p")} ${statusFilter}
 order by coalesce(ch.child_total, 0) desc`;
 
   const rows = await reportRows(sql);
@@ -3027,7 +3209,7 @@ export async function getResourceForecast(
 from APPOINTMENT ap
 join uname u on u.unum = ap.APunum
 where coalesce(ap.APdeleted,0) = 0 and coalesce(ap.APAllDayEvent,0) = 0
-  and coalesce(u.uisapiagent,0) = 0 and u.unum <> 1
+  and ${realAgentFilter("u")}
   and ap.APStartDate >= '${start}' and ap.APStartDate < '${end}'
 group by u.unum, u.uname
 order by sum(case when ap.APFaultid > 0 then datediff(minute, ap.APStartDate, ap.APEndDate) / 60.0 else 0 end) desc
@@ -3112,7 +3294,7 @@ left join (select APunum,
   from APPOINTMENT where coalesce(APdeleted,0)=0 and coalesce(APAllDayEvent,0)=0 and APStartDate >= '${start}' and APStartDate < '${ex}' group by APunum) ap on ap.APunum = u.unum
 left join (select ac.whoagentid, sum(ac.timetaken) as worked, sum(coalesce(ac.actionchargehours,0) + coalesce(ac.actionnonchargehours,0) + coalesce(ac.actionprepayhours,0)) as billable from actions ac where coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) >= '${start}' and coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) < '${ex}' group by ac.whoagentid) wk on wk.whoagentid = u.unum
 left join (select HTechnicianID, sum(Hduration) as leave_hrs from HOLIDAYS where Hdate >= '${start}' and Hdate < '${ex}' group by HTechnicianID) h on h.HTechnicianID = u.unum
-where coalesce(u.uisapiagent,0) = 0 and u.unum <> 1 and (coalesce(ap.booked,0) > 0 or coalesce(wk.worked,0) > 0)
+where ${realAgentFilter("u")} and (coalesce(ap.booked,0) > 0 or coalesce(wk.worked,0) > 0)
 order by coalesce(wk.worked,0) desc
 offset 0 rows`;
 
@@ -3188,6 +3370,218 @@ offset 0 rows`;
       billabilityPct: tot.worked > 0 ? round2((tot.billable / tot.worked) * 100) : null,
     },
     technicians,
+  };
+}
+
+/**
+ * Recurring (managed-services) profitability: monthly recurring revenue vs the
+ * support effort delivered for it, with best-effort labour cost / margin and the
+ * techs who logged the time. Two grains (`groupBy`):
+ *
+ *  - "client" (default): the whole-client view some MSPs want — recurring
+ *    revenue rolled up per client (INVOICEHEADER recurring-generated invoices by
+ *    IHaarea ÷ 12) vs ALL time logged on the client's tickets
+ *    (ACTIONS.timetaken via faultid → FAULTS.areaint). activeContracts is
+ *    surfaced for context.
+ *  - "contract": the per-contract breakdown — recurring revenue per contract
+ *    (the contract is stamped on each generated recurring invoice LINE,
+ *    INVOICEDETAIL.IDCHID → CONTRACTHEADER.CHid) vs time logged against that
+ *    contract (ACTIONS.AContractId). Revenue not tied to any contract is
+ *    reported once as unattributedRevenueMonthly so the rows reconcile to MRR.
+ *
+ * revenuePerSupportHour (= revenue ÷ support hours) is the reliable margin proxy
+ * and needs no cost data. Labour cost uses the agent's stored rate
+ * (UnameCostTracking, else UNAME.ucostPrice) and is PARTIAL — most tenants cost
+ * only a few agents — so grossMargin is returned only when costCoveragePct is
+ * high enough to trust (marginReliable); otherwise lead with revenuePerSupportHour.
+ * The rate is assumed HOURLY; a tenant that stored annual salaries there will
+ * read inflated — inspect the values with exploreSchema if margins look off.
+ */
+export async function getRecurringContractProfitability(
+  limit = 50,
+  groupBy: "client" | "contract" = "client",
+): Promise<RecurringContractProfitability> {
+  const months = 12;
+  const top = Math.max(1, Math.min(500, Math.trunc(limit)));
+  const recur =
+    "ih.IHid > 0 and coalesce(ih.IHrecurringInvoiceId,0) <> 0 and ih.IHInvoice_Date >= dateadd(month,-12,getdate())";
+  const workDate = "coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated)";
+  const cost = AGENT_HOURLY_COST;
+  const labWhere = `ac.timetaken > 0 and ${realAgentFilter("u")} and ${workDate} >= dateadd(month,-${months},getdate())`;
+  // Shared per-agent labour aggregate columns (need the `ac`/`u`/`uct` aliases).
+  const labCols =
+    `sum(ac.timetaken) as hours,` +
+    ` sum(coalesce(ac.actionchargehours,0) + coalesce(ac.actionnonchargehours,0) + coalesce(ac.actionprepayhours,0)) as billable_hours,` +
+    ` sum(ac.timetaken * ${cost}) as labour_cost,` +
+    ` sum(case when ${cost} > 0 then ac.timetaken else 0 end) as costed_hours`;
+  const uctJoin = `left join UnameCostTracking uct on uct.uctAgentId = ac.whoagentid and ${workDate} >= uct.uctStartDate and ${workDate} < uct.uctEndDate`;
+
+  const byContract = groupBy === "contract";
+
+  // Per-grain SQL. `gid` is the grouping key (client area, or contract CHid).
+  const sql = byContract
+    ? `select top ${top}
+  ch.CHid as gid,
+  ch.CHcontractRef as label,
+  cast(coalesce(ch.chactive,0) as int) as contract_active,
+  a.aarea as client_id,
+  a.aareadesc as client,
+  cast(rev.ttm_net as decimal(14,2)) as ttm_net,
+  rev.invoices as invoices,
+  cast(coalesce(lab.hours,0) as decimal(14,2)) as hours,
+  cast(coalesce(lab.billable_hours,0) as decimal(14,2)) as billable_hours,
+  cast(coalesce(lab.labour_cost,0) as decimal(14,2)) as labour_cost,
+  cast(coalesce(lab.costed_hours,0) as decimal(14,2)) as costed_hours
+from CONTRACTHEADER ch
+join (
+  select idt.IDCHID as gid, sum(idt.IDNet_Amount) as ttm_net, count(distinct idt.IdIHid) as invoices
+  from INVOICEDETAIL idt join INVOICEHEADER ih on ih.IHid = idt.IdIHid
+  where ${recur} and coalesce(idt.IDCHID,0) <> 0
+  group by idt.IDCHID
+) rev on rev.gid = ch.CHid
+left join (
+  select ac.AContractId as gid, ${labCols}
+  from actions ac join uname u on u.unum = ac.whoagentid ${uctJoin}
+  where ${labWhere} and coalesce(ac.AContractId,0) <> 0
+  group by ac.AContractId
+) lab on lab.gid = ch.CHid
+left join area a on a.aarea = ch.CHarea
+order by rev.ttm_net desc`
+    : `select top ${top}
+  a.aarea as gid,
+  a.aareadesc as client,
+  cast(rev.ttm_net as decimal(14,2)) as ttm_net,
+  rev.invoices as invoices,
+  coalesce(con.active_contracts,0) as active_contracts,
+  cast(coalesce(lab.hours,0) as decimal(14,2)) as hours,
+  cast(coalesce(lab.billable_hours,0) as decimal(14,2)) as billable_hours,
+  cast(coalesce(lab.labour_cost,0) as decimal(14,2)) as labour_cost,
+  cast(coalesce(lab.costed_hours,0) as decimal(14,2)) as costed_hours
+from area a
+join (
+  select ih.IHaarea as gid, sum(idt.IDNet_Amount) as ttm_net, count(distinct ih.IHid) as invoices
+  from INVOICEHEADER ih join INVOICEDETAIL idt on idt.IdIHid = ih.IHid
+  where ${recur}
+  group by ih.IHaarea
+) rev on rev.gid = a.aarea
+left join (
+  select f.areaint as gid, ${labCols}
+  from actions ac join faults f on f.faultid = ac.faultid join uname u on u.unum = ac.whoagentid ${uctJoin}
+  where ${labWhere}
+  group by f.areaint
+) lab on lab.gid = a.aarea
+left join (
+  select CHarea as gid, count(*) as active_contracts from CONTRACTHEADER where coalesce(chactive,0) = 1 group by CHarea
+) con on con.gid = a.aarea
+order by rev.ttm_net desc`;
+
+  const techSql = byContract
+    ? `select ac.AContractId as gid, ac.whoagentid as agent_id, max(u.uname) as agent,
+  cast(sum(ac.timetaken) as decimal(14,2)) as hours, cast(sum(ac.timetaken * ${cost}) as decimal(14,2)) as cost
+from actions ac join uname u on u.unum = ac.whoagentid ${uctJoin}
+where ${labWhere} and coalesce(ac.AContractId,0) <> 0
+group by ac.AContractId, ac.whoagentid
+order by sum(ac.timetaken) desc
+offset 0 rows`
+    : `select f.areaint as gid, ac.whoagentid as agent_id, max(u.uname) as agent,
+  cast(sum(ac.timetaken) as decimal(14,2)) as hours, cast(sum(ac.timetaken * ${cost}) as decimal(14,2)) as cost
+from actions ac join faults f on f.faultid = ac.faultid join uname u on u.unum = ac.whoagentid ${uctJoin}
+where ${labWhere}
+group by f.areaint, ac.whoagentid
+order by sum(ac.timetaken) desc
+offset 0 rows`;
+
+  // Recurring revenue not tied to any contract — only meaningful per-contract.
+  const unattributedSql = `select cast(coalesce(sum(idt.IDNet_Amount),0) as decimal(14,2)) as net
+from INVOICEDETAIL idt join INVOICEHEADER ih on ih.IHid = idt.IdIHid
+where ${recur} and coalesce(idt.IDCHID,0) = 0`;
+
+  const [rows, techRows, currency, unattributedRows] = await Promise.all([
+    reportRows(sql),
+    reportRows(techSql),
+    baseCurrency(),
+    byContract ? reportRows(unattributedSql) : Promise.resolve([]),
+  ]);
+
+  const techByGid = new Map<number, RecurringContractTech[]>();
+  for (const t of techRows) {
+    const gid = num(t.gid);
+    const arr = techByGid.get(gid) ?? [];
+    arr.push({
+      agentId: num(t.agent_id),
+      agent: String(t.agent ?? ""),
+      supportHoursMonthly: round2(num(t.hours) / months),
+      labourCostMonthly: round2(num(t.cost) / months),
+    });
+    techByGid.set(gid, arr);
+  }
+
+  const resultRows = rows.map((r) => {
+    const gid = num(r.gid);
+    const revenue = round2(num(r.ttm_net) / months);
+    const totalHours = num(r.hours);
+    const hours = round2(totalHours / months);
+    const billable = round2(num(r.billable_hours) / months);
+    const labourCost = round2(num(r.labour_cost) / months);
+    const costedHours = num(r.costed_hours);
+    const coverage = totalHours > 0 ? round2((costedHours / totalHours) * 100) : null;
+    const marginReliable = coverage != null && coverage >= 80;
+    const revenuePerSupportHour = totalHours > 0 ? round2(num(r.ttm_net) / totalHours) : null;
+    const billableSharePct = totalHours > 0 ? round2((num(r.billable_hours) / totalHours) * 100) : null;
+    const grossMargin = round2(revenue - labourCost);
+    const grossMarginPct = revenue > 0 ? round2((grossMargin / revenue) * 100) : null;
+
+    const flags: string[] = [];
+    if (totalHours === 0) flags.push("no-support-logged");
+    if (marginReliable && grossMargin < 0) flags.push("negative-margin");
+    else if (marginReliable && grossMarginPct != null && grossMarginPct < 20) flags.push("thin-margin");
+    if (coverage != null && coverage < 80) flags.push("low-cost-coverage");
+    if (revenuePerSupportHour != null && revenuePerSupportHour < 75) flags.push("low-revenue-per-hour");
+
+    const topTechs = (techByGid.get(gid) ?? [])
+      .sort((a, b) => b.supportHoursMonthly - a.supportHoursMonthly)
+      .slice(0, 6);
+
+    const row: RecurringContractProfitabilityRow = {
+      clientId: byContract ? num(r.client_id) : gid,
+      client: String(r.client ?? ""),
+      recurringRevenueMonthly: revenue,
+      recurringInvoices: num(r.invoices),
+      supportHoursMonthly: hours,
+      billableHoursMonthly: billable,
+      billableSharePct,
+      revenuePerSupportHour,
+      labourCostMonthly: labourCost,
+      grossMarginMonthly: marginReliable ? grossMargin : null,
+      grossMarginPct: marginReliable ? grossMarginPct : null,
+      costCoveragePct: coverage,
+      marginReliable,
+      topTechs,
+      flags,
+    };
+    if (byContract) {
+      row.contractId = gid;
+      row.contractRef = String(r.label ?? "").trim();
+      row.contractActive = num(r.contract_active) === 1;
+    } else {
+      row.activeContracts = num(r.active_contracts);
+    }
+    return row;
+  });
+
+  return {
+    grain: groupBy,
+    trailingMonths: months,
+    currency,
+    unattributedRevenueMonthly: byContract
+      ? round2(num(unattributedRows[0]?.net) / months)
+      : null,
+    note:
+      (byContract
+        ? "Per-CONTRACT recurring profitability. Revenue is tied to each contract via the generated recurring invoice LINE (INVOICEDETAIL.IDCHID → CONTRACTHEADER.CHid); labour is time logged against that contract (ACTIONS.AContractId). unattributedRevenueMonthly is recurring revenue on lines with no contract id (so rows reconcile to total MRR). "
+        : "Per-CLIENT recurring profitability (whole-client view; call with groupBy='contract' for the per-contract breakdown). Revenue is the client's recurring-invoice net; support effort is ALL time logged on the client's tickets; activeContracts is context. ") +
+      "recurringRevenueMonthly = trailing-12-month recurring net ÷ 12. revenuePerSupportHour (recurring revenue ÷ support hours) is the RELIABLE margin proxy — low = lots of support per dollar of fee (margin risk), high = light-touch; no agent-cost data needed. labourCostMonthly uses the agent's stored rate (UnameCostTracking, else UNAME.ucostPrice) but is PARTIAL: most agents have no cost on file (see costCoveragePct), so grossMargin is only populated when marginReliable (cost coverage ≥ 80%) — otherwise lead with revenuePerSupportHour. The rate is assumed HOURLY; if a tenant stored annual salaries there the cost reads inflated — check the values with exploreSchema. topTechs = who logged the most time. Flags: negative-margin / thin-margin (reliable only), low-cost-coverage, low-revenue-per-hour (<75/hr heuristic), no-support-logged. Amounts in the home currency (see currency).",
+    rows: resultRows,
   };
 }
 
