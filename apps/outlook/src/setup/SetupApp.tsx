@@ -35,7 +35,10 @@ import {
 type Step = "choose" | "halo-url" | "register-app" | "client-id" | "done";
 type Mode = "new" | "update";
 
-const REDIRECT_URI = `${window.location.origin}/outlook/auth/callback.html`;
+// The generated manifest uses the shared /auth/callback (stamped callback=universal
+// in package.ts), so that's the redirect URI admins register. The legacy
+// /outlook/auth/callback.html still works for older deployed manifests.
+const REDIRECT_URI = `${window.location.origin}/auth/callback`;
 const MANIFEST_TEMPLATE_URL = "/outlook/manifest.json";
 const BRAND_RED = "#EF3340";
 

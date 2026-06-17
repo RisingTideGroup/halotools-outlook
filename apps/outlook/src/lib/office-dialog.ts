@@ -8,15 +8,33 @@
 // subdomain, not a different domain even if listed in validDomains/AppDomains. The
 // wrapper page at /outlook/auth/start.html bounces to the third-party authorize URL.
 
-import type { DialogOpener, DialogResultMessage } from "@iusehalo/halo-api";
+import { getConfig, type DialogOpener, type DialogResultMessage } from "@iusehalo/halo-api";
 
-const REDIRECT_PATH = "/outlook/auth/callback.html";
+// Two callback endpoints during the migration:
+//  - "legacy":    the per-app static page (what every tenant has registered today)
+//  - "universal": the shared /auth/callback served by the Node server, the
+//                 single redirect_uri for every hub tool (state-prefix routed).
+const LEGACY_REDIRECT_PATH = "/outlook/auth/callback.html";
+const UNIVERSAL_REDIRECT_PATH = "/auth/callback";
 const START_PATH = "/outlook/auth/start.html";
 const ADDIN_ORIGIN = "https://tools.iusehalo.com";
 
-export function redirectUri(): string {
-  return ADDIN_ORIGIN + REDIRECT_PATH;
+export type CallbackMode = "legacy" | "universal";
+
+/** state prefix the shared callback uses to route the Outlook flow. */
+export const OUTLOOK_STATE_PREFIX = "outlook:";
+
+export function redirectUri(mode: CallbackMode = "legacy"): string {
+  return ADDIN_ORIGIN + (mode === "universal" ? UNIVERSAL_REDIRECT_PATH : LEGACY_REDIRECT_PATH);
 }
+
+/** The callback this tenant signs in through — driven by tenant config
+ *  (stamped into the manifest by the setup wizard), defaulting to legacy so
+ *  existing deployments are unaffected until their manifest is regenerated. */
+export function activeCallbackMode(): CallbackMode {
+  return getConfig()?.callbackMode === "universal" ? "universal" : "legacy";
+}
+
 
 /** Wrap the third-party authorize URL in our same-origin start page. */
 export function wrapAuthorizeUrl(authorizeUrl: string): string {

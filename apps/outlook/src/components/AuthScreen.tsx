@@ -17,6 +17,8 @@ import {
   redirectUri,
   wrapAuthorizeUrl,
   AuthDialogError,
+  activeCallbackMode,
+  OUTLOOK_STATE_PREFIX,
 } from "../lib/office-dialog";
 
 const useStyles = makeStyles({
@@ -109,9 +111,13 @@ export function AuthScreen({ onAuthenticated, onReconfigure }: Props) {
     setError(undefined);
     setBusy(true);
     try {
+      // Callback endpoint is tenant-level (stamped into the manifest by the
+      // setup wizard), not a per-user choice.
+      const mode = activeCallbackMode();
       await signIn(officeDialogOpener, {
-        redirectUri: redirectUri(),
+        redirectUri: redirectUri(mode),
         wrapAuthorizeUrl,
+        statePrefix: mode === "universal" ? OUTLOOK_STATE_PREFIX : undefined,
       });
       onAuthenticated();
     } catch (e) {
