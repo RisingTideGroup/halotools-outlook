@@ -37,6 +37,8 @@ export function registerRunSql(server: McpServer): void {
         "Returns the raw report response. For a single SQL string, returns one result. For an array, returns an array of results in the same order — one HTTP round-trip server-side.",
         "This is the highest-leverage tool in the kit — most analytical questions across an MSP's data are best answered by writing a query rather than paginating through REST endpoints.",
         "",
+        "EXPLORE FIRST: before writing a report against tables/columns you're not certain of, call exploreSchema to learn the database — find the table (action 'tables'), inspect its columns (action 'columns'), and look at real sample rows (action 'sample'). Halo's schema is huge and the naming is unintuitive (FAULT = ticket, ACTION = note); guessing a column name wastes a query and produces wrong numbers. Understand the structure, THEN spend the effort writing the report here. Also check listReports for an existing saved report first.",
+        "",
         "WHEN TO BATCH:",
         "Pass an array of SQL strings (max 10) when you need several uncorrelated datasets that a single JOIN can't express — e.g. \"MRR rollup AND top 10 overdue invoices AND licence expiry list\" for a dashboard answer. Halo runs them in parallel and returns the bundle in one round-trip. For correlated data that a JOIN handles, use a single query.",
         "",

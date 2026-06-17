@@ -1422,6 +1422,122 @@ export async function listReports(): Promise<unknown[]> {
   return [];
 }
 
+// ---------- Report Center: schema discovery ----------
+//
+// `exploreSchema` is the "learn the database before you query it" tool. Halo's
+// schema is huge and uses 25-year-old NetHelpDesk naming, so the right flow is
+// to discover tables → inspect a table's columns → look at real sample rows,
+// THEN write the report query. All three actions run through Report Center (the
+// same SELECT path as runSql) with the ORDER-BY-needs-OFFSET gotcha handled and
+// the table identifier validated.
+
+/** Bare SQL identifier (table name) — letters, digits, underscore. Guards the
+ *  one place we interpolate a name into a FROM/WHERE clause. */
+const SQL_IDENTIFIER_RE = /^[A-Za-z0-9_]+$/;
+
+export interface SchemaExploreResult {
+  action: string;
+  /** The exact SQL run — surfaced so the caller learns the idioms. */
+  sql: string;
+  rowCount: number;
+  rows: Record<string, unknown>[];
+  note: string;
+}
+
+/**
+ * Schema discovery for Halo's database. Three actions:
+ *  - "tables":  list base-table names (optionally filtered by a name substring).
+ *  - "columns": list one table's columns + types (pass `table`), OR search
+ *               column names across every table (pass `filter`).
+ *  - "sample":  `select top N *` from a table (optionally with a `where`), to
+ *               see real values and reverse-engineer which column holds what.
+ */
+export async function exploreSchema(opts: {
+  action: "tables" | "columns" | "sample";
+  table?: string;
+  filter?: string;
+  where?: string;
+  limit?: number;
+}): Promise<SchemaExploreResult> {
+  const { action } = opts;
+  const table = opts.table?.trim();
+  const filter = opts.filter?.trim();
+  const where = opts.where?.trim();
+  const lit = (s: string) => s.replace(/'/g, "''");
+
+  if (table && !SQL_IDENTIFIER_RE.test(table)) {
+    throw new HaloApiError(
+      400,
+      `Invalid table name '${table}' — letters, digits and underscore only.`,
+    );
+  }
+
+  if (action === "tables") {
+    const cap = Math.max(1, Math.min(2000, Math.trunc(opts.limit ?? 500)));
+    const like = filter ? ` and TABLE_NAME like '%${lit(filter)}%'` : "";
+    const sql = `select TABLE_NAME from INFORMATION_SCHEMA.TABLES where TABLE_TYPE = 'BASE TABLE'${like} order by TABLE_NAME offset 0 rows fetch next ${cap} rows only`;
+    const rows = await reportRows(sql);
+    return {
+      action,
+      sql,
+      rowCount: rows.length,
+      rows,
+      note: filter
+        ? `Base tables whose name contains '${filter}'. Halo idioms: tickets/projects/opportunities all live in FAULTS; notes/time/emails in ACTIONS; clients in AREA; sites in SITE; contacts in USERS; agents in UNAME; assets in DEVICE.`
+        : `First ${cap} base tables (names only). Narrow with a 'filter' substring — Guideline 7, always filter first. Tickets = FAULTS, notes/time/emails = ACTIONS, assets = DEVICE.`,
+    };
+  }
+
+  if (action === "columns") {
+    if (!table && !filter) {
+      throw new HaloApiError(
+        400,
+        "exploreSchema columns needs either 'table' (list that table's columns) or 'filter' (search column names across all tables).",
+      );
+    }
+    if (table) {
+      const sql = `select COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH as max_len, IS_NULLABLE as nullable from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = '${lit(table)}' order by ORDINAL_POSITION offset 0 rows`;
+      const rows = await reportRows(sql);
+      return {
+        action,
+        sql,
+        rowCount: rows.length,
+        rows,
+        note: `Columns of ${table}. Guideline 3: a column's prefix marks its origin table (e.g. SArea on SITE → AREA; USite on USERS → SITE; QHID → quotation header). Guideline 4: a primary key reused elsewhere (faultid, aarea, DID, UID…) is your join key. Use action 'sample' to see real values.`,
+      };
+    }
+    const cap = Math.max(1, Math.min(2000, Math.trunc(opts.limit ?? 300)));
+    const sql = `select TABLE_NAME, COLUMN_NAME, DATA_TYPE from INFORMATION_SCHEMA.COLUMNS where COLUMN_NAME like '%${lit(filter!)}%' order by TABLE_NAME, COLUMN_NAME offset 0 rows fetch next ${cap} rows only`;
+    const rows = await reportRows(sql);
+    return {
+      action,
+      sql,
+      rowCount: rows.length,
+      rows,
+      note: `Columns across all tables whose NAME contains '${filter}' — the agent equivalent of Halo's "Database Tables & Columns" schema report (Guideline 7). To find a column by its VALUE instead (Guideline 8), use action 'sample' with a 'where' that pins a row you recognise.`,
+    };
+  }
+
+  if (action === "sample") {
+    if (!table) {
+      throw new HaloApiError(400, "exploreSchema sample needs a 'table'.");
+    }
+    const top = Math.max(1, Math.min(25, Math.trunc(opts.limit ?? 5)));
+    const whereSql = where ? ` where ${where}` : "";
+    const sql = `select top ${top} * from ${table}${whereSql}`;
+    const rows = await reportRows(sql);
+    return {
+      action,
+      sql,
+      rowCount: rows.length,
+      rows,
+      note: `Top ${top} row(s) of ${table}${where ? ` where ${where}` : ""}. Guideline 8: if you know a real-world value (asset tag, email, ticket subject) put it in 'where' to pull that row, then read across the columns to find which one stores it (e.g. an asset's tag turned out to live in DEVICE.INVNO).`,
+    };
+  }
+
+  throw new HaloApiError(400, `Unknown exploreSchema action '${String(action)}'.`);
+}
+
 // ---------- Service-delivery KPIs (SQL-backed) ----------
 //
 // These compose Halo's Report Center (runReportSql) into canonical MSP

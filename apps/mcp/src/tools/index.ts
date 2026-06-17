@@ -10,6 +10,7 @@ import { registerSearchCannedText } from "./searchCannedText.js";
 import { registerGetActivityFeed } from "./getActivityFeed.js";
 
 import { registerHaloApiRaw } from "./haloApiRaw.js";
+import { registerExploreSchema } from "./exploreSchema.js";
 import { registerRunSql } from "./runSql.js";
 import { registerListReports } from "./listReports.js";
 import { registerListRecurringInvoices } from "./listRecurringInvoices.js";
@@ -101,6 +102,7 @@ const TOOL_REGISTRY: Array<{ name: string; register: (s: McpServer) => void }> =
 
   // Database access + REST escape hatch
   { name: "listReports", register: registerListReports },
+  { name: "exploreSchema", register: registerExploreSchema },
   { name: "runSql", register: registerRunSql },
   { name: "haloApiRaw", register: registerHaloApiRaw },
 ];
@@ -177,6 +179,7 @@ const TOOL_METADATA: Record<string, ToolMetadata> = {
 
   // Database + escape hatch
   listReports: { title: "Database: List saved reports", readOnly: true },
+  exploreSchema: { title: "Database: Explore schema (start here)", readOnly: true },
   runSql: { title: "Database: Run SQL SELECT", readOnly: true },
   haloApiRaw: { title: "API: Raw Halo REST call (read or write)", readOnly: false },
 };
