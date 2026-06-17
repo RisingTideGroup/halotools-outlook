@@ -1238,10 +1238,12 @@ export async function getRevenuePerTechSnapshot(): Promise<{
   };
 }
 
-/** Active managed user seats: external users excluding service accounts and the
- *  per-client "General User" placeholder (named per settings; ~1 per client). */
+/** Active managed user seats = billable users: external users that are active
+ *  (uinactive=0), not service accounts (uisserviceaccount=0), not flagged out of
+ *  automated billing (uignoreautomatedbilling=0), excluding the per-client
+ *  "General User" placeholder (named per settings; ~1 per client). */
 const USER_SEAT_FILTER =
-  "coalesce(u.uinactive,0)=0 and coalesce(u.uisserviceaccount,0)=0 and u.uusername not like 'General%'";
+  "coalesce(u.uinactive,0)=0 and coalesce(u.uisserviceaccount,0)=0 and coalesce(u.uignoreautomatedbilling,0)=0 and u.uusername not like 'General%'";
 
 async function countUserSeats(): Promise<number> {
   const rows = await reportRows(`select count(*) as n from USERS u where ${USER_SEAT_FILTER}`);
@@ -1508,11 +1510,27 @@ function exclusiveEnd(end: string): string {
 const NOT_STUB =
   "(f.datecleared > f.dateoccured or f.datecleared is null or f.datecleared < '1900-01-01')";
 
+/** FAULTS "live ticket" predicate — the standard exclusion that must guard
+ *  EVERY query reading FAULTS: not soft-deleted AND not merged into another
+ *  ticket (Halo's `fdeleted = fmergedintofaultid` idiom; merged tickets carry
+ *  the target id in both columns). `alias` is the FAULTS table alias (e.g.
+ *  "f", "fa", "fb", "o"). */
+function liveFault(alias: string): string {
+  return `coalesce(${alias}.fdeleted,0) = coalesce(${alias}.fmergedintofaultid,0)`;
+}
+
+/** AGENT (UNAME) "real agent" predicate — the standard exclusion for staff
+ *  rollups: drop API/bot agents and the Unassigned pseudo-agent (unum=1).
+ *  `alias` is the UNAME table alias (e.g. "u"). */
+function realAgentFilter(alias: string): string {
+  return `coalesce(${alias}.uisapiagent,0) = 0 and ${alias}.unum <> 1`;
+}
+
 /** SQL fragments shared by the windowed service-delivery queries. */
 function deliverySql(start: string, end: string, scope: TicketScope, clientId?: number) {
   const ex = exclusiveEnd(end);
   const filters = [
-    "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)",
+    liveFault("f"),
     NOT_STUB,
     // Reactive = standard ITIL Incident (1) + Service Request (3) on the ticket
     // itself (FAULTS.RequestType). For a professional-services shop this is a
@@ -1630,7 +1648,7 @@ left join (
   where ActionDateCreated >= '${start}' and ActionDateCreated < '${ex}'
   group by whoagentid
 ) act on act.whoagentid = f.clearwhoint
-where ${s.filters} and (${s.clearedIn})
+where ${s.filters} and ${realAgentFilter("u")} and (${s.clearedIn})
 group by u.unum, u.uname
 order by count(*) desc`;
 
@@ -1719,7 +1737,7 @@ export async function getTicketBacklog(
 ): Promise<TicketBacklog> {
   const join = "";
   const filters = [
-    "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)",
+    liveFault("f"),
     "(f.datecleared is null or f.datecleared < '1900-01-01')",
     scope === "reactive" ? "f.RequestType in (1,3)" : "",
     clientId != null ? `f.areaint = ${Math.trunc(clientId)}` : "",
@@ -1805,7 +1823,7 @@ export async function getCategoryInsights(
   const ex = exclusiveEnd(end);
   const join = "";
   const reactive = scope === "reactive" ? "and f.RequestType in (1,3)" : "";
-  const base = `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0) and ${NOT_STUB} ${reactive} and f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`;
+  const base = `${liveFault("f")} and ${NOT_STUB} ${reactive} and f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`;
   const cat = `coalesce(nullif(ltrim(rtrim(f.category2)), ''), '(uncategorised)')`;
 
   const summarySql = `select
@@ -1873,8 +1891,8 @@ export async function getTechnicianRiskSignals(
   const ex = exclusiveEnd(end);
   const join = "";
   const reactive = scope === "reactive" ? "and f.RequestType in (1,3)" : "";
-  const notDeleted = "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)";
-  const realAgent = "coalesce(u.uisapiagent,0) = 0";
+  const notDeleted = liveFault("f");
+  const realAgent = realAgentFilter("u");
   const top = Math.max(1, Math.trunc(limit));
 
   // Closed-by-tech cohort: throughput + zero-time closes + SLA breach + CSAT.
@@ -1903,7 +1921,7 @@ order by count(*) desc`;
 from faults f
 join uname u on f.assignedtoint = u.unum
 ${join}
-where ${notDeleted} ${reactive} and ${realAgent} and u.unum <> 1 and (f.datecleared is null or f.datecleared < '1900-01-01')
+where ${notDeleted} ${reactive} and ${realAgent} and (f.datecleared is null or f.datecleared < '1900-01-01')
 group by u.unum, u.uname
 order by count(*) desc`;
 
@@ -2117,6 +2135,7 @@ export async function getRecurringProblemClusters(
   // score gate, both endpoints reactive + NOT_STUB + non-noise + in-window.
   const edgeWhere =
     `${vectorMethodFilter("v.fvsSearchMethod", searchMethod)} and v.FVSuse = 0 and v.FVSScore >= ${ms}` +
+    ` and ${liveFault("fa")} and ${liveFault("fb")}` +
     ` and fa.RequestType in (1,3) and fb.RequestType in (1,3)` +
     ` and (fa.datecleared > fa.dateoccured or fa.datecleared is null or fa.datecleared < '1900-01-01')` +
     ` and (fb.datecleared > fb.dateoccured or fb.datecleared is null or fb.datecleared < '1900-01-01')` +
@@ -2195,7 +2214,8 @@ export async function getDuplicateTickets(
   const ms = Number.isFinite(minScore) ? minScore : 0.9;
   const rtJoin = "";
   const reactive = scope === "reactive" ? "and o.RequestType in (1,3)" : "";
-  const edgeWhere = `${vectorMethodFilter("v.fvsSearchMethod", searchMethod)} and v.FVSuse = 0 and v.FVSScore >= ${ms}`;
+  // edgeWhere guards both union subqueries (each joins the matched ticket as fm).
+  const edgeWhere = `${vectorMethodFilter("v.fvsSearchMethod", searchMethod)} and v.FVSuse = 0 and v.FVSScore >= ${ms} and ${liveFault("fm")}`;
 
   const sql = `select top ${top}
   o.faultid as open_ticket_id,
@@ -2226,7 +2246,7 @@ join (
     where ${edgeWhere}
   ) edges
 ) m on m.open_id = o.faultid and m.rn = 1
-where o.status not in (8,9) ${reactive} and ${noiseFilter("o")}
+where ${liveFault("o")} and o.status not in (8,9) ${reactive} and ${noiseFilter("o")}
 order by m.score desc`;
 
   const rows = await reportRows(sql);
@@ -2286,6 +2306,7 @@ from (
       join faults fa on fa.faultid = v.FVSfaultid join requesttype rta on fa.RequestTypeNew = rta.RTid
       join faults fb on fb.faultid = v.FVSSimiliarfaultid join requesttype rtb on fb.RequestTypeNew = rtb.RTid
       where ${vectorMethodFilter("v.fvsSearchMethod", searchMethod)} and v.FVSuse = 0 and v.FVSScore >= ${ms} and v.FVSfaultid < v.FVSSimiliarfaultid
+        and ${liveFault("fa")} and ${liveFault("fb")}
         and fa.areaint = fb.areaint
         and fa.RequestType in (1,3) and fb.RequestType in (1,3)
         and fa.dateoccured >= '${start}' and fa.dateoccured < '${ex}'
@@ -2352,7 +2373,7 @@ from (
 ) n
 join faults f on f.faultid = n.faultid
 left join uname u on f.clearwhoint = u.unum
-where f.status in (8,9) and f.datecleared > f.dateoccured
+where ${liveFault("f")} and f.status in (8,9) and f.datecleared > f.dateoccured
 order by n.score desc`;
 
   const rows = await reportRows(sql);
@@ -2428,7 +2449,7 @@ export async function getKnowledgeGaps(
   const th = Number.isFinite(matchThreshold) ? matchThreshold : 0.8;
   const top = Math.max(1, Math.trunc(limit));
   const base =
-    `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)` +
+    `${liveFault("f")}` +
     ` and f.RequestType in (1,3)` +
     ` and (f.datecleared > f.dateoccured or f.datecleared is null or f.datecleared < '1900-01-01')` +
     ` and f.dateoccured >= '${start}' and f.dateoccured < '${ex}' and ${noiseFilter("f")}`;
@@ -2536,7 +2557,7 @@ export async function getTicketsToCategorize(opts: {
   const join = scope === "reactive" ? "join requesttype rt on f.requesttypenew = rt.RTid" : "";
 
   const where: string[] = [
-    "coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)",
+    liveFault("f"),
     NOT_STUB,
   ];
   if (scope === "reactive") where.push("f.RequestType in (1,3)");
@@ -2691,7 +2712,7 @@ export async function getNoiseTicketAnalysis(
   const ex = exclusiveEnd(end);
   const sym = "cast(f.Symptom as nvarchar(400))";
   const base =
-    `coalesce(f.fdeleted,0) = coalesce(f.fmergedintofaultid,0)` +
+    `${liveFault("f")}` +
     ` and f.RequestType in (1,3)` +
     ` and f.dateoccured >= '${start}' and f.dateoccured < '${ex}'`;
   const isNoise =
@@ -2850,7 +2871,7 @@ left join (
   group by ac.AProjectID
 ) act on act.AProjectID = p.faultid
 where rt.RTIsProject = 1 and ${PROJECT_MAIN}
-  and coalesce(p.fdeleted,0) = coalesce(p.fmergedintofaultid,0)
+  and ${liveFault("p")}
   and p.FProjectTimeActual > ${mh}
 order by p.FProjectTimeActual desc`;
 
@@ -2969,11 +2990,11 @@ left join (
   select c.fmainprojectid as pid,
     count(*) as child_total,
     sum(case when c.status in (8,9) then 1 else 0 end) as child_closed
-  from faults c where c.fmainprojectid > 0 and c.faultid <> c.fmainprojectid
+  from faults c where c.fmainprojectid > 0 and c.faultid <> c.fmainprojectid and ${liveFault("c")}
   group by c.fmainprojectid
 ) ch on ch.pid = p.faultid
 where rt.RTIsProject = 1 and ${PROJECT_MAIN}
-  and coalesce(p.fdeleted,0) = coalesce(p.fmergedintofaultid,0) ${statusFilter}
+  and ${liveFault("p")} ${statusFilter}
 order by coalesce(ch.child_total, 0) desc`;
 
   const rows = await reportRows(sql);
@@ -3027,7 +3048,7 @@ export async function getResourceForecast(
 from APPOINTMENT ap
 join uname u on u.unum = ap.APunum
 where coalesce(ap.APdeleted,0) = 0 and coalesce(ap.APAllDayEvent,0) = 0
-  and coalesce(u.uisapiagent,0) = 0 and u.unum <> 1
+  and ${realAgentFilter("u")}
   and ap.APStartDate >= '${start}' and ap.APStartDate < '${end}'
 group by u.unum, u.uname
 order by sum(case when ap.APFaultid > 0 then datediff(minute, ap.APStartDate, ap.APEndDate) / 60.0 else 0 end) desc
@@ -3112,7 +3133,7 @@ left join (select APunum,
   from APPOINTMENT where coalesce(APdeleted,0)=0 and coalesce(APAllDayEvent,0)=0 and APStartDate >= '${start}' and APStartDate < '${ex}' group by APunum) ap on ap.APunum = u.unum
 left join (select ac.whoagentid, sum(ac.timetaken) as worked, sum(coalesce(ac.actionchargehours,0) + coalesce(ac.actionnonchargehours,0) + coalesce(ac.actionprepayhours,0)) as billable from actions ac where coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) >= '${start}' and coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) < '${ex}' group by ac.whoagentid) wk on wk.whoagentid = u.unum
 left join (select HTechnicianID, sum(Hduration) as leave_hrs from HOLIDAYS where Hdate >= '${start}' and Hdate < '${ex}' group by HTechnicianID) h on h.HTechnicianID = u.unum
-where coalesce(u.uisapiagent,0) = 0 and u.unum <> 1 and (coalesce(ap.booked,0) > 0 or coalesce(wk.worked,0) > 0)
+where ${realAgentFilter("u")} and (coalesce(ap.booked,0) > 0 or coalesce(wk.worked,0) > 0)
 order by coalesce(wk.worked,0) desc
 offset 0 rows`;
 
