@@ -31,7 +31,7 @@ export function registerHaloApiRaw(server: McpServer): void {
   server.registerTool(
     "haloApiRaw",
     {
-      title: "API: Raw HaloPSA REST call (writes / escape hatch)",
+      title: "Call a HaloPSA REST endpoint directly (writes / escape hatch)",
       description:
         "Escape-hatch passthrough to any HaloPSA REST endpoint, using the user's current OAuth token. This is the WRITE path — use it for POST/PUT/PATCH/DELETE, and for any one-off no typed tool covers. For READ-ONLY GETs prefer haloApiGet (it can't write, so it's safe to use freely and a restrictive policy can allow it while blocking this tool). Prefer the typed tools (findContact, searchTickets, createTicket, appendActionToTicket, getMspKpis, etc.) where they exist; they parse Halo's response variants for you. Returns the raw parsed JSON response. Defaults to GET if no method is given.",
       inputSchema,

@@ -22,7 +22,7 @@ export function registerGetRecurringContractProfitability(server: McpServer): vo
   server.registerTool(
     "getRecurringContractProfitability",
     {
-      title: "Financial: Recurring contract profitability",
+      title: "Get HaloPSA recurring-contract profitability",
       description:
         "Are we profitable on our managed-services agreements? Compares monthly recurring revenue against the support effort delivered for it, at one of two grains (groupBy): per CLIENT (default — whole-client margin) or per CONTRACT (revenue tied to each contract via the generated recurring invoice line, INVOICEDETAIL.IDCHID; labour via ACTIONS.AContractId). Returns recurringRevenueMonthly (trailing-12-month recurring net ÷ 12), supportHoursMonthly, billable share, the techs who logged the time (topTechs, with hours + best-effort cost), and a margin where agent-cost data allows. At contract grain, unattributedRevenueMonthly holds recurring revenue on lines with no contract so the rows reconcile to total MRR. " +
         "LEAD WITH revenuePerSupportHour (recurring revenue ÷ support hours) — it's the reliable margin proxy and needs no cost data: low = lots of support delivered per dollar of fee (margin risk / over-serviced), high = light-touch. " +
