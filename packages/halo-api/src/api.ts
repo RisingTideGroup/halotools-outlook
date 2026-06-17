@@ -2982,15 +2982,6 @@ const PROJECT_MAIN = "(p.fmainprojectid is null or p.fmainprojectid = 0 or p.fma
 const AGENT_HOURLY_COST =
   "coalesce(uct.uctCost, coalesce(try_convert(float, nullif(cast(u.ucostPrice as nvarchar(40)), '')), 0))";
 
-/** Agent hourly cost, normalised for the annual-salary trap. Halo's cost field
- *  accepts either an hourly rate OR an annual salary and doesn't flag which, so
- *  tenants mix them (one agent at 95004/yr next to others at 48–145/hr). Values
- *  above a sane hourly ceiling (1000) are treated as an annual salary and
- *  divided by 2080 (40h × 52w FTE hours/year); plausible hourly values pass
- *  through untouched. Needs the `u` (UNAME) + `uct` (UnameCostTracking) aliases. */
-const AGENT_HOURLY_COST_NORM =
-  `(case when (${AGENT_HOURLY_COST}) > 1000 then (${AGENT_HOURLY_COST}) / 2080.0 else (${AGENT_HOURLY_COST}) end)`;
-
 /**
  * Per-project profitability with auto-detected billing model. For each main
  * project (default trailing — actually all active with hours), picks the revenue
@@ -3399,10 +3390,12 @@ offset 0 rows`;
  *    reported once as unattributedRevenueMonthly so the rows reconcile to MRR.
  *
  * revenuePerSupportHour (= revenue ÷ support hours) is the reliable margin proxy
- * and needs no cost data. Labour cost uses the normalised agent rate but is
- * PARTIAL — most tenants cost only a few agents — so grossMargin is returned
- * only when costCoveragePct is high enough to trust (marginReliable); otherwise
- * lead with revenuePerSupportHour.
+ * and needs no cost data. Labour cost uses the agent's stored rate
+ * (UnameCostTracking, else UNAME.ucostPrice) and is PARTIAL — most tenants cost
+ * only a few agents — so grossMargin is returned only when costCoveragePct is
+ * high enough to trust (marginReliable); otherwise lead with revenuePerSupportHour.
+ * The rate is assumed HOURLY; a tenant that stored annual salaries there will
+ * read inflated — inspect the values with exploreSchema if margins look off.
  */
 export async function getRecurringContractProfitability(
   limit = 50,
@@ -3413,7 +3406,7 @@ export async function getRecurringContractProfitability(
   const recur =
     "ih.IHid > 0 and coalesce(ih.IHrecurringInvoiceId,0) <> 0 and ih.IHInvoice_Date >= dateadd(month,-12,getdate())";
   const workDate = "coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated)";
-  const cost = AGENT_HOURLY_COST_NORM;
+  const cost = AGENT_HOURLY_COST;
   const labWhere = `ac.timetaken > 0 and ${realAgentFilter("u")} and ${workDate} >= dateadd(month,-${months},getdate())`;
   // Shared per-agent labour aggregate columns (need the `ac`/`u`/`uct` aliases).
   const labCols =
@@ -3587,7 +3580,7 @@ where ${recur} and coalesce(idt.IDCHID,0) = 0`;
       (byContract
         ? "Per-CONTRACT recurring profitability. Revenue is tied to each contract via the generated recurring invoice LINE (INVOICEDETAIL.IDCHID → CONTRACTHEADER.CHid); labour is time logged against that contract (ACTIONS.AContractId). unattributedRevenueMonthly is recurring revenue on lines with no contract id (so rows reconcile to total MRR). "
         : "Per-CLIENT recurring profitability (whole-client view; call with groupBy='contract' for the per-contract breakdown). Revenue is the client's recurring-invoice net; support effort is ALL time logged on the client's tickets; activeContracts is context. ") +
-      "recurringRevenueMonthly = trailing-12-month recurring net ÷ 12. revenuePerSupportHour (recurring revenue ÷ support hours) is the RELIABLE margin proxy — low = lots of support per dollar of fee (margin risk), high = light-touch; no agent-cost data needed. labourCostMonthly uses a normalised agent rate (annual salaries ÷ 2080) but is PARTIAL: most agents have no cost on file (see costCoveragePct), so grossMargin is only populated when marginReliable (cost coverage ≥ 80%) — otherwise lead with revenuePerSupportHour. topTechs = who logged the most time. Flags: negative-margin / thin-margin (reliable only), low-cost-coverage, low-revenue-per-hour (<75/hr heuristic), no-support-logged. Amounts in the home currency (see currency).",
+      "recurringRevenueMonthly = trailing-12-month recurring net ÷ 12. revenuePerSupportHour (recurring revenue ÷ support hours) is the RELIABLE margin proxy — low = lots of support per dollar of fee (margin risk), high = light-touch; no agent-cost data needed. labourCostMonthly uses the agent's stored rate (UnameCostTracking, else UNAME.ucostPrice) but is PARTIAL: most agents have no cost on file (see costCoveragePct), so grossMargin is only populated when marginReliable (cost coverage ≥ 80%) — otherwise lead with revenuePerSupportHour. The rate is assumed HOURLY; if a tenant stored annual salaries there the cost reads inflated — check the values with exploreSchema. topTechs = who logged the most time. Flags: negative-margin / thin-margin (reliable only), low-cost-coverage, low-revenue-per-hour (<75/hr heuristic), no-support-logged. Amounts in the home currency (see currency).",
     rows: resultRows,
   };
 }
