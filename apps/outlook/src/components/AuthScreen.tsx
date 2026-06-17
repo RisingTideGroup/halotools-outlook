@@ -17,12 +17,9 @@ import {
   redirectUri,
   wrapAuthorizeUrl,
   AuthDialogError,
-  type CallbackMode,
+  activeCallbackMode,
   OUTLOOK_STATE_PREFIX,
-  UNIVERSAL_CALLBACK_URL,
-  getLastCallbackUsed,
 } from "../lib/office-dialog";
-import { getDefaults, setDefaults } from "../lib/defaults";
 
 const useStyles = makeStyles({
   root: {
@@ -109,53 +106,24 @@ export function AuthScreen({ onAuthenticated, onReconfigure }: Props) {
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const cfg = getConfig();
-  const mode: CallbackMode = getDefaults().authCallbackMode ?? "legacy";
-
-  // One sign-in attempt against a given callback endpoint. On a successful
-  // universal round-trip we persist the migration so future sign-ins use it.
-  const runSignIn = async (useMode: CallbackMode) => {
-    await signIn(officeDialogOpener, {
-      redirectUri: redirectUri(useMode),
-      wrapAuthorizeUrl,
-      statePrefix: useMode === "universal" ? OUTLOOK_STATE_PREFIX : undefined,
-    });
-    if (useMode === "universal" && getLastCallbackUsed() === "universal") {
-      await setDefaults({ ...getDefaults(), authCallbackMode: "universal" });
-    }
-  };
 
   const handleSignIn = async () => {
     setError(undefined);
     setBusy(true);
     try {
-      await runSignIn(mode);
+      // Callback endpoint is tenant-level (stamped into the manifest by the
+      // setup wizard), not a per-user choice.
+      const mode = activeCallbackMode();
+      await signIn(officeDialogOpener, {
+        redirectUri: redirectUri(mode),
+        wrapAuthorizeUrl,
+        statePrefix: mode === "universal" ? OUTLOOK_STATE_PREFIX : undefined,
+      });
       onAuthenticated();
     } catch (e) {
       const err = e as Error;
       setError({
         message: err.message,
-        details: err instanceof AuthDialogError ? err : undefined,
-      });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // Opt-in migration: try the shared /auth/callback. Succeeds only if the admin
-  // has already added that redirect URI to their Halo Connect app; otherwise we
-  // surface a "register it first" message and stay on the legacy callback.
-  const handleMigrate = async () => {
-    setError(undefined);
-    setBusy(true);
-    try {
-      await runSignIn("universal");
-      onAuthenticated();
-    } catch (e) {
-      const err = e as Error;
-      setError({
-        message:
-          `Couldn't sign in via the new URL. Add ${UNIVERSAL_CALLBACK_URL} to your ` +
-          `Halo Connect app's redirect URIs, then try again. (${err.message})`,
         details: err instanceof AuthDialogError ? err : undefined,
       });
     } finally {
@@ -248,39 +216,6 @@ export function AuthScreen({ onAuthenticated, onReconfigure }: Props) {
               </ul>
             </div>
           )}
-        </div>
-      )}
-
-      {mode === "legacy" && (
-        <div className={styles.troubleshootBox}>
-          <Text className={styles.troubleshootHeading}>
-            New: single sign-in URL
-          </Text>
-          <Text style={{ fontSize: tokens.fontSizeBase200 }}>
-            We're moving to one shared sign-in callback for all HaloPSA tools.
-            Add this redirect URI to your Halo Connect app, then switch — the
-            current sign-in keeps working until you do.
-          </Text>
-          <div className={styles.authUrlRow}>
-            <span className={styles.authUrlText} title={UNIVERSAL_CALLBACK_URL}>
-              {UNIVERSAL_CALLBACK_URL}
-            </span>
-            <Button
-              appearance="subtle"
-              size="small"
-              icon={<Copy24Regular />}
-              aria-label="Copy URL"
-              onClick={() => handleCopyUrl(UNIVERSAL_CALLBACK_URL)}
-            />
-          </div>
-          {copied && (
-            <Text style={{ fontSize: tokens.fontSizeBase100, color: tokens.colorPaletteGreenForeground1 }}>
-              Copied to clipboard
-            </Text>
-          )}
-          <Button appearance="secondary" onClick={handleMigrate} disabled={busy}>
-            {busy ? "Opening sign-in…" : "Switch to the new sign-in URL"}
-          </Button>
         </div>
       )}
 

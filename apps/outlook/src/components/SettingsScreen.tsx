@@ -11,14 +11,10 @@ import {
   Switch,
   Divider,
   Spinner,
-  MessageBar,
-  MessageBarBody,
-  MessageBarTitle,
 } from "@fluentui/react-components";
 import { ArrowLeft24Regular } from "@fluentui/react-icons";
 import { getConfig } from "@iusehalo/halo-api";
 import { getDefaults, setDefaults } from "../lib/defaults";
-import { UNIVERSAL_CALLBACK_URL } from "../lib/office-dialog";
 import {
   listTicketTypes,
   ticketTypesForAgentCreate,
@@ -117,7 +113,6 @@ interface Props {
 export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
   const styles = useStyles();
   const cfg = getConfig();
-  const callbackMode = getDefaults().authCallbackMode ?? "legacy";
   const initialDefaults = getDefaults();
   const [ticketTypes, setTicketTypes] = useState<HaloTicketType[]>([]);
   const [defaultTypeId, setDefaultTypeId] = useState<number | undefined>(
@@ -227,18 +222,6 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
             Client ID: {cfg?.clientId}
           </Text>
         </div>
-
-        {callbackMode === "legacy" && (
-          <MessageBar intent="info">
-            <MessageBarBody>
-              <MessageBarTitle>New single sign-in URL</MessageBarTitle>
-              We're moving to one shared sign-in callback for all HaloPSA tools.
-              Add <strong>{UNIVERSAL_CALLBACK_URL}</strong> to your Halo Connect
-              app's redirect URIs now; the next time you sign in you can switch
-              to it. Your current sign-in keeps working until then.
-            </MessageBarBody>
-          </MessageBar>
-        )}
 
         <Divider />
 

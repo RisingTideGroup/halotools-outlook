@@ -125,6 +125,10 @@ export function buildManifest(template: Manifest, input: TenantInput): Manifest 
     halo: input.haloBaseUrl,
     clientId: input.clientId,
     mv: cloned.version,
+    // Tenant-level OAuth callback selector. New/regenerated manifests use the
+    // shared /auth/callback; the SPA reads this and self-configures. Existing
+    // deployments (no param) stay on the legacy per-app callback until re-upload.
+    callback: "universal",
   }).toString();
 
   const validDomains = new Set(cloned.validDomains ?? []);

@@ -8,7 +8,7 @@
 // subdomain, not a different domain even if listed in validDomains/AppDomains. The
 // wrapper page at /outlook/auth/start.html bounces to the third-party authorize URL.
 
-import type { DialogOpener, DialogResultMessage } from "@iusehalo/halo-api";
+import { getConfig, type DialogOpener, type DialogResultMessage } from "@iusehalo/halo-api";
 
 // Two callback endpoints during the migration:
 //  - "legacy":    the per-app static page (what every tenant has registered today)
@@ -24,21 +24,17 @@ export type CallbackMode = "legacy" | "universal";
 /** state prefix the shared callback uses to route the Outlook flow. */
 export const OUTLOOK_STATE_PREFIX = "outlook:";
 
-/** The shared callback URL admins must register before they can migrate. */
-export const UNIVERSAL_CALLBACK_URL = ADDIN_ORIGIN + UNIVERSAL_REDIRECT_PATH;
-export const LEGACY_CALLBACK_URL = ADDIN_ORIGIN + LEGACY_REDIRECT_PATH;
-
 export function redirectUri(mode: CallbackMode = "legacy"): string {
   return ADDIN_ORIGIN + (mode === "universal" ? UNIVERSAL_REDIRECT_PATH : LEGACY_REDIRECT_PATH);
 }
 
-// Which callback endpoint actually served the most recent sign-in, read from
-// the page's self-identifying stamp. Lets the UI confirm a migration really
-// round-tripped through the shared endpoint.
-let lastCallbackUsed: CallbackMode | undefined;
-export function getLastCallbackUsed(): CallbackMode | undefined {
-  return lastCallbackUsed;
+/** The callback this tenant signs in through — driven by tenant config
+ *  (stamped into the manifest by the setup wizard), defaulting to legacy so
+ *  existing deployments are unaffected until their manifest is regenerated. */
+export function activeCallbackMode(): CallbackMode {
+  return getConfig()?.callbackMode === "universal" ? "universal" : "legacy";
 }
+
 
 /** Wrap the third-party authorize URL in our same-origin start page. */
 export function wrapAuthorizeUrl(authorizeUrl: string): string {
@@ -137,9 +133,6 @@ export const officeDialogOpener: DialogOpener = {
               const data: DialogResultMessage = JSON.parse(
                 (arg as { message: string }).message,
               );
-              if (data.callback === "legacy" || data.callback === "universal") {
-                lastCallbackUsed = data.callback;
-              }
               resolve(data);
             } catch (e) {
               reject(new Error(`Bad message from auth dialog: ${(e as Error).message}`));

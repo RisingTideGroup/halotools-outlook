@@ -13,6 +13,13 @@ export interface TenantConfig {
   clientId: string;
   /** Optional scope override; defaults to "all" for v1 simplicity */
   scope?: string;
+  /**
+   * Which OAuth callback this tenant signs in through, stamped into the
+   * manifest's runtime URL by the setup wizard. "universal" = the shared
+   * /auth/callback; absent/"legacy" = the per-app /outlook/auth/callback.html.
+   * Tenant-level (same for everyone on a given manifest), not a user choice.
+   */
+  callbackMode?: "legacy" | "universal";
 }
 
 export interface StoredTokens {
@@ -92,19 +99,33 @@ function notifyAuthCleared(): void {
 // the runtime page URL so the user never sees the in-app config screen.
 // Honored only when no config is stored yet — never overwrites existing setup.
 export async function applyUrlParamConfig(): Promise<boolean> {
-  if (getConfig()) return false;
   const params = new URLSearchParams(window.location.search);
+  const callbackParam = params.get("callback");
+  const callbackMode = callbackParam === "universal" ? "universal" : callbackParam === "legacy" ? "legacy" : undefined;
+
+  // Tenant-level callback mode is stamped into the manifest's runtime URL. Sync
+  // it onto stored config on every load (not just first run) so re-uploading a
+  // manifest that flips the callback takes effect for already-configured users.
+  const existing = getConfig();
+  if (existing) {
+    if (callbackMode && existing.callbackMode !== callbackMode) {
+      await setConfig({ ...existing, callbackMode });
+    }
+    return false;
+  }
+
   const halo = params.get("halo");
   const clientId = params.get("clientId");
   if (!halo || !clientId) return false;
   try {
-    await setConfig({ haloBaseUrl: halo, clientId });
+    await setConfig({ haloBaseUrl: halo, clientId, callbackMode });
   } catch {
     return false;
   }
   const url = new URL(window.location.href);
   url.searchParams.delete("halo");
   url.searchParams.delete("clientId");
+  url.searchParams.delete("callback");
   history.replaceState(null, "", url.pathname + (url.search ? url.search : "") + url.hash);
   return true;
 }
