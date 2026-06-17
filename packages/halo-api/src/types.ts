@@ -1075,6 +1075,62 @@ export interface PrepayAccountBalance {
   accounts: PrepayAccountRow[];
 }
 
+/** A technician who logged time against a client's recurring-support work. */
+export interface RecurringContractTech {
+  agentId: number;
+  agent: string;
+  supportHoursMonthly: number;
+  /** best-effort, agent cost normalised (annual salaries ÷ 2080); 0 when the
+   *  agent has no cost on file */
+  labourCostMonthly: number;
+}
+
+/** Recurring (managed-services) profitability for one grouping — either a whole
+ *  client (grain='client') or a single contract (grain='contract'). The contract
+ *  is carried per generated recurring invoice line (INVOICEDETAIL.IDCHID), so
+ *  per-contract revenue is real; client grain rolls those up. */
+export interface RecurringContractProfitabilityRow {
+  /** present when grain='contract' */
+  contractId?: number;
+  contractRef?: string;
+  contractActive?: boolean;
+  clientId: number;
+  client: string;
+  /** present when grain='client' — count of the client's active contracts */
+  activeContracts?: number;
+  /** monthly recurring revenue = trailing-12-month recurring net ÷ 12 */
+  recurringRevenueMonthly: number;
+  recurringInvoices: number;
+  /** all time logged on the client's tickets in the window, monthly-ised */
+  supportHoursMonthly: number;
+  billableHoursMonthly: number;
+  billableSharePct: number | null;
+  /** recurring revenue ÷ support hours delivered — the reliable margin proxy
+   *  (low = lots of support for the fee), independent of agent cost data */
+  revenuePerSupportHour: number | null;
+  /** best-effort labour cost (normalised agent cost); partial — see costCoveragePct */
+  labourCostMonthly: number;
+  /** null unless cost coverage is high enough to trust (marginReliable) */
+  grossMarginMonthly: number | null;
+  grossMarginPct: number | null;
+  /** share of logged hours that had a costed agent */
+  costCoveragePct: number | null;
+  marginReliable: boolean;
+  topTechs: RecurringContractTech[];
+  flags: string[];
+}
+
+export interface RecurringContractProfitability {
+  grain: "client" | "contract";
+  trailingMonths: number;
+  currency: string;
+  /** monthly recurring revenue NOT tied to any contract (grain='contract' only;
+   *  null for grain='client'). Lets the per-contract rows reconcile to total MRR. */
+  unattributedRevenueMonthly: number | null;
+  note: string;
+  rows: RecurringContractProfitabilityRow[];
+}
+
 /** One project in the portfolio health board. */
 export interface ProjectPortfolioRow {
   projectId: number;
