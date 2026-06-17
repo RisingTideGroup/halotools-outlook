@@ -1075,6 +1075,53 @@ export interface PrepayAccountBalance {
   accounts: PrepayAccountRow[];
 }
 
+/** A technician who logged time against a client's recurring-support work. */
+export interface RecurringContractTech {
+  agentId: number;
+  agent: string;
+  supportHoursMonthly: number;
+  /** best-effort, agent cost normalised (annual salaries ÷ 2080); 0 when the
+   *  agent has no cost on file */
+  labourCostMonthly: number;
+}
+
+/** Per-client recurring (managed-services) profitability. Recurring revenue is
+ *  client-grained in Halo (recurring invoices don't carry a contract id), so
+ *  this is reported at the client = de-facto managed-services agreement, with
+ *  activeContracts for context. */
+export interface RecurringContractProfitabilityRow {
+  clientId: number;
+  client: string;
+  activeContracts: number;
+  /** monthly recurring revenue = trailing-12-month recurring net ÷ 12 */
+  recurringRevenueMonthly: number;
+  recurringInvoices: number;
+  /** all time logged on the client's tickets in the window, monthly-ised */
+  supportHoursMonthly: number;
+  billableHoursMonthly: number;
+  billableSharePct: number | null;
+  /** recurring revenue ÷ support hours delivered — the reliable margin proxy
+   *  (low = lots of support for the fee), independent of agent cost data */
+  revenuePerSupportHour: number | null;
+  /** best-effort labour cost (normalised agent cost); partial — see costCoveragePct */
+  labourCostMonthly: number;
+  /** null unless cost coverage is high enough to trust (marginReliable) */
+  grossMarginMonthly: number | null;
+  grossMarginPct: number | null;
+  /** share of logged hours that had a costed agent */
+  costCoveragePct: number | null;
+  marginReliable: boolean;
+  topTechs: RecurringContractTech[];
+  flags: string[];
+}
+
+export interface RecurringContractProfitability {
+  trailingMonths: number;
+  currency: string;
+  note: string;
+  clients: RecurringContractProfitabilityRow[];
+}
+
 /** One project in the portfolio health board. */
 export interface ProjectPortfolioRow {
   projectId: number;

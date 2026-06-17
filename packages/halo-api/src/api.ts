@@ -64,6 +64,8 @@ import type {
   TechnicianUtilizationRow,
   PrepayAccountBalance,
   PrepayAccountRow,
+  RecurringContractProfitability,
+  RecurringContractTech,
   SimilarTicketNeighbour,
 } from "./types.js";
 
@@ -2979,6 +2981,15 @@ const PROJECT_MAIN = "(p.fmainprojectid is null or p.fmainprojectid = 0 or p.fma
 const AGENT_HOURLY_COST =
   "coalesce(uct.uctCost, coalesce(try_convert(float, nullif(cast(u.ucostPrice as nvarchar(40)), '')), 0))";
 
+/** Agent hourly cost, normalised for the annual-salary trap. Halo's cost field
+ *  accepts either an hourly rate OR an annual salary and doesn't flag which, so
+ *  tenants mix them (one agent at 95004/yr next to others at 48–145/hr). Values
+ *  above a sane hourly ceiling (1000) are treated as an annual salary and
+ *  divided by 2080 (40h × 52w FTE hours/year); plausible hourly values pass
+ *  through untouched. Needs the `u` (UNAME) + `uct` (UnameCostTracking) aliases. */
+const AGENT_HOURLY_COST_NORM =
+  `(case when (${AGENT_HOURLY_COST}) > 1000 then (${AGENT_HOURLY_COST}) / 2080.0 else (${AGENT_HOURLY_COST}) end)`;
+
 /**
  * Per-project profitability with auto-detected billing model. For each main
  * project (default trailing — actually all active with hours), picks the revenue
@@ -3367,6 +3378,158 @@ offset 0 rows`;
       billabilityPct: tot.worked > 0 ? round2((tot.billable / tot.worked) * 100) : null,
     },
     technicians,
+  };
+}
+
+/**
+ * Per-client recurring (managed-services) contract profitability: monthly
+ * recurring revenue vs the support effort delivered for it, with best-effort
+ * labour cost / margin and the techs who logged the time.
+ *
+ * GRAIN = client. Recurring revenue is client-grained in Halo — recurring
+ * invoices carry IHaarea but no contract id (and this tenant doesn't use
+ * CONTRACTHEADER.CHconvertedToRecurringInvoiceId), so per-contract revenue
+ * isn't derivable; the client is the de-facto managed-services agreement
+ * (~1.2 contracts/client here) and activeContracts is surfaced for context.
+ *
+ * Revenue = trailing-12-month net of recurring-generated invoices (INVOICEHEADER
+ * IHid>0 linked to a recurring master) ÷ 12. Support effort = all time logged
+ * on the client's tickets (ACTIONS.timetaken via faultid → FAULTS.areaint) in
+ * the trailing 12 months, monthly-ised. revenuePerSupportHour (= revenue ÷
+ * hours) is the reliable margin proxy and needs no cost data. Labour cost uses
+ * the normalised agent rate but is PARTIAL — most tenants cost only a few agents
+ * — so grossMargin is returned only when costCoveragePct is high enough to trust
+ * (marginReliable); otherwise lead with revenuePerSupportHour.
+ */
+export async function getRecurringContractProfitability(
+  limit = 50,
+): Promise<RecurringContractProfitability> {
+  const months = 12;
+  const top = Math.max(1, Math.min(500, Math.trunc(limit)));
+  const recur =
+    "ih.IHid > 0 and coalesce(ih.IHrecurringInvoiceId,0) <> 0 and ih.IHInvoice_Date >= dateadd(month,-12,getdate())";
+  const workDate = "coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated)";
+  const cost = AGENT_HOURLY_COST_NORM;
+  const labWhere = `ac.timetaken > 0 and ${realAgentFilter("u")} and ${workDate} >= dateadd(month,-${months},getdate())`;
+
+  const sql = `select top ${top}
+  a.aarea as client_id,
+  a.aareadesc as client,
+  cast(rev.ttm_net as decimal(14,2)) as ttm_net,
+  rev.invoices as invoices,
+  coalesce(con.active_contracts,0) as active_contracts,
+  cast(coalesce(lab.hours,0) as decimal(14,2)) as hours,
+  cast(coalesce(lab.billable_hours,0) as decimal(14,2)) as billable_hours,
+  cast(coalesce(lab.labour_cost,0) as decimal(14,2)) as labour_cost,
+  cast(coalesce(lab.costed_hours,0) as decimal(14,2)) as costed_hours
+from area a
+join (
+  select ih.IHaarea as area, sum(idt.IDNet_Amount) as ttm_net, count(distinct ih.IHid) as invoices
+  from INVOICEHEADER ih join INVOICEDETAIL idt on idt.IdIHid = ih.IHid
+  where ${recur}
+  group by ih.IHaarea
+) rev on rev.area = a.aarea
+left join (
+  select f.areaint as area,
+    sum(ac.timetaken) as hours,
+    sum(coalesce(ac.actionchargehours,0) + coalesce(ac.actionnonchargehours,0) + coalesce(ac.actionprepayhours,0)) as billable_hours,
+    sum(ac.timetaken * ${cost}) as labour_cost,
+    sum(case when ${cost} > 0 then ac.timetaken else 0 end) as costed_hours
+  from actions ac
+  join faults f on f.faultid = ac.faultid
+  join uname u on u.unum = ac.whoagentid
+  left join UnameCostTracking uct on uct.uctAgentId = ac.whoagentid and ${workDate} >= uct.uctStartDate and ${workDate} < uct.uctEndDate
+  where ${labWhere}
+  group by f.areaint
+) lab on lab.area = a.aarea
+left join (
+  select CHarea as area, count(*) as active_contracts from CONTRACTHEADER where coalesce(chactive,0) = 1 group by CHarea
+) con on con.area = a.aarea
+order by rev.ttm_net desc`;
+
+  const techSql = `select f.areaint as client_id, ac.whoagentid as agent_id, max(u.uname) as agent,
+  cast(sum(ac.timetaken) as decimal(14,2)) as hours,
+  cast(sum(ac.timetaken * ${cost}) as decimal(14,2)) as cost
+from actions ac
+join faults f on f.faultid = ac.faultid
+join uname u on u.unum = ac.whoagentid
+left join UnameCostTracking uct on uct.uctAgentId = ac.whoagentid and ${workDate} >= uct.uctStartDate and ${workDate} < uct.uctEndDate
+where ${labWhere}
+group by f.areaint, ac.whoagentid
+order by sum(ac.timetaken) desc
+offset 0 rows`;
+
+  const [rows, techRows, currency] = await Promise.all([
+    reportRows(sql),
+    reportRows(techSql),
+    baseCurrency(),
+  ]);
+
+  const techByClient = new Map<number, RecurringContractTech[]>();
+  for (const t of techRows) {
+    const cid = num(t.client_id);
+    const arr = techByClient.get(cid) ?? [];
+    arr.push({
+      agentId: num(t.agent_id),
+      agent: String(t.agent ?? ""),
+      supportHoursMonthly: round2(num(t.hours) / months),
+      labourCostMonthly: round2(num(t.cost) / months),
+    });
+    techByClient.set(cid, arr);
+  }
+
+  const clients = rows.map((r) => {
+    const cid = num(r.client_id);
+    const revenue = round2(num(r.ttm_net) / months);
+    const totalHours = num(r.hours);
+    const hours = round2(totalHours / months);
+    const billable = round2(num(r.billable_hours) / months);
+    const labourCost = round2(num(r.labour_cost) / months);
+    const costedHours = num(r.costed_hours);
+    const coverage = totalHours > 0 ? round2((costedHours / totalHours) * 100) : null;
+    const marginReliable = coverage != null && coverage >= 80;
+    const revenuePerSupportHour = totalHours > 0 ? round2(num(r.ttm_net) / totalHours) : null;
+    const billableSharePct = totalHours > 0 ? round2((num(r.billable_hours) / totalHours) * 100) : null;
+    const grossMargin = round2(revenue - labourCost);
+    const grossMarginPct = revenue > 0 ? round2((grossMargin / revenue) * 100) : null;
+
+    const flags: string[] = [];
+    if (totalHours === 0) flags.push("no-support-logged");
+    if (marginReliable && grossMargin < 0) flags.push("negative-margin");
+    else if (marginReliable && grossMarginPct != null && grossMarginPct < 20) flags.push("thin-margin");
+    if (coverage != null && coverage < 80) flags.push("low-cost-coverage");
+    if (revenuePerSupportHour != null && revenuePerSupportHour < 75) flags.push("low-revenue-per-hour");
+
+    const topTechs = (techByClient.get(cid) ?? [])
+      .sort((a, b) => b.supportHoursMonthly - a.supportHoursMonthly)
+      .slice(0, 6);
+
+    return {
+      clientId: cid,
+      client: String(r.client ?? ""),
+      activeContracts: num(r.active_contracts),
+      recurringRevenueMonthly: revenue,
+      recurringInvoices: num(r.invoices),
+      supportHoursMonthly: hours,
+      billableHoursMonthly: billable,
+      billableSharePct,
+      revenuePerSupportHour,
+      labourCostMonthly: labourCost,
+      grossMarginMonthly: marginReliable ? grossMargin : null,
+      grossMarginPct: marginReliable ? grossMarginPct : null,
+      costCoveragePct: coverage,
+      marginReliable,
+      topTechs,
+      flags,
+    };
+  });
+
+  return {
+    trailingMonths: months,
+    currency,
+    note:
+      "Per-CLIENT recurring (managed-services) profitability — recurring revenue is client-grained in Halo (recurring invoices carry no contract id), so the client is the de-facto agreement; activeContracts is context. recurringRevenueMonthly = trailing-12-month recurring net ÷ 12. revenuePerSupportHour (recurring revenue ÷ all support hours logged on the client's tickets) is the RELIABLE margin proxy — low means lots of support delivered per dollar of fee (margin risk), high means light-touch; no agent-cost data needed. labourCostMonthly uses a normalised agent rate (annual salaries ÷ 2080) but is PARTIAL: most agents have no cost on file (see costCoveragePct), so grossMargin is only populated when marginReliable (cost coverage ≥ 80%) — otherwise lead with revenuePerSupportHour. topTechs are who logged the most time. Flags: negative-margin / thin-margin (reliable only), low-cost-coverage, low-revenue-per-hour (<75/hr heuristic), no-support-logged. Amounts in the home currency (see currency).",
+    clients,
   };
 }
 
