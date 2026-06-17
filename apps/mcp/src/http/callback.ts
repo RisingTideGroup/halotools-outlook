@@ -128,6 +128,9 @@ function dispatchOutlook(
     state,
     error: error || undefined,
     errorDescription: errorDescription || undefined,
+    // Self-identify so the add-in can confirm sign-in round-tripped through the
+    // shared endpoint (vs the legacy per-app /outlook/auth/callback.html page).
+    callback: "universal",
   });
   res.writeHead(200, {
     "Content-Type": "text/html; charset=utf-8",

@@ -10,12 +10,34 @@
 
 import type { DialogOpener, DialogResultMessage } from "@iusehalo/halo-api";
 
-const REDIRECT_PATH = "/outlook/auth/callback.html";
+// Two callback endpoints during the migration:
+//  - "legacy":    the per-app static page (what every tenant has registered today)
+//  - "universal": the shared /auth/callback served by the Node server, the
+//                 single redirect_uri for every hub tool (state-prefix routed).
+const LEGACY_REDIRECT_PATH = "/outlook/auth/callback.html";
+const UNIVERSAL_REDIRECT_PATH = "/auth/callback";
 const START_PATH = "/outlook/auth/start.html";
 const ADDIN_ORIGIN = "https://tools.iusehalo.com";
 
-export function redirectUri(): string {
-  return ADDIN_ORIGIN + REDIRECT_PATH;
+export type CallbackMode = "legacy" | "universal";
+
+/** state prefix the shared callback uses to route the Outlook flow. */
+export const OUTLOOK_STATE_PREFIX = "outlook:";
+
+/** The shared callback URL admins must register before they can migrate. */
+export const UNIVERSAL_CALLBACK_URL = ADDIN_ORIGIN + UNIVERSAL_REDIRECT_PATH;
+export const LEGACY_CALLBACK_URL = ADDIN_ORIGIN + LEGACY_REDIRECT_PATH;
+
+export function redirectUri(mode: CallbackMode = "legacy"): string {
+  return ADDIN_ORIGIN + (mode === "universal" ? UNIVERSAL_REDIRECT_PATH : LEGACY_REDIRECT_PATH);
+}
+
+// Which callback endpoint actually served the most recent sign-in, read from
+// the page's self-identifying stamp. Lets the UI confirm a migration really
+// round-tripped through the shared endpoint.
+let lastCallbackUsed: CallbackMode | undefined;
+export function getLastCallbackUsed(): CallbackMode | undefined {
+  return lastCallbackUsed;
 }
 
 /** Wrap the third-party authorize URL in our same-origin start page. */
@@ -115,6 +137,9 @@ export const officeDialogOpener: DialogOpener = {
               const data: DialogResultMessage = JSON.parse(
                 (arg as { message: string }).message,
               );
+              if (data.callback === "legacy" || data.callback === "universal") {
+                lastCallbackUsed = data.callback;
+              }
               resolve(data);
             } catch (e) {
               reject(new Error(`Bad message from auth dialog: ${(e as Error).message}`));

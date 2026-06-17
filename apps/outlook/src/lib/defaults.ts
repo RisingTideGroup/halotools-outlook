@@ -14,6 +14,13 @@ export interface UserDefaults {
   defaultOutgoingOutcome?: string;
   /** Whether attachments toggle defaults to on */
   includeAttachmentsByDefault?: boolean;
+  /**
+   * Which OAuth callback this tenant signs in through. Defaults to "legacy"
+   * (the per-app /outlook/auth/callback.html every tenant has registered).
+   * Set to "universal" only after a sign-in has successfully round-tripped
+   * through the shared /auth/callback — i.e. the admin has registered it.
+   */
+  authCallbackMode?: "legacy" | "universal";
 }
 
 export function getDefaults(): UserDefaults {

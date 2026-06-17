@@ -23,6 +23,10 @@ export interface DialogResultMessage {
   state?: string;
   error?: string;
   errorDescription?: string;
+  /** Which callback endpoint served the response, when it self-identifies
+   *  ("legacy" = per-app static page, "universal" = shared /auth/callback).
+   *  Used to confirm a migration round-tripped through the new endpoint. */
+  callback?: string;
 }
 
 /**
@@ -44,6 +48,13 @@ export interface SignInOptions {
    * don't need this — leave undefined to pass the authorize URL through as-is.
    */
   wrapAuthorizeUrl?: (authorizeUrl: string) => string;
+  /**
+   * Optional prefix prepended to the OAuth `state` (e.g. "outlook:") so a shared
+   * multi-tool callback endpoint can route the response to the right handler.
+   * The full prefixed value is what's sent and what the redirect must echo back,
+   * so state validation is unaffected.
+   */
+  statePrefix?: string;
 }
 
 /** Trigger the OAuth dance. Resolves when tokens are obtained and stored. */
@@ -56,7 +67,7 @@ export async function signIn(
 
   const verifier = generateVerifier();
   const challenge = await challengeFromVerifier(verifier);
-  const state = generateState();
+  const state = `${options.statePrefix ?? ""}${generateState()}`;
 
   const authorizeUrl = buildAuthorizeUrl(cfg, challenge, state, options.redirectUri);
   const dialogUrl = options.wrapAuthorizeUrl
