@@ -16,11 +16,27 @@ function buildServerName(tenant: CreateServerOpts["tenant"]): string {
   return `${tenant.haloBaseUrl.replace(/\/$/, "")} [${idShort}]`;
 }
 
+// Branding for the iusehalo tools hub. Advertised in the MCP `initialize`
+// response (serverInfo) so clients like Claude render OUR icon instead of
+// falling back to scraping the server origin. The asset at /favicon.ico is a
+// PNG copy, but we point at the real .png so the URL and mimeType agree —
+// strict clients may reject an image/png mimeType on a .ico extension.
+const BRAND_WEBSITE_URL = "https://tools.iusehalo.com/";
+const BRAND_ICON_URL = "https://tools.iusehalo.com/favicon.png";
+
 export function createHaloMcpServer(opts: CreateServerOpts = {}): McpServer {
   const server = new McpServer(
     {
       name: buildServerName(opts.tenant),
       version: "0.1.0",
+      websiteUrl: BRAND_WEBSITE_URL,
+      icons: [
+        {
+          src: BRAND_ICON_URL,
+          mimeType: "image/png",
+          sizes: ["32x32"],
+        },
+      ],
     },
     {
       capabilities: {

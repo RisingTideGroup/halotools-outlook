@@ -77,15 +77,17 @@
           var el = document.getElementById("status");
           el.className = "err";
           el.textContent = error + ": " + (errorDescription || "");
-          send({ error: error, errorDescription: errorDescription });
+          send({ error: error, errorDescription: errorDescription, callback: "legacy" });
           return;
         }
         if (!code) {
           document.getElementById("status").textContent = "No authorization code received.";
-          send({ error: "no_code" });
+          send({ error: "no_code", callback: "legacy" });
           return;
         }
-        send({ code: code, state: state });
+        // callback: "legacy" self-identifies this per-app page so the add-in
+        // knows the tenant hasn't migrated to the shared /auth/callback yet.
+        send({ code: code, state: state, callback: "legacy" });
       });
     </script>
   </body>
