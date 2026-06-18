@@ -601,14 +601,17 @@ export interface HaloOpportunity {
 
 /** MRR snapshot returned by getMrrSnapshot. */
 export interface MrrSnapshot {
+  /** Headline MRR = recurring invoiced in the latest COMPLETE calendar month
+   *  (actual marked-recurring invoice lines, not a TTM/12 average). */
   mrr: number;
-  /** trailing-12-month window used to derive MRR (= ttmRecurringNet / 12). */
-  ttmMonths: number;
-  /** distinct recurring streams (masters) that billed in the window. */
+  /** The calendar month (YYYY-MM) the headline mrr is read from. */
+  mrrMonth: string;
+  /** Recurring billings by month, latest first: the in-progress month (partial)
+   *  plus trailing complete months — for the multi-window read. */
+  recentMonths: { month: string; recurring: number; invoices: number; partial: boolean }[];
+  /** distinct recurring streams that billed in the headline month. */
   recurringStreams: number;
-  /** cadence mix of the actual generated invoices (derived from each invoice's period length). */
-  byCadence: { cadence: string; streams: number; invoices: number; monthlyRevenue: number }[];
-  /** Per-client breakdown (the raw rows behind the MRR) sorted by monthlyRevenue desc. */
+  /** Per-client recurring for the headline month, sorted by monthlyRevenue desc. */
   byClient: { clientId: number; client: string; invoices: number; monthlyRevenue: number; pctOfMrr: number | null }[];
   /** Share of MRR from the single biggest client (concentration risk). */
   topClientPct: number | null;
@@ -1098,7 +1101,7 @@ export interface RecurringContractProfitabilityRow {
   client: string;
   /** present when grain='client' — count of the client's active contracts */
   activeContracts?: number;
-  /** monthly recurring revenue = trailing-12-month recurring net ÷ 12 */
+  /** monthly recurring revenue = trailing 3 complete months of actual recurring invoiced ÷ 3 */
   recurringRevenueMonthly: number;
   recurringInvoices: number;
   /** all time logged on the client's tickets in the window, monthly-ised */
@@ -1122,7 +1125,8 @@ export interface RecurringContractProfitabilityRow {
 
 export interface RecurringContractProfitability {
   grain: "client" | "contract";
-  trailingMonths: number;
+  /** the latest complete calendar month (YYYY-MM) all figures are read from */
+  month: string;
   currency: string;
   /** monthly recurring revenue NOT tied to any contract (grain='contract' only;
    *  null for grain='client'). Lets the per-contract rows reconcile to total MRR. */
