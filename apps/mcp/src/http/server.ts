@@ -17,7 +17,8 @@ import http from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import { createHaloMcpServer } from "../server.js";
-import { withRequestAuth } from "../halo/context.js";
+import { withRequestAuth, isAccessTokenExpired } from "../halo/context.js";
+import { checkHaloToken } from "../halo/token-validity.js";
 import {
   detectHaloMcp,
   registerHaloProxyTools,
@@ -70,6 +71,25 @@ function methodNotAllowed(res: http.ServerResponse, allowed: string[]): void {
     "Content-Type": "text/plain",
   });
   res.end("Method not allowed");
+}
+
+// RFC 6750 / RFC 9728 re-auth challenge. Returning this real HTTP 401 (rather
+// than a 200 tool-error) is what makes the MCP client silently refresh via its
+// refresh_token, or fall back to a fresh sign-in when that's dead too.
+function challengeReauth(
+  res: http.ServerResponse,
+  issuer: string,
+  description: string,
+): void {
+  res.writeHead(401, {
+    "Content-Type": "application/json",
+    "WWW-Authenticate":
+      `Bearer error="invalid_token", ` +
+      `error_description="${description}", ` +
+      `resource_metadata="${issuer}/.well-known/oauth-protected-resource"`,
+    "Access-Control-Allow-Origin": "*",
+  });
+  res.end(JSON.stringify({ error: "invalid_token", message: `${description}; re-authenticate.` }));
 }
 
 function preflight(res: http.ServerResponse): void {
@@ -238,6 +258,25 @@ async function handleMcpTransport(
 
   if (req.method !== "POST") {
     return methodNotAllowed(res, ["POST"]);
+  }
+
+  // Reject a stale token at the gate with a real 401 + WWW-Authenticate. A Halo
+  // 401 raised *inside* a tool call is returned by the SDK as a 200 error-result
+  // which never prompts the client to refresh — so the only way to make Claude
+  // re-mint its token automatically is to challenge here, before running.
+  //
+  // Two layers: (1) the JWT `exp` claim catches clock expiry locally, for free;
+  // (2) a cached Halo probe catches tokens Halo rejects while still inside `exp`
+  // (revoked, agent disabled, etc.). The probe fails open — only an explicit
+  // Halo 401/403 blocks, so a flaky Halo can't trap every request in re-auth.
+  const issuer = `${getPublicOrigin(req)}/mcp/t/${configBlob}`;
+  if (isAccessTokenExpired(accessToken)) {
+    challengeReauth(res, issuer, "The access token expired");
+    return;
+  }
+  if ((await checkHaloToken(tenant.halo, accessToken)) === "invalid") {
+    challengeReauth(res, issuer, "The access token was rejected by Halo");
+    return;
   }
 
   const rawBody = await readBody(req);
