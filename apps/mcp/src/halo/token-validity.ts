@@ -12,8 +12,9 @@
 // flaky Halo never wedges every request behind a false re-auth loop.
 
 const PROBE_TTL_MS = 5 * 60 * 1000;
-// Cheap, auth-only "who am I" endpoint. Returns the signed-in agent record.
-const PROBE_PATH = "/api/agent/me";
+// Cheap, auth-gated endpoint: returns `[]` for a valid token and 401 for an
+// invalid one, so it confirms auth without making Halo build a large payload.
+const PROBE_PATH = "/api/instance";
 // Bound the cache so a long-lived process churning tokens can't grow unbounded.
 const MAX_ENTRIES = 5000;
 
