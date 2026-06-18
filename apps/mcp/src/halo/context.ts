@@ -116,6 +116,28 @@ function findUrlTokenBoundary(s: string): number {
   return -1;
 }
 
+/**
+ * Best-effort check whether a JWT access token is at/past its `exp`. Halo issues
+ * JWT access tokens, so we can decide expiry locally without a Halo round-trip.
+ * Returns false for opaque/non-JWT tokens or unparseable payloads — we never
+ * block a token we can't read; those still fail (if at all) inside the call.
+ */
+export function isAccessTokenExpired(token: string, skewSeconds = 30): boolean {
+  const parts = token.split(".");
+  if (parts.length !== 3) return false;
+  try {
+    const json = Buffer.from(
+      parts[1].replace(/-/g, "+").replace(/_/g, "/"),
+      "base64",
+    ).toString("utf8");
+    const payload = JSON.parse(json) as { exp?: unknown };
+    if (typeof payload.exp !== "number") return false;
+    return Date.now() / 1000 >= payload.exp - skewSeconds;
+  } catch {
+    return false;
+  }
+}
+
 /** Load auth from process env (stdio mode). Returns undefined if not configured. */
 export function loadEnvAuth(): RequestAuth | undefined {
   const baseUrl = process.env.HALO_BASE_URL;

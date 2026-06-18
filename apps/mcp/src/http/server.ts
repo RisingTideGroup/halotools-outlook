@@ -17,7 +17,7 @@ import http from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import { createHaloMcpServer } from "../server.js";
-import { withRequestAuth } from "../halo/context.js";
+import { withRequestAuth, isAccessTokenExpired } from "../halo/context.js";
 import {
   detectHaloMcp,
   registerHaloProxyTools,
@@ -233,6 +233,30 @@ async function handleMcpTransport(
   const accessToken = authHeader.slice("Bearer ".length).trim();
   if (!accessToken) {
     writeJson(res, 401, { error: "unauthorized", message: "Empty bearer token." });
+    return;
+  }
+
+  // Reject an expired access token at the gate with an RFC 6750 / RFC 9728
+  // challenge. A Halo 401 raised *inside* a tool call is returned by the SDK as
+  // a 200 error-result, which never prompts the client to refresh — so the only
+  // way to make Claude silently re-mint via its refresh_token (or re-auth when
+  // that's dead too) is to surface a real HTTP 401 with WWW-Authenticate here.
+  if (isAccessTokenExpired(accessToken)) {
+    const issuer = `${getPublicOrigin(req)}/mcp/t/${configBlob}`;
+    res.writeHead(401, {
+      "Content-Type": "application/json",
+      "WWW-Authenticate":
+        `Bearer error="invalid_token", ` +
+        `error_description="The access token expired", ` +
+        `resource_metadata="${issuer}/.well-known/oauth-protected-resource"`,
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end(
+      JSON.stringify({
+        error: "invalid_token",
+        message: "Access token expired; re-authenticate.",
+      }),
+    );
     return;
   }
 
