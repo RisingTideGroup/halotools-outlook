@@ -1078,20 +1078,24 @@ export interface PrepayAccountBalance {
   accounts: PrepayAccountRow[];
 }
 
-/** A technician who logged time against a client's recurring-support work. */
+/** A technician who logged REACTIVE (Incident/Service-Request) support time
+ *  against a client's managed-services work. */
 export interface RecurringContractTech {
   agentId: number;
   agent: string;
-  supportHoursMonthly: number;
-  /** best-effort, agent cost normalised (annual salaries ÷ 2080); 0 when the
-   *  agent has no cost on file */
-  labourCostMonthly: number;
+  reactiveHoursMonthly: number;
+  /** best-effort agent cost; 0 when the agent has no cost on file */
+  reactiveCostMonthly: number;
 }
 
 /** Recurring (managed-services) profitability for one grouping — either a whole
  *  client (grain='client') or a single contract (grain='contract'). The contract
  *  is carried per generated recurring invoice line (INVOICEDETAIL.IDCHID), so
- *  per-contract revenue is real; client grain rolls those up. */
+ *  per-contract revenue is real; client grain rolls those up. Labour is split by
+ *  ITIL type (FAULTS.requesttype): the recurring fee covers REACTIVE support
+ *  (Incident 1 + Service Request 3), so the margin is read against that slice;
+ *  project (22/23/24) and admin (Advice/Other 21 + rest) are reported separately
+ *  and kept OUT of the margin. */
 export interface RecurringContractProfitabilityRow {
   /** present when grain='contract' */
   contractId?: number;
@@ -1101,23 +1105,28 @@ export interface RecurringContractProfitabilityRow {
   client: string;
   /** present when grain='client' — count of the client's active contracts */
   activeContracts?: number;
-  /** monthly recurring revenue = trailing 3 complete months of actual recurring invoiced ÷ 3 */
+  /** recurring revenue actually invoiced in the latest complete month */
   recurringRevenueMonthly: number;
   recurringInvoices: number;
-  /** all time logged on the client's tickets in the window, monthly-ised */
-  supportHoursMonthly: number;
-  billableHoursMonthly: number;
-  billableSharePct: number | null;
-  /** recurring revenue ÷ support hours delivered — the reliable margin proxy
-   *  (low = lots of support for the fee), independent of agent cost data */
-  revenuePerSupportHour: number | null;
-  /** best-effort labour cost (normalised agent cost); partial — see costCoveragePct */
-  labourCostMonthly: number;
-  /** null unless cost coverage is high enough to trust (marginReliable) */
+  /** logged hours that month, split by ITIL type (FAULTS.requesttype) */
+  reactiveHoursMonthly: number;
+  projectHoursMonthly: number;
+  problemHoursMonthly: number;
+  adminHoursMonthly: number;
+  totalHoursMonthly: number;
+  /** billable share of REACTIVE hours (the three billable buckets) */
+  reactiveBillableSharePct: number | null;
+  /** recurring revenue ÷ reactive support hours — the managed-services margin
+   *  proxy (low = lots of covered support for the fee), no agent-cost data needed */
+  revenuePerReactiveHour: number | null;
+  /** best-effort cost of the REACTIVE labour only; partial — see reactiveCostCoveragePct */
+  reactiveLabourCostMonthly: number;
+  /** recurring revenue − reactive labour cost; null unless cost coverage is high
+   *  enough to trust (marginReliable) */
   grossMarginMonthly: number | null;
   grossMarginPct: number | null;
-  /** share of logged hours that had a costed agent */
-  costCoveragePct: number | null;
+  /** share of REACTIVE hours that had a costed agent */
+  reactiveCostCoveragePct: number | null;
   marginReliable: boolean;
   topTechs: RecurringContractTech[];
   flags: string[];
