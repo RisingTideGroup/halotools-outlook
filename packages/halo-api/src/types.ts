@@ -711,6 +711,14 @@ export interface TechnicianScorecardRow {
   csatResponses: number;
   hoursLogged: number;
   hoursBillable: number;
+  /** hoursLogged split by ITIL type (FAULTS.requesttype): reactive =
+   *  Incident+Service Request (1,3), project = 22/23/24, problem = 4,
+   *  admin = Advice/Other (21) + non-ticket time. hoursReactive matches the
+   *  scorecard's default reactive ticket scope. */
+  hoursReactive: number;
+  hoursProject: number;
+  hoursProblem: number;
+  hoursAdmin: number;
 }
 
 export interface TechnicianScorecard {
@@ -1195,6 +1203,15 @@ export interface TechnicianUtilizationRow {
   /** unlinked appointment hours (internal meetings) */
   internalMeetingHours: number;
   workedHours: number;
+  /** workedHours split by ITIL type (FAULTS.requesttype): reactive =
+   *  Incident+Service Request (1,3), project = 22/23/24, problem = 4,
+   *  admin = Advice/Other (21) + non-ticket time. Sums to workedHours. */
+  reactiveHours: number;
+  projectHours: number;
+  problemHours: number;
+  adminHours: number;
+  /** admin hours / worked hours — the share going to admin/Advice-Other/non-ticket */
+  adminSharePct: number | null;
   billableHours: number;
   /** ticket-linked booked hours / net capacity */
   bookedUtilPct: number | null;
@@ -1223,6 +1240,10 @@ export interface TechnicianUtilization {
     bookedHours: number;
     internalMeetingHours: number;
     workedHours: number;
+    reactiveHours: number;
+    projectHours: number;
+    problemHours: number;
+    adminHours: number;
     billableHours: number;
     bookedUtilPct: number | null;
     internalMeetingPct: number | null;
