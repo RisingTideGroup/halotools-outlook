@@ -3410,15 +3410,19 @@ offset 0 rows`;
  *    reported once as unattributedRevenueMonthly so the rows reconcile to MRR.
  *
  * All figures are for the latest COMPLETE calendar month — actual recurring
- * invoiced that month, never a TTM/12 average (which under-reports tenants with
- * <12 months of billing). Use getMrrSnapshot.recentMonths for the trailing read.
- * revenuePerSupportHour (= revenue ÷ support hours) is the reliable margin proxy
- * and needs no cost data. Labour cost uses the agent's stored rate
- * (UnameCostTracking, else UNAME.ucostPrice) and is PARTIAL — most tenants cost
- * only a few agents — so grossMargin is returned only when costCoveragePct is
- * high enough to trust (marginReliable); otherwise lead with revenuePerSupportHour.
- * The rate is assumed HOURLY; a tenant that stored annual salaries there will
- * read inflated — inspect the values with exploreSchema if margins look off.
+ * invoiced that month, never a TTM/12 average. Use getMrrSnapshot.recentMonths
+ * for the trailing read.
+ *
+ * Labour is SPLIT BY ITIL TYPE (FAULTS.requesttype): the recurring fee covers
+ * REACTIVE support (Incident 1 + Service Request 3), so the margin is read
+ * against the reactive slice only — revenuePerReactiveHour (= revenue ÷ reactive
+ * hours), grossMargin (= revenue − reactive labour cost). Project (22/23/24,
+ * separately billed), Problem (4, root-cause) and admin/Advice-Other (21 + rest)
+ * hours are reported alongside but excluded from the margin so they don't dilute
+ * it. Cost uses the agent's stored rate (UnameCostTracking, else ucostPrice) and
+ * is PARTIAL — grossMargin only when reactiveCostCoveragePct ≥ 80% (marginReliable);
+ * else lead with revenuePerReactiveHour. Rate assumed HOURLY; annual-salary values
+ * read inflated — inspect with exploreSchema if margins look off.
  */
 export async function getRecurringContractProfitability(
   limit = 50,
@@ -3436,12 +3440,21 @@ export async function getRecurringContractProfitability(
   const workDate = "coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated)";
   const cost = AGENT_HOURLY_COST;
   const labWhere = `ac.timetaken > 0 and ${realAgentFilter("u")} and ${workDate} >= '${winStart}' and ${workDate} < '${winEnd}'`;
-  // Shared per-agent labour aggregate columns (need the `ac`/`u`/`uct` aliases).
+  // Labour split by ITIL type (FAULTS.requesttype, carried as f.RequestType):
+  // reactive = Incident(1)+Service Request(3) is what the recurring fee covers;
+  // project = 22/23/24 (separately billed); problem = 4 (root-cause); admin =
+  // Advice/Other(21) + the rest. Cost/coverage/billable are computed on the
+  // REACTIVE slice only, since that's what the agreement absorbs. Needs the
+  // `ac`/`u`/`uct`/`f` aliases (the labour subqueries join FAULTS).
   const labCols =
-    `sum(ac.timetaken) as hours,` +
-    ` sum(coalesce(ac.actionchargehours,0) + coalesce(ac.actionnonchargehours,0) + coalesce(ac.actionprepayhours,0)) as billable_hours,` +
-    ` sum(ac.timetaken * ${cost}) as labour_cost,` +
-    ` sum(case when ${cost} > 0 then ac.timetaken else 0 end) as costed_hours`;
+    `sum(case when f.RequestType in (1,3) then ac.timetaken else 0 end) as reactive_hours,` +
+    ` sum(case when f.RequestType in (22,23,24) then ac.timetaken else 0 end) as project_hours,` +
+    ` sum(case when f.RequestType = 4 then ac.timetaken else 0 end) as problem_hours,` +
+    ` sum(case when f.RequestType not in (1,3,4,22,23,24) then ac.timetaken else 0 end) as admin_hours,` +
+    ` sum(ac.timetaken) as total_hours,` +
+    ` sum(case when f.RequestType in (1,3) then coalesce(ac.actionchargehours,0) + coalesce(ac.actionnonchargehours,0) + coalesce(ac.actionprepayhours,0) else 0 end) as reactive_billable,` +
+    ` sum(case when f.RequestType in (1,3) then ac.timetaken * ${cost} else 0 end) as reactive_cost,` +
+    ` sum(case when f.RequestType in (1,3) and ${cost} > 0 then ac.timetaken else 0 end) as reactive_costed`;
   const uctJoin = `left join UnameCostTracking uct on uct.uctAgentId = ac.whoagentid and ${workDate} >= uct.uctStartDate and ${workDate} < uct.uctEndDate`;
 
   const byContract = groupBy === "contract";
@@ -3456,10 +3469,14 @@ export async function getRecurringContractProfitability(
   a.aareadesc as client,
   cast(rev.rev_net as decimal(14,2)) as rev_net,
   rev.invoices as invoices,
-  cast(coalesce(lab.hours,0) as decimal(14,2)) as hours,
-  cast(coalesce(lab.billable_hours,0) as decimal(14,2)) as billable_hours,
-  cast(coalesce(lab.labour_cost,0) as decimal(14,2)) as labour_cost,
-  cast(coalesce(lab.costed_hours,0) as decimal(14,2)) as costed_hours
+  cast(coalesce(lab.reactive_hours,0) as decimal(14,2)) as reactive_hours,
+  cast(coalesce(lab.project_hours,0) as decimal(14,2)) as project_hours,
+  cast(coalesce(lab.problem_hours,0) as decimal(14,2)) as problem_hours,
+  cast(coalesce(lab.admin_hours,0) as decimal(14,2)) as admin_hours,
+  cast(coalesce(lab.total_hours,0) as decimal(14,2)) as total_hours,
+  cast(coalesce(lab.reactive_billable,0) as decimal(14,2)) as reactive_billable,
+  cast(coalesce(lab.reactive_cost,0) as decimal(14,2)) as reactive_cost,
+  cast(coalesce(lab.reactive_costed,0) as decimal(14,2)) as reactive_costed
 from CONTRACTHEADER ch
 join (
   select id.IDCHID as gid, sum(${RECURRING_LINE_AMT}) as rev_net, count(distinct id.IdIHid) as invoices
@@ -3469,7 +3486,7 @@ join (
 ) rev on rev.gid = ch.CHid
 left join (
   select ac.AContractId as gid, ${labCols}
-  from actions ac join uname u on u.unum = ac.whoagentid ${uctJoin}
+  from actions ac join faults f on f.faultid = ac.faultid join uname u on u.unum = ac.whoagentid ${uctJoin}
   where ${labWhere} and coalesce(ac.AContractId,0) <> 0
   group by ac.AContractId
 ) lab on lab.gid = ch.CHid
@@ -3481,10 +3498,14 @@ order by rev.rev_net desc`
   cast(rev.rev_net as decimal(14,2)) as rev_net,
   rev.invoices as invoices,
   coalesce(con.active_contracts,0) as active_contracts,
-  cast(coalesce(lab.hours,0) as decimal(14,2)) as hours,
-  cast(coalesce(lab.billable_hours,0) as decimal(14,2)) as billable_hours,
-  cast(coalesce(lab.labour_cost,0) as decimal(14,2)) as labour_cost,
-  cast(coalesce(lab.costed_hours,0) as decimal(14,2)) as costed_hours
+  cast(coalesce(lab.reactive_hours,0) as decimal(14,2)) as reactive_hours,
+  cast(coalesce(lab.project_hours,0) as decimal(14,2)) as project_hours,
+  cast(coalesce(lab.problem_hours,0) as decimal(14,2)) as problem_hours,
+  cast(coalesce(lab.admin_hours,0) as decimal(14,2)) as admin_hours,
+  cast(coalesce(lab.total_hours,0) as decimal(14,2)) as total_hours,
+  cast(coalesce(lab.reactive_billable,0) as decimal(14,2)) as reactive_billable,
+  cast(coalesce(lab.reactive_cost,0) as decimal(14,2)) as reactive_cost,
+  cast(coalesce(lab.reactive_costed,0) as decimal(14,2)) as reactive_costed
 from area a
 join (
   select ih.IHaarea as gid, sum(${RECURRING_LINE_AMT}) as rev_net, count(distinct id.IdIHid) as invoices
@@ -3503,18 +3524,19 @@ left join (
 ) con on con.gid = a.aarea
 order by rev.rev_net desc`;
 
+  // topTechs = who delivered the REACTIVE (managed-services) support.
   const techSql = byContract
     ? `select ac.AContractId as gid, ac.whoagentid as agent_id, max(u.uname) as agent,
   cast(sum(ac.timetaken) as decimal(14,2)) as hours, cast(sum(ac.timetaken * ${cost}) as decimal(14,2)) as cost
-from actions ac join uname u on u.unum = ac.whoagentid ${uctJoin}
-where ${labWhere} and coalesce(ac.AContractId,0) <> 0
+from actions ac join faults f on f.faultid = ac.faultid join uname u on u.unum = ac.whoagentid ${uctJoin}
+where ${labWhere} and coalesce(ac.AContractId,0) <> 0 and f.RequestType in (1,3)
 group by ac.AContractId, ac.whoagentid
 order by sum(ac.timetaken) desc
 offset 0 rows`
     : `select f.areaint as gid, ac.whoagentid as agent_id, max(u.uname) as agent,
   cast(sum(ac.timetaken) as decimal(14,2)) as hours, cast(sum(ac.timetaken * ${cost}) as decimal(14,2)) as cost
 from actions ac join faults f on f.faultid = ac.faultid join uname u on u.unum = ac.whoagentid ${uctJoin}
-where ${labWhere}
+where ${labWhere} and f.RequestType in (1,3)
 group by f.areaint, ac.whoagentid
 order by sum(ac.timetaken) desc
 offset 0 rows`;
@@ -3538,8 +3560,8 @@ where ${recurWin} and coalesce(id.IDCHID,0) = 0`;
     arr.push({
       agentId: num(t.agent_id),
       agent: String(t.agent ?? ""),
-      supportHoursMonthly: round2(num(t.hours)),
-      labourCostMonthly: round2(num(t.cost)),
+      reactiveHoursMonthly: round2(num(t.hours)),
+      reactiveCostMonthly: round2(num(t.cost)),
     });
     techByGid.set(gid, arr);
   }
@@ -3548,27 +3570,26 @@ where ${recurWin} and coalesce(id.IDCHID,0) = 0`;
     const gid = num(r.gid);
     const winRev = num(r.rev_net);
     const revenue = round2(winRev);
-    const totalHours = num(r.hours);
-    const hours = round2(totalHours);
-    const billable = round2(num(r.billable_hours));
-    const labourCost = round2(num(r.labour_cost));
-    const costedHours = num(r.costed_hours);
-    const coverage = totalHours > 0 ? round2((costedHours / totalHours) * 100) : null;
+    const reactiveHours = num(r.reactive_hours);
+    const reactiveBillable = num(r.reactive_billable);
+    const reactiveCost = round2(num(r.reactive_cost));
+    const reactiveCosted = num(r.reactive_costed);
+    const coverage = reactiveHours > 0 ? round2((reactiveCosted / reactiveHours) * 100) : null;
     const marginReliable = coverage != null && coverage >= 80;
-    const revenuePerSupportHour = totalHours > 0 ? round2(winRev / totalHours) : null;
-    const billableSharePct = totalHours > 0 ? round2((num(r.billable_hours) / totalHours) * 100) : null;
-    const grossMargin = round2(revenue - labourCost);
+    const revenuePerReactiveHour = reactiveHours > 0 ? round2(winRev / reactiveHours) : null;
+    const reactiveBillableSharePct = reactiveHours > 0 ? round2((reactiveBillable / reactiveHours) * 100) : null;
+    const grossMargin = round2(revenue - reactiveCost);
     const grossMarginPct = revenue > 0 ? round2((grossMargin / revenue) * 100) : null;
 
     const flags: string[] = [];
-    if (totalHours === 0) flags.push("no-support-logged");
+    if (reactiveHours === 0) flags.push("no-reactive-support");
     if (marginReliable && grossMargin < 0) flags.push("negative-margin");
     else if (marginReliable && grossMarginPct != null && grossMarginPct < 20) flags.push("thin-margin");
     if (coverage != null && coverage < 80) flags.push("low-cost-coverage");
-    if (revenuePerSupportHour != null && revenuePerSupportHour < 75) flags.push("low-revenue-per-hour");
+    if (revenuePerReactiveHour != null && revenuePerReactiveHour < 75) flags.push("low-revenue-per-reactive-hour");
 
     const topTechs = (techByGid.get(gid) ?? [])
-      .sort((a, b) => b.supportHoursMonthly - a.supportHoursMonthly)
+      .sort((a, b) => b.reactiveHoursMonthly - a.reactiveHoursMonthly)
       .slice(0, 6);
 
     const row: RecurringContractProfitabilityRow = {
@@ -3576,14 +3597,17 @@ where ${recurWin} and coalesce(id.IDCHID,0) = 0`;
       client: String(r.client ?? ""),
       recurringRevenueMonthly: revenue,
       recurringInvoices: num(r.invoices),
-      supportHoursMonthly: hours,
-      billableHoursMonthly: billable,
-      billableSharePct,
-      revenuePerSupportHour,
-      labourCostMonthly: labourCost,
+      reactiveHoursMonthly: round2(reactiveHours),
+      projectHoursMonthly: round2(num(r.project_hours)),
+      problemHoursMonthly: round2(num(r.problem_hours)),
+      adminHoursMonthly: round2(num(r.admin_hours)),
+      totalHoursMonthly: round2(num(r.total_hours)),
+      reactiveBillableSharePct,
+      revenuePerReactiveHour,
+      reactiveLabourCostMonthly: reactiveCost,
       grossMarginMonthly: marginReliable ? grossMargin : null,
       grossMarginPct: marginReliable ? grossMarginPct : null,
-      costCoveragePct: coverage,
+      reactiveCostCoveragePct: coverage,
       marginReliable,
       topTechs,
       flags,
@@ -3609,7 +3633,7 @@ where ${recurWin} and coalesce(id.IDCHID,0) = 0`;
       (byContract
         ? "Per-CONTRACT recurring profitability. Revenue is tied to each contract via the generated recurring invoice LINE (INVOICEDETAIL.IDCHID → CONTRACTHEADER.CHid); labour is time logged against that contract (ACTIONS.AContractId). unattributedRevenueMonthly is recurring revenue on lines with no contract id (so rows reconcile to total MRR). "
         : "Per-CLIENT recurring profitability (whole-client view; call with groupBy='contract' for the per-contract breakdown). Revenue is the client's recurring-invoice net; support effort is ALL time logged on the client's tickets; activeContracts is context. ") +
-      "All figures are for the latest COMPLETE calendar month (`month`) — actual marked-recurring invoice lines (idrecurringinvoiceid < -1), NEVER a TTM/12 average; for the trailing multi-window read use getMrrSnapshot.recentMonths. Non-monthly cadence: a quarterly/annual contract only shows revenue in its billing month, so judge those across months, not on one. revenuePerSupportHour (recurring ÷ support hours that month) is the RELIABLE margin proxy — low = lots of support per dollar of fee (margin risk), high = light-touch; no agent-cost data needed. labourCostMonthly uses the agent's stored rate (UnameCostTracking, else UNAME.ucostPrice) but is PARTIAL: most agents have no cost on file (see costCoveragePct), so grossMargin is only populated when marginReliable (cost coverage ≥ 80%) — otherwise lead with revenuePerSupportHour. The rate is assumed HOURLY; if a tenant stored annual salaries there the cost reads inflated — check the values with exploreSchema. topTechs = who logged the most time. Flags: negative-margin / thin-margin (reliable only), low-cost-coverage, low-revenue-per-hour (<75/hr heuristic), no-support-logged. Amounts in the home currency (see currency).",
+      "All figures are for the latest COMPLETE calendar month (`month`) — actual marked-recurring invoice lines (idrecurringinvoiceid < -1), NEVER a TTM/12 average; for the trailing multi-window read use getMrrSnapshot.recentMonths. Non-monthly cadence: a quarterly/annual contract only shows revenue in its billing month, so judge those across months, not on one. LABOUR IS SPLIT BY ITIL TYPE (FAULTS.requesttype): reactiveHoursMonthly = Incident+Service-Request (1,3) — the support the recurring fee actually covers; projectHoursMonthly (22/23/24, separately billed), problemHoursMonthly (4, root-cause), adminHoursMonthly (Advice/Other 21 + rest) are reported but kept OUT of the margin. revenuePerReactiveHour (recurring ÷ reactive hours) is the RELIABLE managed-services margin proxy — low = lots of covered support per dollar of fee (margin risk), high = light-touch; no agent-cost data needed. reactiveLabourCostMonthly / grossMargin use the agent's stored rate (UnameCostTracking, else UNAME.ucostPrice) but are PARTIAL: most agents have no cost on file (see reactiveCostCoveragePct), so grossMargin is only populated when marginReliable (≥80% coverage) — otherwise lead with revenuePerReactiveHour. Rate assumed HOURLY; annual salaries there read inflated — check with exploreSchema. topTechs = who delivered the most reactive support. Flags: no-reactive-support (fee with ~0 covered support — licensing-only or under-served), negative-margin / thin-margin (reliable only), low-cost-coverage, low-revenue-per-reactive-hour (<75/hr heuristic). Amounts in the home currency (see currency).",
     rows: resultRows,
   };
 }
