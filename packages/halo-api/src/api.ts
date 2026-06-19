@@ -1793,7 +1793,11 @@ where ${s.filters} and ((${s.createdIn}) or (${s.clearedIn}) or ${s.open})`;
  * Per-technician performance scorecard for a window (defaults to trailing 30
  * days), grouped by the agent who closed each resolved ticket. Returns tickets
  * resolved, mean time to resolve, SLA attainment, first-time-fix, AI CSAT, and
- * hours logged / billable. Sorted by tickets resolved, capped at `limit` (25).
+ * hours logged / billable. hoursLogged is also split by ITIL type
+ * (FAULTS.requesttype): hoursReactive (Incident+Service Request 1,3 — matches the
+ * default reactive ticket scope), hoursProject (22/23/24), hoursProblem (4),
+ * hoursAdmin (Advice/Other 21 + non-ticket time). Sorted by tickets resolved,
+ * capped at `limit` (25).
  */
 export async function getTechnicianScorecard(
   startdate?: string,
@@ -1818,17 +1822,25 @@ export async function getTechnicianScorecard(
   avg(case when f.faisatisfactionlevel > 0 then cast(f.faisatisfactionlevel as float) end) as ai_csat,
   sum(case when f.faisatisfactionlevel > 0 then 1 else 0 end) as csat_n,
   max(act.hrs_logged) as hrs_logged,
-  max(act.hrs_billable) as hrs_billable
+  max(act.hrs_billable) as hrs_billable,
+  max(act.hrs_reactive) as hrs_reactive,
+  max(act.hrs_project) as hrs_project,
+  max(act.hrs_problem) as hrs_problem,
+  max(act.hrs_admin) as hrs_admin
 from faults f
 join uname u on f.clearwhoint = u.unum
 ${s.join}
 left join (
-  select whoagentid,
-    sum(timetaken) as hrs_logged,
-    sum(actionchargehours + actionnonchargehours + actionprepayhours) as hrs_billable
-  from actions
-  where ActionDateCreated >= '${start}' and ActionDateCreated < '${ex}'
-  group by whoagentid
+  select ac.whoagentid,
+    sum(ac.timetaken) as hrs_logged,
+    sum(coalesce(ac.actionchargehours,0) + coalesce(ac.actionnonchargehours,0) + coalesce(ac.actionprepayhours,0)) as hrs_billable,
+    sum(case when f2.RequestType in (1,3) then ac.timetaken else 0 end) as hrs_reactive,
+    sum(case when f2.RequestType in (22,23,24) then ac.timetaken else 0 end) as hrs_project,
+    sum(case when f2.RequestType = 4 then ac.timetaken else 0 end) as hrs_problem,
+    sum(case when coalesce(f2.RequestType,0) not in (1,3,4,22,23,24) then ac.timetaken else 0 end) as hrs_admin
+  from actions ac left join faults f2 on f2.faultid = ac.faultid
+  where ac.ActionDateCreated >= '${start}' and ac.ActionDateCreated < '${ex}'
+  group by ac.whoagentid
 ) act on act.whoagentid = f.clearwhoint
 where ${s.filters} and ${realAgentFilter("u")} and (${s.clearedIn})
 group by u.unum, u.uname
@@ -1851,6 +1863,10 @@ order by count(*) desc`;
       csatResponses: num(r.csat_n),
       hoursLogged: round2(num(r.hrs_logged)),
       hoursBillable: round2(num(r.hrs_billable)),
+      hoursReactive: round2(num(r.hrs_reactive)),
+      hoursProject: round2(num(r.hrs_project)),
+      hoursProblem: round2(num(r.hrs_problem)),
+      hoursAdmin: round2(num(r.hrs_admin)),
     };
   });
   return { window: { startdate: start, enddate: end, scope }, technicians };
@@ -3306,6 +3322,10 @@ export async function getTechnicianUtilization(
   cast(coalesce(ap.booked,0) as decimal(14,2)) as booked_hrs,
   cast(coalesce(ap.internal,0) as decimal(14,2)) as internal_hrs,
   cast(coalesce(wk.worked,0) as decimal(14,2)) as worked_hrs,
+  cast(coalesce(wk.reactive,0) as decimal(14,2)) as reactive_hrs,
+  cast(coalesce(wk.project,0) as decimal(14,2)) as project_hrs,
+  cast(coalesce(wk.problem,0) as decimal(14,2)) as problem_hrs,
+  cast(coalesce(wk.admin,0) as decimal(14,2)) as admin_hrs,
   cast(coalesce(wk.billable,0) as decimal(14,2)) as billable_hrs,
   cast(coalesce(h.leave_hrs,0) as decimal(14,2)) as leave_hrs
 from uname u
@@ -3313,14 +3333,22 @@ left join (select APunum,
     sum(case when APFaultid > 0 then datediff(minute, APStartDate, APEndDate)/60.0 else 0 end) as booked,
     sum(case when coalesce(APFaultid,0) = 0 then datediff(minute, APStartDate, APEndDate)/60.0 else 0 end) as internal
   from APPOINTMENT where coalesce(APdeleted,0)=0 and coalesce(APAllDayEvent,0)=0 and APStartDate >= '${start}' and APStartDate < '${ex}' group by APunum) ap on ap.APunum = u.unum
-left join (select ac.whoagentid, sum(ac.timetaken) as worked, sum(coalesce(ac.actionchargehours,0) + coalesce(ac.actionnonchargehours,0) + coalesce(ac.actionprepayhours,0)) as billable from actions ac where coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) >= '${start}' and coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) < '${ex}' group by ac.whoagentid) wk on wk.whoagentid = u.unum
+left join (select ac.whoagentid,
+    sum(ac.timetaken) as worked,
+    sum(coalesce(ac.actionchargehours,0) + coalesce(ac.actionnonchargehours,0) + coalesce(ac.actionprepayhours,0)) as billable,
+    sum(case when f.RequestType in (1,3) then ac.timetaken else 0 end) as reactive,
+    sum(case when f.RequestType in (22,23,24) then ac.timetaken else 0 end) as project,
+    sum(case when f.RequestType = 4 then ac.timetaken else 0 end) as problem,
+    sum(case when coalesce(f.RequestType,0) not in (1,3,4,22,23,24) then ac.timetaken else 0 end) as admin
+  from actions ac left join faults f on f.faultid = ac.faultid
+  where coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) >= '${start}' and coalesce(ac.Whe_, ac.ActionArrivalDate, ac.ActionDateCreated) < '${ex}' group by ac.whoagentid) wk on wk.whoagentid = u.unum
 left join (select HTechnicianID, sum(Hduration) as leave_hrs from HOLIDAYS where Hdate >= '${start}' and Hdate < '${ex}' group by HTechnicianID) h on h.HTechnicianID = u.unum
 where ${realAgentFilter("u")} and (coalesce(ap.booked,0) > 0 or coalesce(wk.worked,0) > 0)
 order by coalesce(wk.worked,0) desc
 offset 0 rows`;
 
   const rows = await reportRows(sql);
-  const tot = { capacity: 0, leave: 0, net: 0, booked: 0, internal: 0, worked: 0, billable: 0 };
+  const tot = { capacity: 0, leave: 0, net: 0, booked: 0, internal: 0, worked: 0, billable: 0, reactive: 0, project: 0, problem: 0, admin: 0 };
   const technicians: TechnicianUtilizationRow[] = rows.map((r) => {
     const leave = round2(num(r.leave_hrs));
     const net = round2(Math.max(grossCapacity - leave, 0));
@@ -3328,11 +3356,16 @@ offset 0 rows`;
     const internal = round2(num(r.internal_hrs));
     const worked = round2(num(r.worked_hrs));
     const billable = round2(num(r.billable_hrs));
+    const reactive = round2(num(r.reactive_hrs));
+    const project = round2(num(r.project_hrs));
+    const problem = round2(num(r.problem_hrs));
+    const admin = round2(num(r.admin_hrs));
     const bookedUtil = net > 0 ? round2((booked / net) * 100) : null;
     const internalPct = net > 0 ? round2((internal / net) * 100) : null;
     const workedUtil = net > 0 ? round2((worked / net) * 100) : null;
     const billableUtil = net > 0 ? round2((billable / net) * 100) : null;
     const billability = worked > 0 ? round2((billable / worked) * 100) : null;
+    const adminShare = worked > 0 ? round2((admin / worked) * 100) : null;
     tot.capacity += grossCapacity;
     tot.leave += leave;
     tot.net += net;
@@ -3340,6 +3373,10 @@ offset 0 rows`;
     tot.internal += internal;
     tot.worked += worked;
     tot.billable += billable;
+    tot.reactive += reactive;
+    tot.project += project;
+    tot.problem += problem;
+    tot.admin += admin;
     let status = "ok";
     if (workedUtil != null && workedUtil < target * 0.5) status = "under-utilised";
     else if (workedUtil != null && workedUtil < target) status = "below-target";
@@ -3348,6 +3385,9 @@ offset 0 rows`;
     }
     if (billability != null && billability < 50 && worked > 0) {
       status = status === "ok" ? "low-billability" : `${status}, low-billability`;
+    }
+    if (adminShare != null && adminShare >= 40 && worked > 0) {
+      status = status === "ok" ? "admin-heavy" : `${status}, admin-heavy`;
     }
     return {
       agentId: num(r.agent_id),
@@ -3358,6 +3398,11 @@ offset 0 rows`;
       bookedHours: booked,
       internalMeetingHours: internal,
       workedHours: worked,
+      reactiveHours: reactive,
+      projectHours: project,
+      problemHours: problem,
+      adminHours: admin,
+      adminSharePct: adminShare,
       billableHours: billable,
       bookedUtilPct: bookedUtil,
       internalMeetingPct: internalPct,
@@ -3375,7 +3420,7 @@ offset 0 rows`;
     dailyCapacityHours: dch,
     targetUtilisationPct: target,
     note:
-      "Capacity = working weekdays in window × dailyCapacityHours, minus each agent's leave (HOLIDAYS). Booked = TICKET-LINKED appointment hours (APFaultid>0 = client work); internalMeetingHours = unlinked appointments (internal meetings). worked = ACTIONS timetaken (raw logged effort); billable = the billed-hour buckets actionchargehours (invoiceable) + actionnonchargehours (covered by an agreement) + actionprepayhours (prepay-covered) — all three are billable, just to different places. billability (billable/worked) measures the work mix; billableUtil (billable/capacity) is the revenue-bearing utilisation. Note worked often exceeds ticket-linked booked because delivery time is logged without a matching calendar appointment. Flags: meeting-heavy (internal ≥30% of capacity), below-target/under-utilised, low-billability.",
+      "Capacity = working weekdays in window × dailyCapacityHours, minus each agent's leave (HOLIDAYS). Booked = TICKET-LINKED appointment hours (APFaultid>0 = client work); internalMeetingHours = unlinked appointments (internal meetings). worked = ACTIONS timetaken (raw logged effort); billable = the billed-hour buckets actionchargehours (invoiceable) + actionnonchargehours (covered by an agreement) + actionprepayhours (prepay-covered) — all three are billable, just to different places. worked is SPLIT BY ITIL TYPE (FAULTS.requesttype): reactiveHours = Incident+Service-Request (1,3), projectHours = 22/23/24, problemHours = 4 (root-cause), adminHours = Advice/Other (21) + non-ticket time; the four sum to worked. adminSharePct (admin/worked) surfaces how much effort is going to admin/quick-time vs real delivery. billability (billable/worked) measures the work mix; billableUtil (billable/capacity) is the revenue-bearing utilisation. Note worked often exceeds ticket-linked booked because delivery time is logged without a matching calendar appointment. Flags: meeting-heavy (internal ≥30% of capacity), below-target/under-utilised, low-billability, admin-heavy (admin ≥40% of worked).",
     totals: {
       capacityHours: round2(tot.capacity),
       leaveHours: round2(tot.leave),
@@ -3383,6 +3428,10 @@ offset 0 rows`;
       bookedHours: round2(tot.booked),
       internalMeetingHours: round2(tot.internal),
       workedHours: round2(tot.worked),
+      reactiveHours: round2(tot.reactive),
+      projectHours: round2(tot.project),
+      problemHours: round2(tot.problem),
+      adminHours: round2(tot.admin),
       billableHours: round2(tot.billable),
       bookedUtilPct: tot.net > 0 ? round2((tot.booked / tot.net) * 100) : null,
       internalMeetingPct: tot.net > 0 ? round2((tot.internal / tot.net) * 100) : null,
