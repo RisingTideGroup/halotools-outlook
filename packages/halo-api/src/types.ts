@@ -601,14 +601,17 @@ export interface HaloOpportunity {
 
 /** MRR snapshot returned by getMrrSnapshot. */
 export interface MrrSnapshot {
+  /** Headline MRR = recurring invoiced in the latest COMPLETE calendar month
+   *  (actual marked-recurring invoice lines, not a TTM/12 average). */
   mrr: number;
-  /** trailing-12-month window used to derive MRR (= ttmRecurringNet / 12). */
-  ttmMonths: number;
-  /** distinct recurring streams (masters) that billed in the window. */
+  /** The calendar month (YYYY-MM) the headline mrr is read from. */
+  mrrMonth: string;
+  /** Recurring billings by month, latest first: the in-progress month (partial)
+   *  plus trailing complete months — for the multi-window read. */
+  recentMonths: { month: string; recurring: number; invoices: number; partial: boolean }[];
+  /** distinct recurring streams that billed in the headline month. */
   recurringStreams: number;
-  /** cadence mix of the actual generated invoices (derived from each invoice's period length). */
-  byCadence: { cadence: string; streams: number; invoices: number; monthlyRevenue: number }[];
-  /** Per-client breakdown (the raw rows behind the MRR) sorted by monthlyRevenue desc. */
+  /** Per-client recurring for the headline month, sorted by monthlyRevenue desc. */
   byClient: { clientId: number; client: string; invoices: number; monthlyRevenue: number; pctOfMrr: number | null }[];
   /** Share of MRR from the single biggest client (concentration risk). */
   topClientPct: number | null;
@@ -708,6 +711,14 @@ export interface TechnicianScorecardRow {
   csatResponses: number;
   hoursLogged: number;
   hoursBillable: number;
+  /** hoursLogged split by ITIL type (FAULTS.requesttype): reactive =
+   *  Incident+Service Request (1,3), project = 22/23/24, problem = 4,
+   *  admin = Advice/Other (21) + non-ticket time. hoursReactive matches the
+   *  scorecard's default reactive ticket scope. */
+  hoursReactive: number;
+  hoursProject: number;
+  hoursProblem: number;
+  hoursAdmin: number;
 }
 
 export interface TechnicianScorecard {
@@ -1075,20 +1086,24 @@ export interface PrepayAccountBalance {
   accounts: PrepayAccountRow[];
 }
 
-/** A technician who logged time against a client's recurring-support work. */
+/** A technician who logged REACTIVE (Incident/Service-Request) support time
+ *  against a client's managed-services work. */
 export interface RecurringContractTech {
   agentId: number;
   agent: string;
-  supportHoursMonthly: number;
-  /** best-effort, agent cost normalised (annual salaries ÷ 2080); 0 when the
-   *  agent has no cost on file */
-  labourCostMonthly: number;
+  reactiveHoursMonthly: number;
+  /** best-effort agent cost; 0 when the agent has no cost on file */
+  reactiveCostMonthly: number;
 }
 
 /** Recurring (managed-services) profitability for one grouping — either a whole
  *  client (grain='client') or a single contract (grain='contract'). The contract
  *  is carried per generated recurring invoice line (INVOICEDETAIL.IDCHID), so
- *  per-contract revenue is real; client grain rolls those up. */
+ *  per-contract revenue is real; client grain rolls those up. Labour is split by
+ *  ITIL type (FAULTS.requesttype): the recurring fee covers REACTIVE support
+ *  (Incident 1 + Service Request 3), so the margin is read against that slice;
+ *  project (22/23/24) and admin (Advice/Other 21 + rest) are reported separately
+ *  and kept OUT of the margin. */
 export interface RecurringContractProfitabilityRow {
   /** present when grain='contract' */
   contractId?: number;
@@ -1098,23 +1113,28 @@ export interface RecurringContractProfitabilityRow {
   client: string;
   /** present when grain='client' — count of the client's active contracts */
   activeContracts?: number;
-  /** monthly recurring revenue = trailing-12-month recurring net ÷ 12 */
+  /** recurring revenue actually invoiced in the latest complete month */
   recurringRevenueMonthly: number;
   recurringInvoices: number;
-  /** all time logged on the client's tickets in the window, monthly-ised */
-  supportHoursMonthly: number;
-  billableHoursMonthly: number;
-  billableSharePct: number | null;
-  /** recurring revenue ÷ support hours delivered — the reliable margin proxy
-   *  (low = lots of support for the fee), independent of agent cost data */
-  revenuePerSupportHour: number | null;
-  /** best-effort labour cost (normalised agent cost); partial — see costCoveragePct */
-  labourCostMonthly: number;
-  /** null unless cost coverage is high enough to trust (marginReliable) */
+  /** logged hours that month, split by ITIL type (FAULTS.requesttype) */
+  reactiveHoursMonthly: number;
+  projectHoursMonthly: number;
+  problemHoursMonthly: number;
+  adminHoursMonthly: number;
+  totalHoursMonthly: number;
+  /** billable share of REACTIVE hours (the three billable buckets) */
+  reactiveBillableSharePct: number | null;
+  /** recurring revenue ÷ reactive support hours — the managed-services margin
+   *  proxy (low = lots of covered support for the fee), no agent-cost data needed */
+  revenuePerReactiveHour: number | null;
+  /** best-effort cost of the REACTIVE labour only; partial — see reactiveCostCoveragePct */
+  reactiveLabourCostMonthly: number;
+  /** recurring revenue − reactive labour cost; null unless cost coverage is high
+   *  enough to trust (marginReliable) */
   grossMarginMonthly: number | null;
   grossMarginPct: number | null;
-  /** share of logged hours that had a costed agent */
-  costCoveragePct: number | null;
+  /** share of REACTIVE hours that had a costed agent */
+  reactiveCostCoveragePct: number | null;
   marginReliable: boolean;
   topTechs: RecurringContractTech[];
   flags: string[];
@@ -1122,7 +1142,8 @@ export interface RecurringContractProfitabilityRow {
 
 export interface RecurringContractProfitability {
   grain: "client" | "contract";
-  trailingMonths: number;
+  /** the latest complete calendar month (YYYY-MM) all figures are read from */
+  month: string;
   currency: string;
   /** monthly recurring revenue NOT tied to any contract (grain='contract' only;
    *  null for grain='client'). Lets the per-contract rows reconcile to total MRR. */
@@ -1182,6 +1203,15 @@ export interface TechnicianUtilizationRow {
   /** unlinked appointment hours (internal meetings) */
   internalMeetingHours: number;
   workedHours: number;
+  /** workedHours split by ITIL type (FAULTS.requesttype): reactive =
+   *  Incident+Service Request (1,3), project = 22/23/24, problem = 4,
+   *  admin = Advice/Other (21) + non-ticket time. Sums to workedHours. */
+  reactiveHours: number;
+  projectHours: number;
+  problemHours: number;
+  adminHours: number;
+  /** admin hours / worked hours — the share going to admin/Advice-Other/non-ticket */
+  adminSharePct: number | null;
   billableHours: number;
   /** ticket-linked booked hours / net capacity */
   bookedUtilPct: number | null;
@@ -1210,6 +1240,10 @@ export interface TechnicianUtilization {
     bookedHours: number;
     internalMeetingHours: number;
     workedHours: number;
+    reactiveHours: number;
+    projectHours: number;
+    problemHours: number;
+    adminHours: number;
     billableHours: number;
     bookedUtilPct: number | null;
     internalMeetingPct: number | null;
