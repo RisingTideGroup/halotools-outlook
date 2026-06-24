@@ -296,8 +296,8 @@
         <h1>HaloPSA, everywhere your team already works.</h1>
         <p>
           Small, focused add-ins that put HaloPSA context — tickets, contacts,
-          activity — into the tools MSPs spend their day in. No backend,
-          per-MSP configuration, your tenant's data never touches our servers.
+          activity — into the tools MSPs spend their day in. Per-MSP
+          configuration, and your tenant's data is never stored on our servers.
         </p>
         <div class="ctas">
           <a class="btn btn-primary" href="/outlook/setup/">
@@ -405,9 +405,10 @@
           <p>
             A Model Context Protocol server that exposes your HaloPSA as
             tools to any MCP client. Ask Claude "what's open for Acme Corp
-            this week" and it pulls live from your tenant.
-            Sign-in goes through your real Halo login — tokens stay with
-            the AI client, never on our servers.
+            this week" and it pulls live from your tenant. Sign-in goes
+            through your real Halo login, and your access + refresh tokens
+            are saved only in the AI client — the server is a reverse proxy
+            to the Halo API with no backend storage.
           </p>
           <p style="margin-top: 14px">
             <a href="/mcp-setup/" style="font-weight: 600">
@@ -445,10 +446,9 @@
         <li>Schema-discovery + screenshot pattern for mapping UI labels to columns</li>
         <li>Real Halo OAuth — users see your tenant's normal login page</li>
         <li>One copy-paste URL per Halo tenant; no per-user setup</li>
-        <li>Works with Claude (web + desktop), Cursor, ChatGPT, MCP Inspector</li>
+        <li>Works with popular AI tools as a Streamable HTTP Transport MCP server</li>
         <li>Universal <code>/auth/callback</code> — Halo admins register one URI for the whole hub</li>
-        <li>Streamable HTTP transport with session-pooled JSON-RPC</li>
-        <li>Stateless server — Halo access + refresh tokens live with the AI client</li>
+        <li>Reverse proxy to the Halo API — no backend storage; your access + refresh tokens are saved only in the AI client</li>
       </ul>
     </section>
 
