@@ -23,6 +23,13 @@ const ESC = (s: string): string =>
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 
+/** OAuth failures are rare and high-value to diagnose, and otherwise get
+ *  swallowed into the redirect back to the client — so always surface them on
+ *  stderr (EasyPanel captures it) regardless of MCP_LOG_REQUESTS. */
+function logOauthFailure(msg: string): void {
+  process.stderr.write(`halo-mcp-server: oauth: ${msg}\n`);
+}
+
 export async function handleAuthCallback(
   req: IncomingMessage,
   res: ServerResponse,
@@ -70,10 +77,19 @@ async function dispatchMcp(
     return;
   }
   if (error) {
+    // Halo rejected /authorize (e.g. unregistered redirect_uri, unknown
+    // client_id, disabled grant) — it redirected back here with the reason.
+    logOauthFailure(
+      `authorize rejected by halo=${pending.haloBaseUrl} client=${pending.haloClientId}: ` +
+        `error=${error} description="${errorDescription}"`,
+    );
     failMcpFlow(res, pending, error, errorDescription);
     return;
   }
   if (!code) {
+    logOauthFailure(
+      `no code from halo=${pending.haloBaseUrl} client=${pending.haloClientId}`,
+    );
     failMcpFlow(res, pending, "invalid_request", "Halo returned no code.");
     return;
   }
@@ -82,6 +98,13 @@ async function dispatchMcp(
   try {
     tokens = await exchangeHaloCode(pending, code);
   } catch (e) {
+    // The server-to-server code→token exchange failed — the message carries
+    // Halo's status + body (PKCE mismatch, confidential-client secret required,
+    // version-specific token-endpoint behaviour, etc.).
+    logOauthFailure(
+      `token exchange failed for halo=${pending.haloBaseUrl} client=${pending.haloClientId}: ` +
+        `${(e as Error).message}`,
+    );
     failMcpFlow(res, pending, "server_error", (e as Error).message);
     return;
   }
