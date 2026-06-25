@@ -13,6 +13,11 @@
 export interface TenantConfig {
   halo: string;
   clientId: string;
+  /** OAuth scope requested at /authorize. Must match the scope granted on the
+   *  Halo Connect app or sign-in fails. Defaults to "all"; only non-default
+   *  values (e.g. "all:standard") are carried in the blob, so existing "all"
+   *  URLs stay byte-for-byte identical. */
+  scope?: string;
 }
 
 function base64urlEncode(input: string): string {
@@ -30,10 +35,13 @@ function base64urlDecode(input: string): string {
 }
 
 export function encodeTenant(cfg: TenantConfig): string {
-  const cleaned: TenantConfig = {
+  const cleaned: Record<string, string> = {
     halo: cfg.halo.replace(/\/+$/, ""),
     clientId: cfg.clientId.trim(),
   };
+  // Only carry a non-default scope so existing "all" URLs are unchanged.
+  const scope = cfg.scope?.trim();
+  if (scope && scope !== "all") cleaned.scope = scope;
   return base64urlEncode(JSON.stringify(cleaned));
 }
 
@@ -60,7 +68,9 @@ export function decodeTenant(blob: string): TenantConfig {
   if (typeof obj.clientId !== "string" || !obj.clientId) {
     throw new Error("Invalid tenant blob: missing clientId");
   }
-  return { halo: obj.halo.replace(/\/+$/, ""), clientId: obj.clientId };
+  const scope =
+    typeof obj.scope === "string" && obj.scope.trim() ? obj.scope.trim() : undefined;
+  return { halo: obj.halo.replace(/\/+$/, ""), clientId: obj.clientId, scope };
 }
 
 /** Parses /mcp/t/<config>/<rest> URL paths. Returns null for non-matching paths. */

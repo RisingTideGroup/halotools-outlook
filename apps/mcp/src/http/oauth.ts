@@ -112,7 +112,10 @@ export function handleAuthorize(
   haloAuthorize.searchParams.set("response_type", "code");
   haloAuthorize.searchParams.set("client_id", tenant.clientId);
   haloAuthorize.searchParams.set("redirect_uri", haloRedirectUri);
-  haloAuthorize.searchParams.set("scope", params.get("scope") ?? "all");
+  // Scope comes from the tenant config (set in the setup wizard), not the
+  // client — it must match what the admin granted the Connect app. Defaults to
+  // "all" so existing URLs without an explicit scope are unaffected.
+  haloAuthorize.searchParams.set("scope", tenant.scope ?? "all");
   haloAuthorize.searchParams.set("state", `mcp:${stateId}`);
   haloAuthorize.searchParams.set("code_challenge", haloChallenge);
   haloAuthorize.searchParams.set("code_challenge_method", "S256");

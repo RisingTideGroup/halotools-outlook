@@ -434,8 +434,24 @@
             </p>
           </li>
           <li>
-            <strong>Permissions / Scopes:</strong> <code>all</code>
-            (or the minimum needed — tickets, users, clients, actions).
+            <strong>Permissions / Scopes:</strong> pick one below and grant the
+            <em>same</em> scope on the Connect app — they must match or sign-in fails.
+            <div class="scope-choice" style="margin: 8px 0 2px">
+              <label style="display: block; margin-bottom: 6px">
+                <input type="radio" name="scope" value="all" checked />
+                <code>all</code> — full API access
+              </label>
+              <label style="display: block">
+                <input type="radio" name="scope" value="all:standard" />
+                <code>all:standard</code> — standard (non-admin) access
+              </label>
+            </div>
+            <p style="font-size: 13px; color: var(--ink-3); margin: 8px 0 0">
+              The signed-in agent's own Halo permissions always apply on top, so
+              the assistant can never do more than that user can — regardless of
+              scope. And in Claude, every tool has its own approval control, so
+              you stay in charge of each individual action.
+            </p>
           </li>
           <li>
             <strong>Save</strong> the application, then copy the generated
@@ -620,13 +636,20 @@
           .replace(/=+$/, "");
       }
 
-      function buildMcpUrl(halo, clientId) {
+      function buildMcpUrl(halo, clientId, scope) {
         const cleaned = {
           halo: halo.replace(/\/+$/, ""),
           clientId: clientId.trim(),
         };
+        // Only carry a non-default scope so "all" URLs stay unchanged.
+        if (scope && scope !== "all") cleaned.scope = scope;
         const blob = base64url(JSON.stringify(cleaned));
         return location.origin + "/mcp/t/" + blob + "/";
+      }
+
+      function selectedScope() {
+        const r = document.querySelector('input[name="scope"]:checked');
+        return r ? r.value : "all";
       }
 
       function clientSnippet(kind, url) {
@@ -732,7 +755,7 @@
           return;
         }
         state.clientId = v;
-        const url = buildMcpUrl(state.halo, state.clientId);
+        const url = buildMcpUrl(state.halo, state.clientId, selectedScope());
         $("#mcp-url-out").textContent = url;
         $("#mcp-url-copy").dataset.copy = url;
         $("#snippet-claude-desktop").textContent = clientSnippet("claude-desktop", url);
@@ -759,6 +782,8 @@
         clientInput.value = "";
         haloNext.disabled = true;
         clientNext.disabled = true;
+        const allScope = document.querySelector('input[name="scope"][value="all"]');
+        if (allScope) allScope.checked = true;
         show("step-halo");
       });
     </script>
