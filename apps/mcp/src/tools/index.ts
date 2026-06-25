@@ -223,15 +223,44 @@ function assertToolCatalogueParity(): void {
   }
 }
 
+/**
+ * Wrap an McpServer so every `registerTool(name, …)` call is auto-namespaced to
+ * `<prefix>_name`. This is the single chokepoint that gives each HaloPSA
+ * instance unique tool names without touching the 46 individual tool files — so
+ * any tool added later is prefixed automatically, with nothing to maintain or
+ * revert. All other server methods pass through to the real instance unchanged.
+ */
+export function withToolPrefix(server: McpServer, prefix: string): McpServer {
+  if (!prefix) return server;
+  return new Proxy(server, {
+    get(target, prop, receiver) {
+      if (prop === "registerTool") {
+        return (name: string, ...rest: unknown[]) =>
+          (
+            target as unknown as {
+              registerTool: (n: string, ...r: unknown[]) => unknown;
+            }
+          ).registerTool(`${prefix}_${name}`, ...rest);
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function"
+        ? (value as (...a: unknown[]) => unknown).bind(target)
+        : value;
+    },
+  }) as McpServer;
+}
+
 export function registerAllTools(
   server: McpServer,
   suppress?: ReadonlySet<string>,
+  prefix = "",
 ): void {
   assertToolCatalogueParity();
 
+  const target = withToolPrefix(server, prefix);
   for (const tool of TOOL_REGISTRY) {
     if (suppress?.has(tool.name)) continue;
-    tool.register(server);
+    tool.register(target);
   }
 
   // Walk the SDK's internal registered-tools record and patch annotations
@@ -248,7 +277,7 @@ export function registerAllTools(
 
   for (const [name, meta] of Object.entries(TOOL_METADATA)) {
     if (suppress?.has(name)) continue;
-    const rt = registeredTools[name];
+    const rt = registeredTools[prefix ? `${prefix}_${name}` : name];
     if (!rt || typeof rt.update !== "function") continue;
     rt.update({
       annotations: {
