@@ -9,6 +9,9 @@ export interface CreateServerOpts {
    *  showing multiple HaloPSA instances can distinguish them. Falls back to a
    *  generic name otherwise (stdio mode without a tenant). */
   tenant?: { haloBaseUrl: string; clientId: string };
+  /** Pre-resolved per-instance tool-name prefix (from Halo's /api/instanceinfo
+   *  tenant_id). When omitted, falls back to a hostname-derived slug. */
+  toolPrefix?: string;
 }
 
 function buildServerName(tenant: CreateServerOpts["tenant"]): string {
@@ -29,7 +32,8 @@ export function createHaloMcpServer(opts: CreateServerOpts = {}): McpServer {
   // Per-instance tool-name prefix so multiple HaloPSA connectors don't collide
   // in the client (e.g. `spiretech_runSql`). Empty in stdio mode (no tenant),
   // where there's only ever one server so no namespacing is needed.
-  const slug = opts.tenant ? instanceSlug(opts.tenant.haloBaseUrl) : "";
+  const slug =
+    opts.toolPrefix ?? (opts.tenant ? instanceSlug(opts.tenant.haloBaseUrl) : "");
   const toolPrefixNote = slug
     ? `TOOL NAMING: every tool in this connection is namespaced \`${slug}_<tool>\` ` +
       `(e.g. \`${slug}_runSql\`, \`${slug}_exploreSchema\`) so multiple HaloPSA ` +
