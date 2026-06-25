@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAllTools } from "./tools/index.js";
+import { instanceSlug } from "./http/tenant.js";
 
 export interface CreateServerOpts {
   suppressTools?: ReadonlySet<string>;
@@ -8,6 +9,9 @@ export interface CreateServerOpts {
    *  showing multiple HaloPSA instances can distinguish them. Falls back to a
    *  generic name otherwise (stdio mode without a tenant). */
   tenant?: { haloBaseUrl: string; clientId: string };
+  /** Pre-resolved per-instance tool-name prefix (from Halo's /api/instanceinfo
+   *  tenant_id). When omitted, falls back to a hostname-derived slug. */
+  toolPrefix?: string;
 }
 
 function buildServerName(tenant: CreateServerOpts["tenant"]): string {
@@ -25,6 +29,17 @@ const BRAND_WEBSITE_URL = "https://tools.iusehalo.com/";
 const BRAND_ICON_URL = "https://tools.iusehalo.com/favicon.png";
 
 export function createHaloMcpServer(opts: CreateServerOpts = {}): McpServer {
+  // Per-instance tool-name prefix so multiple HaloPSA connectors don't collide
+  // in the client (e.g. `spiretech_runSql`). Empty in stdio mode (no tenant),
+  // where there's only ever one server so no namespacing is needed.
+  const slug =
+    opts.toolPrefix ?? (opts.tenant ? instanceSlug(opts.tenant.haloBaseUrl) : "");
+  const toolPrefixNote = slug
+    ? `TOOL NAMING: every tool in this connection is namespaced \`${slug}_<tool>\` ` +
+      `(e.g. \`${slug}_runSql\`, \`${slug}_exploreSchema\`) so multiple HaloPSA ` +
+      `instances don't collide in your client. Tool names below omit that prefix ` +
+      `for readability — prepend \`${slug}_\` when calling.\n\n`
+    : "";
   const server = new McpServer(
     {
       name: buildServerName(opts.tenant),
@@ -43,6 +58,7 @@ export function createHaloMcpServer(opts: CreateServerOpts = {}): McpServer {
         tools: {},
       },
       instructions:
+        toolPrefixNote +
         "HaloPSA tools for an MSP. The point of this MCP is to crunch data a human can't quickly assemble from Halo's UI — cross-client trends, time-series rollups, profitability, MTTR/SLA by category, ticket similarity, categorisation. Per-ticket edits are usually faster in Halo's UI; prefer this MCP for analysis and bulk operations.\n\n" +
         "TOOL FAMILIES:\n" +
         "- Ad-hoc analysis: exploreSchema (START HERE for unfamiliar data — discover tables/columns and sample real rows so you understand the schema before querying), runSql (highest-leverage — SELECT via Report Center; read its 7 rules), listReports + getReport (check for an existing saved report FIRST, and read its SQL as a worked example — but validate it loads). haloApiGet is the read-only REST lens (GET only; endpoint name ≈ table name — handy for decoding columns); haloApiRaw is the write escape hatch (POST/PUT/PATCH/DELETE).\n" +
@@ -76,6 +92,6 @@ export function createHaloMcpServer(opts: CreateServerOpts = {}): McpServer {
     },
   );
 
-  registerAllTools(server, opts.suppressTools);
+  registerAllTools(server, opts.suppressTools, slug);
   return server;
 }

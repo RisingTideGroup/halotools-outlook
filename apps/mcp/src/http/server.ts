@@ -27,6 +27,8 @@ import {
 } from "../halo/native-mcp.js";
 
 import { parseTenantPath } from "./tenant.js";
+import { withToolPrefix } from "../tools/index.js";
+import { resolveInstanceSlug } from "../halo/instance-info.js";
 import { getPublicOrigin } from "./origin.js";
 import {
   emitProtectedResourceMetadata,
@@ -282,17 +284,24 @@ async function handleMcpTransport(
   const rawBody = await readBody(req);
   const parsedBody = rawBody ? safeJson(rawBody) : undefined;
 
-  // Which local tools to hide in favour of Halo's native MCP — cached per tenant
-  // (sliding TTL), busted below if the request fails.
-  const haloMcp = await detectHaloMcp(tenant.halo, accessToken);
+  // Two tenant-scoped lookups, both cached: which local tools to hide in favour
+  // of Halo's native MCP, and the per-instance tool-name slug (from
+  // /api/instanceinfo). Run them together.
+  const [haloMcp, slug] = await Promise.all([
+    detectHaloMcp(tenant.halo, accessToken),
+    resolveInstanceSlug(tenant.halo),
+  ]);
   const suppress = haloMcp.enabled ? OVERLAPPING_TOOL_NAMES : undefined;
 
   const server = createHaloMcpServer({
     suppressTools: suppress,
     tenant: { haloBaseUrl: tenant.halo, clientId: tenant.clientId },
+    toolPrefix: slug,
   });
   if (haloMcp.enabled) {
-    registerHaloProxyTools(server, haloMcp.tools, tenant.halo);
+    // Same per-instance prefix as the local tools so Halo's native tools also
+    // get unique names across connectors (e.g. `settonconsulting_halo_<tool>`).
+    registerHaloProxyTools(withToolPrefix(server, slug), haloMcp.tools, tenant.halo);
   }
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless
