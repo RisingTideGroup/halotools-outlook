@@ -26,7 +26,8 @@ import {
   OVERLAPPING_TOOL_NAMES,
 } from "../halo/native-mcp.js";
 
-import { parseTenantPath } from "./tenant.js";
+import { parseTenantPath, instanceSlug } from "./tenant.js";
+import { withToolPrefix } from "../tools/index.js";
 import { getPublicOrigin } from "./origin.js";
 import {
   emitProtectedResourceMetadata,
@@ -292,7 +293,13 @@ async function handleMcpTransport(
     tenant: { haloBaseUrl: tenant.halo, clientId: tenant.clientId },
   });
   if (haloMcp.enabled) {
-    registerHaloProxyTools(server, haloMcp.tools, tenant.halo);
+    // Same per-instance prefix as the local tools so Halo's native tools also
+    // get unique names across connectors (e.g. `spiretech_halo_<tool>`).
+    registerHaloProxyTools(
+      withToolPrefix(server, instanceSlug(tenant.halo)),
+      haloMcp.tools,
+      tenant.halo,
+    );
   }
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless

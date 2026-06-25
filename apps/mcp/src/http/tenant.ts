@@ -63,6 +63,51 @@ export function decodeTenant(blob: string): TenantConfig {
   return { halo: obj.halo.replace(/\/+$/, ""), clientId: obj.clientId };
 }
 
+/**
+ * Derive a short, stable per-instance slug from a Halo base URL, used to
+ * namespace this instance's MCP tool names so multiple HaloPSA connections
+ * don't collide in a client (e.g. `spiretech_runSql`).
+ *
+ *   admin.spiretech.com        → spiretech      (registrable domain label)
+ *   psa.settonconsulting.com   → settonconsulting
+ *   service.risingtidegroup.net → risingtidegroup
+ *   acme.halopsa.com           → acme           (subdomain for *.halopsa.com)
+ *
+ * For *.halopsa.com tenants the meaningful name is the subdomain; for custom
+ * domains it's the registrable domain's main label (the SLD). Falls back to
+ * "halo" if nothing usable can be parsed.
+ */
+export function instanceSlug(haloBaseUrl: string): string {
+  let host: string;
+  try {
+    host = new URL(haloBaseUrl).hostname.toLowerCase();
+  } catch {
+    host = haloBaseUrl.toLowerCase();
+  }
+  const labels = host.replace(/\.+$/, "").split(".").filter(Boolean);
+  // Second-level public-suffix tokens (e.g. co.uk, com.au, org.nz) — when the
+  // second-to-last label is one of these, the registrable name is one further
+  // left. Covers the common ccTLD cases without a full public-suffix list.
+  const SECOND_LEVEL_SUFFIXES = new Set([
+    "co", "com", "org", "net", "gov", "edu", "ac", "ltd", "plc",
+  ]);
+  let slug = "halo";
+  if (labels.length >= 3 && host.endsWith("halopsa.com")) {
+    // <subdomain>.halopsa.com → the label immediately before "halopsa"
+    slug = labels[labels.length - 3];
+  } else if (labels.length >= 2) {
+    // custom domain → registrable domain's main label, skipping a two-part
+    // TLD's second level (example.co.uk → "example", not "co").
+    let i = labels.length - 2;
+    if (i - 1 >= 0 && SECOND_LEVEL_SUFFIXES.has(labels[i])) i -= 1;
+    slug = labels[i];
+  } else if (labels.length === 1) {
+    slug = labels[0];
+  }
+  slug = slug.replace(/[^a-z0-9]/g, "");
+  return slug || "halo";
+}
+
 /** Parses /mcp/t/<config>/<rest> URL paths. Returns null for non-matching paths. */
 export interface ParsedTenantPath {
   configBlob: string;
