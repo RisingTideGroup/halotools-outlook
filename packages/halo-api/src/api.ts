@@ -19,6 +19,7 @@ import type {
   HaloFeedItem,
   HaloFeedResponse,
   HaloPriority,
+  HaloControl,
   CreateTicketPayload,
   CreateActionPayload,
   CreateContactPayload,
@@ -387,6 +388,62 @@ export async function findTicketsForEmail(messageIds: string[]): Promise<HaloTic
   return tickets.filter((t): t is HaloTicket => !!t && typeof t.id === "number");
 }
 
+/**
+ * Extract the numeric ticket ID embedded in an email subject by Halo's email
+ * subject tagging feature. Checks every known tag format for the tenant:
+ *   1. System-wide tags from GET /api/Control (email_start_tag / email_end_tag)
+ *   2. Per-ticket-type overrides from the cached ticket type list
+ *      (email_start_tag_override / email_end_tag_override on each type)
+ *
+ * Deduplicates identical tag pairs before trying so a tenant with no overrides
+ * only runs one regex. Returns the first ticket ID found.
+ */
+export async function extractTicketIdFromSubject(subject: string): Promise<number | undefined> {
+  const pairs: Array<{ start: string; end: string }> = [];
+
+  // System-wide pair from /api/Control
+  const control = await getControl();
+  if (control.email_start_tag && control.email_end_tag) {
+    pairs.push({ start: control.email_start_tag, end: control.email_end_tag });
+  }
+
+  // Per-ticket-type override pairs (from the already-cached list)
+  const types = await listTicketTypes();
+  for (const t of types) {
+    if (t.email_start_tag_override && t.email_end_tag_override) {
+      const s = t.email_start_tag_override;
+      const e = t.email_end_tag_override;
+      if (!pairs.some((p) => p.start === s && p.end === e)) {
+        pairs.push({ start: s, end: e });
+      }
+    }
+  }
+
+  for (const { start, end } of pairs) {
+    const es = start.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const ee = end.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const m = subject.match(new RegExp(es + "(\\d+)" + ee));
+    if (m) return parseInt(m[1], 10);
+  }
+
+  return undefined;
+}
+
+/**
+ * Fetch the ticket whose ID is embedded in the email subject tag, or undefined
+ * if no configured tag pattern matches or the ticket can't be retrieved.
+ */
+export async function findTicketBySubjectTag(subject: string): Promise<HaloTicket | undefined> {
+  const id = await extractTicketIdFromSubject(subject);
+  if (!id) return undefined;
+  try {
+    const ticket = await call<HaloTicket | undefined>(`/Tickets/${id}`);
+    return ticket && typeof ticket.id === "number" ? ticket : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // ---------- Reference data (cached in-memory for the session) ----------
 // All keyed by haloBaseUrl so stateless multi-tenant callers don't see each
 // other's data when serving multiple tenants from one process.
@@ -395,6 +452,7 @@ const _ticketTypesCache = new Map<string, HaloTicketType[]>();
 const _agentsCache = new Map<string, HaloAgent[]>();
 const _statusesCache = new Map<string, HaloStatus[]>();
 const _prioritiesCache = new Map<string, HaloPriority[]>();
+const _controlCache = new Map<string, HaloControl>();
 
 export async function listTicketTypes(force = false): Promise<HaloTicketType[]> {
   const key = cacheKey();
@@ -480,6 +538,22 @@ export function clearReferenceCache() {
   _agentsCache.delete(key);
   _statusesCache.delete(key);
   _prioritiesCache.delete(key);
+  _controlCache.delete(key);
+}
+
+/** Fetch and cache GET /api/Control — tenant-wide settings including email subject tags. */
+export async function getControl(force = false): Promise<HaloControl> {
+  const key = cacheKey();
+  const hit = _controlCache.get(key);
+  if (hit && !force) return hit;
+  const res = await call<HaloControl>("/Control");
+  _controlCache.set(key, res);
+  writeControlSnapshot(res);
+  return res;
+}
+
+export function getCachedControl(): HaloControl | undefined {
+  return _controlCache.get(cacheKey());
 }
 
 // ---------- ClientCache (bootstrap data) ----------
@@ -530,6 +604,22 @@ export async function getClientCache(force = false): Promise<HaloClientCache> {
  * Trimmed to just the fields the on-send handler needs.
  */
 const AGENT_SNAPSHOT_KEY = "halo.agentSnapshot.v1";
+const CONTROL_SNAPSHOT_KEY = "halo.controlSnapshot.v1";
+
+function writeControlSnapshot(control: HaloControl): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      CONTROL_SNAPSHOT_KEY,
+      JSON.stringify({
+        email_start_tag: control.email_start_tag ?? "",
+        email_end_tag: control.email_end_tag ?? "",
+      }),
+    );
+  } catch {
+    /* swallow — quota, private mode, etc. */
+  }
+}
 
 interface AgentSnapshot {
   id: number;

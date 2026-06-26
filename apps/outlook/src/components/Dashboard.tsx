@@ -22,7 +22,7 @@ import {
 } from "@fluentui/react-icons";
 import { ContactCard } from "./ContactCard";
 import { TicketList } from "./TicketList";
-import { LogActions } from "./LogActions";
+import { LogActions, QuickImportBanner } from "./LogActions";
 import { SettingsScreen } from "./SettingsScreen";
 import { ActivityFeed } from "./ActivityFeed";
 import { LogNoteDialog } from "./LogNoteDialog";
@@ -32,6 +32,7 @@ import {
   findClientByDomain,
   listOpenTicketsForClient,
   findTicketsForEmail,
+  findTicketBySubjectTag,
 } from "@iusehalo/halo-api";
 import { signOut } from "@iusehalo/halo-api";
 import { clearConfig, getConfig, getCachedClientCache } from "@iusehalo/halo-api";
@@ -104,6 +105,7 @@ export function Dashboard({ email, onSignedOut }: Props) {
   // Auto-resolve sender → contact + client whenever the open email changes.
   // Refresh button bumps `refreshTick` to trigger a re-run.
   const [refreshTick, setRefreshTick] = useState(0);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -113,6 +115,7 @@ export function Dashboard({ email, onSignedOut }: Props) {
     setClient(undefined);
     setOpenTickets([]);
     setThreadTickets([]);
+    setBannerDismissed(false);
 
     (async () => {
       try {
@@ -144,13 +147,21 @@ export function Dashboard({ email, onSignedOut }: Props) {
           email.inReplyTo,
           ...email.references,
         ].filter((id): id is string => !!id);
-        if (threadIds.length > 0) {
-          findTicketsForEmail(threadIds)
-            .then((t) => !cancelled && setThreadTickets(t))
-            .catch(() => {
-              /* swallow — non-fatal */
-            });
-        }
+
+        // Run RFC Message-ID and subject-tag lookups in parallel; merge + dedup.
+        const rfcPromise: Promise<HaloTicket[]> = threadIds.length > 0
+          ? findTicketsForEmail(threadIds).catch(() => [])
+          : Promise.resolve([]);
+        const tagPromise: Promise<HaloTicket[]> = findTicketBySubjectTag(email.subject)
+          .then((t) => (t ? [t] : []))
+          .catch(() => []);
+
+        Promise.all([rfcPromise, tagPromise]).then(([rfc, tag]) => {
+          if (cancelled) return;
+          const seen = new Set<number>();
+          const merged = [...rfc, ...tag].filter((t) => !seen.has(t.id) && seen.add(t.id));
+          setThreadTickets(merged);
+        });
       } catch (e) {
         if (!cancelled) setError((e as Error).message);
       } finally {
@@ -294,6 +305,19 @@ export function Dashboard({ email, onSignedOut }: Props) {
           />
 
           <Divider />
+
+          {/* 1-click import banner: show when exactly one thread-matched ticket
+              is found on an incoming email so the agent can log it in one tap. */}
+          {email.direction !== "outgoing" &&
+            threadTickets.length === 1 &&
+            !bannerDismissed && (
+              <QuickImportBanner
+                email={email}
+                contact={contact}
+                ticket={threadTickets[0]}
+                onDismissed={() => setBannerDismissed(true)}
+              />
+            )}
 
           {/* Primary actions sit above the ticket lists so they're always
               visible without scrolling, regardless of how many tickets a

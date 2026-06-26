@@ -1,0 +1,204 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.17",
+  "id": "10344d7a-f46f-463c-a0fb-5fbf43b3d074",
+  "version": "0.1.2",
+  "developer": {
+    "name": "Rising Tide Consulting Group",
+    "websiteUrl": "https://risingtidegroup.net",
+    "privacyUrl": "https://iusehalo.com/privacy",
+    "termsOfUseUrl": "https://iusehalo.com/terms"
+  },
+  "name": {
+    "short": "HaloPSA for Outlook (DEV)",
+    "full": "HaloPSA for Outlook by Rising Tide"
+  },
+  "description": {
+    "short": "Surface Halo context and log emails to tickets without leaving Outlook.",
+    "full": "Look up the sender's contact, company, and open tickets in HaloPSA. Append the current email to an existing ticket or create a new one — all from your inbox. Multi-tenant: connect to your own HaloPSA instance."
+  },
+  "icons": {
+    "outline": "assets/icon-32.png",
+    "color": "assets/icon-128.png"
+  },
+  "accentColor": "#0F6CBD",
+  "localizationInfo": {
+    "defaultLanguageTag": "en-US"
+  },
+  "authorization": {
+    "permissions": {
+      "resourceSpecific": [
+        {
+          "name": "MailboxItem.ReadWrite.User",
+          "type": "Delegated"
+        }
+      ]
+    }
+  },
+  "validDomains": [
+    "tools.iusehalo.com",
+    "localhost:3000",
+    "login.microsoftonline.com",
+    "login.windows.net",
+    "login.live.com",
+    "accounts.google.com"
+  ],
+  "extensions": [
+    {
+      "requirements": {
+        "scopes": ["mail"],
+        "capabilities": [
+          { "name": "Mailbox", "minVersion": "1.10" }
+        ]
+      },
+      "runtimes": [
+        {
+          "id": "TaskPaneRuntime",
+          "type": "general",
+          "code": {
+            "page": "https://localhost:3000/outlook/index.html"
+          },
+          "lifetime": "short",
+          "actions": [
+            {
+              "id": "ShowTaskPane",
+              "type": "openPage",
+              "pinnable": true,
+              "view": "dashboard"
+            }
+          ]
+        },
+        {
+          "id": "ComposeRuntime",
+          "type": "general",
+          "code": {
+            "page": "https://localhost:3000/outlook/compose/"
+          },
+          "lifetime": "short",
+          "actions": [
+            {
+              "id": "ShowComposePane",
+              "type": "openPage",
+              "pinnable": true,
+              "view": "dashboard"
+            }
+          ]
+        },
+        {
+          "id": "OnMessageSendRuntime",
+          "requirements": {
+            "capabilities": [
+              { "name": "Mailbox", "minVersion": "1.15" }
+            ]
+          },
+          "type": "general",
+          "code": {
+            "page": "https://localhost:3000/outlook/launchevent.html",
+            "script": "https://localhost:3000/outlook/launchevent.js"
+          },
+          "lifetime": "short",
+          "actions": [
+            {
+              "id": "onMessageSendHandler",
+              "type": "executeFunction",
+              "displayName": "onMessageSendHandler"
+            }
+          ]
+        }
+      ],
+      "autoRunEvents": [
+        {
+          "requirements": {
+            "capabilities": [
+              { "name": "Mailbox", "minVersion": "1.15" }
+            ],
+            "scopes": ["mail"]
+          },
+          "events": [
+            {
+              "type": "messageSending",
+              "actionId": "onMessageSendHandler",
+              "options": {
+                "sendMode": "promptUser"
+              }
+            }
+          ]
+        }
+      ],
+      "ribbons": [
+        {
+          "contexts": ["mailRead"],
+          "tabs": [
+            {
+              "builtInTabId": "TabDefault",
+              "groups": [
+                {
+                  "id": "HaloGroup",
+                  "label": "HaloPSA",
+                  "icons": [
+                    { "size": 16, "url": "https://localhost:3000/outlook/assets/icon-16.png" },
+                    { "size": 32, "url": "https://localhost:3000/outlook/assets/icon-32.png" },
+                    { "size": 80, "url": "https://localhost:3000/outlook/assets/icon-80.png" }
+                  ],
+                  "controls": [
+                    {
+                      "id": "ShowHaloPane",
+                      "type": "button",
+                      "label": "Halo",
+                      "icons": [
+                        { "size": 16, "url": "https://localhost:3000/outlook/assets/icon-16.png" },
+                        { "size": 32, "url": "https://localhost:3000/outlook/assets/icon-32.png" },
+                        { "size": 80, "url": "https://localhost:3000/outlook/assets/icon-80.png" }
+                      ],
+                      "supertip": {
+                        "title": "Open Halo",
+                        "description": "Show sender context, open tickets, and log this email to a HaloPSA ticket."
+                      },
+                      "actionId": "ShowTaskPane"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "contexts": ["mailCompose"],
+          "tabs": [
+            {
+              "builtInTabId": "TabDefault",
+              "groups": [
+                {
+                  "id": "HaloComposeGroup",
+                  "label": "HaloPSA",
+                  "icons": [
+                    { "size": 16, "url": "https://localhost:3000/outlook/assets/icon-16.png" },
+                    { "size": 32, "url": "https://localhost:3000/outlook/assets/icon-32.png" },
+                    { "size": 80, "url": "https://localhost:3000/outlook/assets/icon-80.png" }
+                  ],
+                  "controls": [
+                    {
+                      "id": "ShowHaloComposePane",
+                      "type": "button",
+                      "label": "Halo",
+                      "icons": [
+                        { "size": 16, "url": "https://localhost:3000/outlook/assets/icon-16.png" },
+                        { "size": 32, "url": "https://localhost:3000/outlook/assets/icon-32.png" },
+                        { "size": 80, "url": "https://localhost:3000/outlook/assets/icon-80.png" }
+                      ],
+                      "supertip": {
+                        "title": "Open Halo",
+                        "description": "Insert ticket links, KB articles, and log this outgoing email to a HaloPSA ticket."
+                      },
+                      "actionId": "ShowComposePane"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

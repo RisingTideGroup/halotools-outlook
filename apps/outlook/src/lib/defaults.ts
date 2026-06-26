@@ -14,6 +14,8 @@ export interface UserDefaults {
   defaultOutgoingOutcome?: string;
   /** Whether attachments toggle defaults to on */
   includeAttachmentsByDefault?: boolean;
+  /** Auto-stage replies to Halo tickets based on recipient lookup */
+  autoLogRepliesToTickets?: boolean;
 }
 
 export function getDefaults(): UserDefaults {

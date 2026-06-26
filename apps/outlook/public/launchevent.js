@@ -31,6 +31,11 @@
   var TIMER_TIME_PROP = "haloComposeTimeSeconds";
   var CHARGE_RATE_PROP = "haloComposeChargeRateId";
   var DIAG_LOG_KEY = "halo.diagLog.v1";
+  var DEFAULTS_KEY = "halo.defaults.v1";
+  var CONTROL_SNAPSHOT_KEY = "halo.controlSnapshot.v1";
+  // Shorter per-request budget for the auto-lookup path so that two sequential
+  // calls (user search → ticket list) still finish well inside SAFETY_MS.
+  var AUTO_LOOKUP_FETCH_MS = 1500;
   var MAX_ENTRIES = 200;
   var MAX_MESSAGE_LEN = 500;
   var MAX_BYTES = 64000;
@@ -57,6 +62,124 @@
   function getConfig() {
     var rs = getRoaming();
     return rs ? rs.get(CONFIG_KEY) : undefined;
+  }
+
+  function getDefaults() {
+    try {
+      var rs = getRoaming();
+      return (rs && rs.get(DEFAULTS_KEY)) || {};
+    } catch (e) { return {}; }
+  }
+
+  function domainOf(email) {
+    var at = email.lastIndexOf("@");
+    return at >= 0 ? email.slice(at + 1).toLowerCase() : "";
+  }
+
+  // Resolve To: recipients to a single open Halo ticket, or null when there
+  // are zero or multiple matches (ambiguous — don't auto-log).
+  // Strategy: search for a Halo user by email, fall back to client by domain,
+  // then list open tickets for the found entity. Fan out in parallel across
+  // recipients; dedupe results. Returns Promise<number|null>.
+  function autoFindTicketForRecipients(toEmails) {
+    if (!toEmails || toEmails.length === 0) return Promise.resolve(null);
+    return getAccessToken().then(function (token) {
+      var cfg = getConfig();
+      var hdrs = { "Authorization": "Bearer " + token, "Accept": "application/json" };
+
+      // Cap at 3 recipients to stay within the time budget.
+      var limited = toEmails.slice(0, 3);
+
+      return Promise.all(limited.map(function (email) {
+        var domain = domainOf(email);
+
+        // 1. User lookup by email.
+        return fetchWithTimeout(
+          cfg.haloBaseUrl + "/api/Users?search=" + encodeURIComponent(email) + "&pageinate=false",
+          { headers: hdrs },
+          AUTO_LOOKUP_FETCH_MS
+        ).then(function (r) {
+          return r.ok ? r.json() : [];
+        }).then(function (json) {
+          var users = Array.isArray(json) ? json : ((json && json.users) || []);
+          var user = null;
+          for (var i = 0; i < users.length; i++) {
+            if (users[i].emailaddress &&
+                users[i].emailaddress.toLowerCase() === email.toLowerCase()) {
+              user = users[i];
+              break;
+            }
+          }
+
+          // 2a. User found → query open tickets by user_id.
+          if (user && user.id) {
+            return fetchWithTimeout(
+              cfg.haloBaseUrl + "/api/Tickets?user_id=" + user.id +
+                "&open_only=true&pageinate=false&includedetails=true",
+              { headers: hdrs },
+              AUTO_LOOKUP_FETCH_MS
+            ).then(function (r) {
+              return r.ok ? r.json() : [];
+            }).then(function (json) {
+              return Array.isArray(json) ? json : ((json && json.tickets) || []);
+            });
+          }
+
+          // 2b. No user → client search by domain.
+          if (!domain) return [];
+          return fetchWithTimeout(
+            cfg.haloBaseUrl + "/api/Client?search=" + encodeURIComponent(domain) +
+              "&pageinate=false",
+            { headers: hdrs },
+            AUTO_LOOKUP_FETCH_MS
+          ).then(function (r) {
+            return r.ok ? r.json() : [];
+          }).then(function (json) {
+            var clients = Array.isArray(json) ? json : ((json && json.clients) || []);
+            // Prefer a client whose emaildomain matches; fall back to first result.
+            var client = null;
+            for (var i = 0; i < clients.length; i++) {
+              if (clients[i].emaildomain &&
+                  domain.indexOf(clients[i].emaildomain.toLowerCase()) >= 0) {
+                client = clients[i];
+                break;
+              }
+            }
+            if (!client && clients.length > 0) client = clients[0];
+            if (!client) return [];
+
+            return fetchWithTimeout(
+              cfg.haloBaseUrl + "/api/Tickets?client_id=" + client.id +
+                "&open_only=true&pageinate=false&includedetails=true",
+              { headers: hdrs },
+              AUTO_LOOKUP_FETCH_MS
+            ).then(function (r) {
+              return r.ok ? r.json() : [];
+            }).then(function (json) {
+              return Array.isArray(json) ? json : ((json && json.tickets) || []);
+            });
+          });
+        }).catch(function () { return []; });
+      }));
+    }).then(function (ticketArrays) {
+      var seen = {};
+      var tickets = [];
+      for (var i = 0; i < ticketArrays.length; i++) {
+        var arr = ticketArrays[i] || [];
+        for (var j = 0; j < arr.length; j++) {
+          var t = arr[j];
+          if (t && typeof t.id === "number" && !seen[t.id]) {
+            seen[t.id] = true;
+            tickets.push(t);
+          }
+        }
+      }
+      logEvent("info", "auto-lookup complete", { found: tickets.length });
+      return tickets.length === 1 ? tickets[0].id : null;
+    }).catch(function (err) {
+      logEvent("warn", "auto-lookup error: " + (err && err.message ? err.message : String(err)));
+      return null;
+    });
   }
 
   // Append a diagnostic entry to the shared cross-runtime log. Synchronous —
@@ -217,6 +340,30 @@
     });
   }
 
+  // Read the control snapshot the task pane wrote after loading /api/Control.
+  // Synchronous, never throws — falls through to {} when not yet written.
+  function getControlSnapshot() {
+    try {
+      var raw = window.localStorage.getItem(CONTROL_SNAPSHOT_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) { return {}; }
+  }
+
+  // Try to extract a Halo ticket ID from an email subject using the configured
+  // email start/end tags (e.g. "[" and "]" wrapping the ticket number).
+  // Reads from the control snapshot — returns a number or null.
+  function extractTicketIdFromSubject(subject) {
+    if (!subject) return null;
+    var snap = getControlSnapshot();
+    var start = snap.email_start_tag;
+    var end = snap.email_end_tag;
+    if (!start || !end) return null;
+    var escStart = start.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    var escEnd   = end.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    var m = new RegExp(escStart + "(\\d+)" + escEnd).exec(subject);
+    return m ? Number(m[1]) : null;
+  }
+
   // Read the agent snapshot the task pane wrote after its ClientCache load.
   // Synchronous, never throws — falls through to {} when the task pane has
   // never opened or ClientCache hasn't resolved yet. Used for agent_id
@@ -238,6 +385,48 @@
     var i = html.indexOf(sig);
     if (i === -1) return html;
     return html.slice(0, i) + html.slice(i + sig.length);
+  }
+
+  // Strip the quoted/forwarded portion from an Outlook HTML reply body so
+  // only the agent's new text is logged to Halo. Handles the three most
+  // common quoting patterns:
+  //   • Outlook desktop/OWA: <div id="divRplyFwdMsg"> (+ preceding <hr>)
+  //   • Generic / iOS Mail:  <blockquote> wrapping the quoted thread
+  //   • Gmail:               <div class="gmail_quote">
+  // Falls back to the original html on any error — never blocks the send.
+  function stripQuotedContent(html) {
+    if (!html) return html;
+    try {
+      var parser = new DOMParser();
+      var doc = parser.parseFromString(html, "text/html");
+      var body = doc.body;
+
+      // Outlook reply/forward separator.
+      var rplyDiv = doc.getElementById("divRplyFwdMsg");
+      if (rplyDiv && rplyDiv.parentNode) {
+        var children = Array.from(rplyDiv.parentNode.childNodes);
+        var idx = children.indexOf(rplyDiv);
+        // Pull in a leading <hr> if present so we don't leave a dangling rule.
+        var start = (idx > 0 && children[idx - 1].nodeName === "HR") ? idx - 1 : idx;
+        children.slice(start).forEach(function (n) {
+          if (n.parentNode) n.parentNode.removeChild(n);
+        });
+      }
+
+      // Blockquote-style quoting (iOS Mail, many web clients).
+      Array.from(body.querySelectorAll("blockquote")).forEach(function (el) {
+        if (el.parentNode) el.parentNode.removeChild(el);
+      });
+
+      // Gmail quote wrapper.
+      Array.from(body.querySelectorAll("div.gmail_quote")).forEach(function (el) {
+        if (el.parentNode) el.parentNode.removeChild(el);
+      });
+
+      return body.innerHTML.trim();
+    } catch (e) {
+      return html;
+    }
   }
 
   // Minimal HTML → plain text for emailbody field. Same approach as the
@@ -605,8 +794,67 @@
       });
 
       if (!stagedTicketId && !pending) {
-        clearTimeout(safety);
-        finish();
+        var defaults = getDefaults();
+        if (!defaults.autoLogRepliesToTickets) {
+          clearTimeout(safety);
+          finish();
+          return;
+        }
+        // Auto-import path: subject-tag match first (fast, unambiguous for
+        // replies to ticket emails), then fall back to recipient lookup.
+        stage = "autoLookup";
+        logEvent("info", "stage → autoLookup");
+        readSubject().then(function (subject) {
+          var tagId = extractTicketIdFromSubject(subject);
+          if (tagId) {
+            logEvent("info", "auto-lookup: subject-tag match", { ticketId: tagId });
+            return Promise.resolve({ foundId: tagId, subject: subject, toEmails: null });
+          }
+          // No subject tag — fall back to recipient lookup (requires unique match).
+          return readRecipientsField(Office.context.mailbox.item.to)
+            .then(function (toEmails) {
+              return autoFindTicketForRecipients(toEmails).then(function (foundId) {
+                return { foundId: foundId, subject: subject, toEmails: toEmails };
+              });
+            });
+        }).then(function (result) {
+          if (!result.foundId) {
+            logEvent("info", "auto-lookup: no match, skipping");
+            clearTimeout(safety);
+            finish();
+            return;
+          }
+          logEvent("info", "auto-lookup: matched ticket", { ticketId: result.foundId });
+          stage = "readItem";
+          var toPromise = result.toEmails
+            ? Promise.resolve(result.toEmails)
+            : readRecipientsField(Office.context.mailbox.item.to);
+          return Promise.all([
+            readBody(),
+            Promise.resolve(result.subject),
+            toPromise,
+            readRecipientsField(Office.context.mailbox.item.cc),
+          ]).then(function (parts) {
+            var data = {
+              body: parts[0],
+              subject: parts[1],
+              to: parts[2],
+              cc: parts[3],
+              timeSeconds: 0,
+              chargeRateId: 0,
+            };
+            stage = "appendToHalo";
+            logEvent("info", "stage → appendToHalo (auto)", { ticketId: result.foundId });
+            return appendToHalo(result.foundId, data);
+          }).then(function () {
+            clearTimeout(safety);
+            finish();
+          });
+        }).catch(function (err) {
+          clearTimeout(safety);
+          finish("HaloPSA auto-import failed: " +
+            (err && err.message ? err.message : String(err)) + ". Email sent anyway.");
+        });
         return;
       }
 

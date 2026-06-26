@@ -124,6 +124,9 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
   const [includeAttach, setIncludeAttach] = useState<boolean>(
     initialDefaults.includeAttachmentsByDefault ?? true,
   );
+  const [autoLogReplies, setAutoLogReplies] = useState<boolean>(
+    initialDefaults.autoLogRepliesToTickets ?? false,
+  );
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [events, setEvents] = useState<LogEntry[]>(() => getEvents());
@@ -192,6 +195,7 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
         defaultTicketTypeId: defaultTypeId,
         defaultAppendOutcome: defaultOutcome,
         includeAttachmentsByDefault: includeAttach,
+        autoLogRepliesToTickets: autoLogReplies,
       });
       onClose();
     } finally {
@@ -271,6 +275,18 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
           onChange={(_, d) => setIncludeAttach(d.checked)}
           label="Include attachments by default when logging"
         />
+
+        <Switch
+          checked={autoLogReplies}
+          onChange={(_, d) => setAutoLogReplies(d.checked)}
+          label="Auto-import replies into Halo tickets on send"
+        />
+        <Text className={styles.meta}>
+          When enabled, Halo automatically logs your reply to the matching open ticket on
+          send — no need to open the compose pane. If exactly one open ticket is found for
+          the recipient it is logged silently; if multiple are found the email sends without
+          logging (open the Halo pane to pick manually).
+        </Text>
 
         <Divider />
 
