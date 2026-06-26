@@ -127,6 +127,9 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
   const [autoLogReplies, setAutoLogReplies] = useState<boolean>(
     initialDefaults.autoLogRepliesToTickets ?? false,
   );
+  const [includeInlineImages, setIncludeInlineImages] = useState<boolean>(
+    initialDefaults.includeInlineImages ?? true,
+  );
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [events, setEvents] = useState<LogEntry[]>(() => getEvents());
@@ -196,6 +199,7 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
         defaultAppendOutcome: defaultOutcome,
         includeAttachmentsByDefault: includeAttach,
         autoLogRepliesToTickets: autoLogReplies,
+        includeInlineImages,
       });
       onClose();
     } finally {
@@ -286,6 +290,17 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
           send — no need to open the compose pane. If exactly one open ticket is found for
           the recipient it is logged silently; if multiple are found the email sends without
           logging (open the Halo pane to pick manually).
+        </Text>
+
+        <Switch
+          checked={includeInlineImages}
+          onChange={(_, d) => setIncludeInlineImages(d.checked)}
+          label="Embed inline images when logging"
+        />
+        <Text className={styles.meta}>
+          Uploads images embedded in the email body (signatures, pasted screenshots) to
+          Halo and links them inline on the logged action. When off, embedded images are
+          omitted from the logged note.
         </Text>
 
         <Divider />

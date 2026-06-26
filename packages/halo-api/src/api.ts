@@ -578,6 +578,7 @@ export async function getClientCache(force = false): Promise<HaloClientCache> {
     _clientCache = res;
     _clientCachePromise = undefined;
     writeAgentSnapshot(res.agent);
+    writeMailboxSnapshot(res);
     // Resolve the agent's sales mailbox in the background so it's cached by
     // the time the on-send handler needs it. Non-blocking; failure is
     // expected for tenants without sales mailbox functionality.
@@ -605,6 +606,94 @@ export async function getClientCache(force = false): Promise<HaloClientCache> {
  */
 const AGENT_SNAPSHOT_KEY = "halo.agentSnapshot.v1";
 const CONTROL_SNAPSHOT_KEY = "halo.controlSnapshot.v1";
+const MAILBOX_SNAPSHOT_KEY = "halo.mailboxSnapshot.v1";
+
+/**
+ * Email addresses of the tenant's INBOUND-parsing mailboxes, lowercased and
+ * deduped. A reply whose recipients include one of these will be ingested by
+ * Halo's native email intake — so the add-in must NOT also log it (double
+ * action). Outbound-only mailboxes (inbound_method === 0) are excluded since
+ * Halo won't ingest mail sent to them.
+ */
+export function intakeMailboxAddresses(cache: HaloClientCache): string[] {
+  const out = new Set<string>();
+  for (const mb of cache.mailboxes ?? []) {
+    if (mb.enabled === false) continue;
+    if (mb.inbound_method === 0) continue;
+    for (const addr of [mb.azureemail, mb.smtpaddress, mb.display_address]) {
+      const a = addr?.trim().toLowerCase();
+      if (a) out.add(a);
+    }
+  }
+  return [...out];
+}
+
+function writeMailboxSnapshot(cache: HaloClientCache): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      MAILBOX_SNAPSHOT_KEY,
+      JSON.stringify(intakeMailboxAddresses(cache)),
+    );
+  } catch {
+    /* swallow — quota, private mode, etc. */
+  }
+}
+
+/** Decode a base64 string (bare or "data:<mime>;base64,<...>") into a Blob. */
+function base64ToBlob(base64: string, contentType: string): Blob {
+  const comma = base64.indexOf(",");
+  const raw = base64.startsWith("data:") && comma >= 0 ? base64.slice(comma + 1) : base64;
+  const bin = atob(raw);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: contentType });
+}
+
+/**
+ * Upload an inline image to Halo and return a renderable URL for it.
+ *
+ * Mirrors what Halo's own editor does when an image is pasted: POST the binary
+ * to /api/attachment/image as multipart/form-data; Halo stores the bytes in its
+ * attachment/CDN store and returns `{ link }` — a signed, self-contained URL
+ * that renders for anyone (it 301s to the CDN). Used to keep image bytes OUT of
+ * the action note (which would bloat the busiest table) while still rendering
+ * inline. Content-Type is intentionally NOT set so the browser supplies the
+ * multipart boundary; the bearer is still sent.
+ */
+export async function uploadInlineImage(
+  blob: Blob,
+  ticketId?: number,
+): Promise<string> {
+  const base = getConfig()?.haloBaseUrl?.replace(/\/+$/, "");
+  const token = getTokens()?.accessToken;
+  if (!base) throw new Error("uploadInlineImage: no Halo base URL configured");
+  if (!token) throw new Error("uploadInlineImage: not authenticated");
+
+  const form = new FormData();
+  form.append("file", blob);
+  form.append("ticket_id", String(ticketId ?? 0));
+  form.append("image_upload_id", "0");
+  form.append("image_upload_key", "");
+
+  const res = await fetch(`${base}/api/attachment/image`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  if (!res.ok) {
+    throw new Error(`Halo /api/attachment/image returned ${res.status}`);
+  }
+  const json = (await res.json()) as { link?: string };
+  if (!json.link) throw new Error("Halo /api/attachment/image returned no link");
+  return json.link;
+}
+
+/** Base64 → Blob, exposed so surface code can hand fetched image bytes to
+ *  uploadInlineImage without re-implementing the decode. */
+export function imageBase64ToBlob(base64: string, contentType: string): Blob {
+  return base64ToBlob(base64, contentType);
+}
 
 function writeControlSnapshot(control: HaloControl): void {
   if (typeof window === "undefined") return;

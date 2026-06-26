@@ -58,6 +58,7 @@ import {
   ticketTypesForAgentCreate,
   getChargeRates,
   getClientCache,
+  intakeMailboxAddresses,
   type TenantConfig,
   type HaloUser,
   type HaloClient,
@@ -1080,6 +1081,12 @@ function LogStagingSection() {
       try {
         const { to } = await getRecipients();
         if (cancelled || to.length === 0) return;
+
+        // Skip auto-staging when a Halo intake mailbox is among the recipients:
+        // Halo's native email intake will log this reply itself, so auto-staging
+        // (which appends via API on send) would double-post it.
+        const intake = new Set(intakeMailboxAddresses(await getClientCache()));
+        if (intake.size > 0 && to.some((e) => intake.has(e.trim().toLowerCase()))) return;
 
         const resolved = await Promise.all(
           to.map(async (email) => {
