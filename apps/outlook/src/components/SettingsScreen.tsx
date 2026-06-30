@@ -28,7 +28,7 @@ import {
   downloadEvents,
   type LogEntry,
 } from "../lib/diagnostics";
-import { buildMcpUrl } from "../lib/mcp-url";
+import { buildMcpUrl, MCP_HOST } from "../lib/mcp-url";
 
 const useStyles = makeStyles({
   root: {
@@ -334,7 +334,7 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
             Expose your HaloPSA to Claude, ChatGPT, Cursor and any other Model
             Context Protocol client. Paste this URL into the MCP server settings
             of the assistant — sign-in goes through your Halo login. Requires{" "}
-            <strong>https://tools.iusehalo.com/auth/callback</strong> on your
+            <strong>{MCP_HOST}/auth/callback</strong> on your
             Halo Connect app's redirect URIs.
           </Text>
           {mcpUrl ? (
@@ -470,7 +470,7 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
               return null;
             }
           })()}
-          {" · tools.iusehalo.com"}
+          {" · " + window.location.host}
         </Text>
       </div>
     </div>
