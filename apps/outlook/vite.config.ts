@@ -1,7 +1,7 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { MANIFEST_VERSION } from "./src/setup/version";
 
@@ -12,6 +12,20 @@ const BASE = process.env.VITE_BASE ?? "/outlook/";
 // Emit /outlook/latest.json so the running SPA can detect when a newer
 // manifest is available. Compared first-three-segments-only against the `mv`
 // query param baked into the installed manifest's runtime URLs.
+// Remove dev-only manifest files that may exist locally but must never ship.
+function excludeDevManifests(): Plugin {
+  return {
+    name: "exclude-dev-manifests",
+    apply: "build",
+    closeBundle() {
+      for (const f of ["manifest.dev.json", "manifest.dev.zip"]) {
+        const target = resolve(__dirname, "dist", f);
+        if (existsSync(target)) rmSync(target);
+      }
+    },
+  };
+}
+
 function emitLatestJson(): Plugin {
   return {
     name: "emit-latest-json",
@@ -32,7 +46,7 @@ function emitLatestJson(): Plugin {
 
 export default defineConfig({
   base: BASE,
-  plugins: [react(), emitLatestJson()],
+  plugins: [react(), emitLatestJson(), excludeDevManifests()],
   build: {
     outDir: "dist",
     sourcemap: true,

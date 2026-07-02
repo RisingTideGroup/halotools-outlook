@@ -1,4 +1,6 @@
 node_modules/
+apps/outlook/public/manifest.dev.json
+apps/outlook/public/manifest.dev.zip
 dist/
 dist-node/
 .env
