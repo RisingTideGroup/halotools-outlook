@@ -664,7 +664,7 @@
         // Halo's note (plaintext) + note_html (HTML) convention. Both required.
         note: notePlain,
         note_html: noteHtml,
-        // Literal Halo column for the Email-tab filter; on-send is never internal.
+        hiddenfromuser: false,
         actionhide: 0,
         emailfrom: senderName || senderEmail,
         emailfromname: senderName,
