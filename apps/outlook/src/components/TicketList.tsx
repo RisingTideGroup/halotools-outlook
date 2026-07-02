@@ -241,7 +241,7 @@ export function TicketList({ label, tickets, onTicketUpdated }: Props) {
         ticket_id: ticket.id,
         outcome: getDefaults().defaultAppendOutcome ?? "Note",
         note,
-        time_taken: minutes / 60,
+        timetaken: minutes / 60,
       });
     } catch (e) {
       setErrors((prev) => ({

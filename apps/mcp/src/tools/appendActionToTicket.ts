@@ -22,7 +22,7 @@ const inputSchema = {
     .boolean()
     .optional()
     .describe("If true, marks this action as internal-only (not visible to the requester)."),
-  time_taken: z
+  timetaken: z
     .number()
     .nonnegative()
     .optional()
@@ -38,13 +38,13 @@ export function registerAppendActionToTicket(server: McpServer): void {
         "Append an action to an existing HaloPSA ticket — e.g. log a phone call, add an internal note, or record what was done. Use this rather than createTicket when continuing work on an existing issue. Default outcome is 'Note'.",
       inputSchema,
     },
-    async ({ ticket_id, note, outcome, hiddenfromuser, time_taken }) => {
+    async ({ ticket_id, note, outcome, hiddenfromuser, timetaken }) => {
       const action = await appendAction({
         ticket_id,
         note,
         outcome: outcome ?? "Note",
         hiddenfromuser,
-        time_taken,
+        timetaken,
       });
       return {
         content: [

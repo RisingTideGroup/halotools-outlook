@@ -185,21 +185,31 @@ export function QuickImportBanner({
         attachments = fetched.attachments.map(toHaloAttachment);
       }
 
+      const noteHtml = extractTopReply(html);
+      const notePlain = htmlToText(noteHtml);
       const action = await appendAction({
         ticket_id: ticket.id,
         outcome: defaults.defaultAppendOutcome ?? "Email Received",
-        note: html,
+        outcome_id: 0,
+        _isuserupdate: true,
+        note: notePlain,
+        note_html: noteHtml,
         hiddenfromuser: false,
+        actionhide: 0,
         emailfrom: email.senderName || email.senderEmail,
         emailfromname: email.senderName,
         emailfromaddress: email.senderEmail,
-        emailsubject: email.subject,
-        emailto: email.senderEmail,
+        emailsubjectnew: email.subject,
+        emailto: getCurrentUserEmail() ?? "",
+        emailimportance: getItemImportance(),
+        dateemailed: formatHaloDate(email.receivedAt),
         attachments: attachments.length ? attachments : undefined,
         user_id: contact?.id,
         actionby_user_id: contact?.id,
         agent_id: undefined,
         who: email.senderName || email.senderEmail,
+        who_agentid: -1,
+        who_type: 2,
         internetmessageid: email.internetMessageId,
         inreplyto: email.inReplyTo,
         references: email.references.length ? email.references.join(" ") : undefined,
