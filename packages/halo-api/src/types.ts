@@ -279,9 +279,9 @@ export interface CreateActionPayload {
   emailfromname?: string;
   emailsubject?: string;
   /** Decimal hours spent on this action (e.g., 0.25 for 15 minutes). */
-  time_taken?: number;
+  timetaken?: number;
   /** Charge rate id from ClientCache.lookups (lookupid 17). 0 == No Charge. */
-  chargerate_id?: number;
+  chargerate?: number;
   /** RFC 5322 Message-ID of the source email — Halo threads on this natively. */
   internetmessageid?: string;
   /** Parent's Message-ID from the In-Reply-To header. */

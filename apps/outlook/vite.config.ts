@@ -12,6 +12,20 @@ const BASE = process.env.VITE_BASE ?? "/outlook/";
 // Emit /outlook/latest.json so the running SPA can detect when a newer
 // manifest is available. Compared first-three-segments-only against the `mv`
 // query param baked into the installed manifest's runtime URLs.
+// Remove dev-only manifest files that may exist locally but must never ship.
+function excludeDevManifests(): Plugin {
+  return {
+    name: "exclude-dev-manifests",
+    apply: "build",
+    closeBundle() {
+      for (const f of ["manifest.dev.json", "manifest.dev.zip"]) {
+        const target = resolve(__dirname, "dist", f);
+        if (existsSync(target)) rmSync(target);
+      }
+    },
+  };
+}
+
 function emitLatestJson(): Plugin {
   return {
     name: "emit-latest-json",

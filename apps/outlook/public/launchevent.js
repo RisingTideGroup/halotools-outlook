@@ -26,7 +26,7 @@
   // Stage props written by the compose pane. PENDING_CREATE_PROP is JSON
   // {summary, ticketTypeId} — when present, we POST /api/Ticket first,
   // then append the action to the new ticket. TIMER + CHARGE_RATE feed
-  // time_taken (decimal hours) and chargerate_id on the action.
+  // timetaken (decimal hours) and chargerate on the action.
   var PENDING_CREATE_PROP = "haloLogPendingCreate";
   var TIMER_TIME_PROP = "haloComposeTimeSeconds";
   var CHARGE_RATE_PROP = "haloComposeChargeRateId";
@@ -687,7 +687,7 @@
         // Halo's note (plaintext) + note_html (HTML) convention. Both required.
         note: notePlain,
         note_html: noteHtml,
-        // Literal Halo column for the Email-tab filter; on-send is never internal.
+        hiddenfromuser: false,
         actionhide: 0,
         emailfrom: senderName || senderEmail,
         emailfromname: senderName,
@@ -728,8 +728,8 @@
         // raw second count (capped at 30 min by the UI); Halo expects
         // decimal hours on time_taken. Omit both fields when 0 so we
         // don't pollute Halo's time reports with empty entries.
-        time_taken: data.timeSeconds > 0 ? data.timeSeconds / 3600 : undefined,
-        chargerate_id: data.chargeRateId > 0 ? data.chargeRateId : undefined,
+        timetaken: data.timeSeconds > 0 ? Math.max(data.timeSeconds, 60) / 3600 : undefined,
+        chargerate: data.chargeRateId > 0 ? data.chargeRateId : undefined,
       }];
       logEvent("info", "POST /api/Actions", {
         ticketId: ticketId,
@@ -869,8 +869,8 @@
               subject: parts[1],
               to: parts[2],
               cc: parts[3],
-              timeSeconds: 0,
-              chargeRateId: 0,
+              timeSeconds: timeSeconds,
+              chargeRateId: chargeRateId,
             };
             stage = "appendToHalo";
             logEvent("info", "stage → appendToHalo (auto)", { ticketId: result.foundId });
