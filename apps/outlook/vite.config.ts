@@ -44,9 +44,25 @@ function emitLatestJson(): Plugin {
   };
 }
 
+// Keep dev-only manifests out of the production build. manifest.dev.json /
+// .zip live in public/ for local sideloading, but Vite copies public/ wholesale
+// into the build — without this they'd be publicly served at /outlook/manifest.dev.*.
+function stripDevManifest(): Plugin {
+  return {
+    name: "strip-dev-manifest",
+    apply: "build",
+    closeBundle() {
+      for (const f of ["manifest.dev.json", "manifest.dev.zip"]) {
+        const p = resolve(__dirname, "dist", f);
+        if (existsSync(p)) rmSync(p);
+      }
+    },
+  };
+}
+
 export default defineConfig({
   base: BASE,
-  plugins: [react(), emitLatestJson(), excludeDevManifests()],
+  plugins: [react(), emitLatestJson(), stripDevManifest()],
   build: {
     outDir: "dist",
     sourcemap: true,

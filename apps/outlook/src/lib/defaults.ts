@@ -16,6 +16,9 @@ export interface UserDefaults {
   includeAttachmentsByDefault?: boolean;
   /** Auto-stage replies to Halo tickets based on recipient lookup */
   autoLogRepliesToTickets?: boolean;
+  /** Upload + inline-render images embedded in the email when logging.
+   *  Treated as on when undefined. */
+  includeInlineImages?: boolean;
 }
 
 export function getDefaults(): UserDefaults {

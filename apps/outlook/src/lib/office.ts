@@ -6,6 +6,8 @@ import {
   setStorage,
   roamingSettingsStorage,
   localStorageStorage,
+  uploadInlineImage,
+  imageBase64ToBlob,
 } from "@iusehalo/halo-api";
 
 /**
@@ -280,24 +282,26 @@ export async function fetchAllAttachments(
 }
 
 /**
- * Replace cid: image references in an HTML body with inline base64 data URIs
- * so that Halo (and any other consumer) can render them without access to the
- * original MIME structure.
+ * Replace cid: image references in an HTML body with Halo-hosted image URLs.
  *
  * Outlook embeds images (signature logos, pasted screenshots, etc.) as inline
  * MIME parts referenced by Content-ID. The HTML body contains src="cid:…"
- * attributes that are meaningless once extracted from the email. This function
- * resolves each one and substitutes a self-contained data URI. References with
- * no matching attachment are left unchanged so the rest of the body is never
- * broken by a single missing image.
+ * attributes that are meaningless once extracted from the email. Each one is
+ * resolved to its bytes, uploaded to Halo via /api/attachment/image, and the
+ * src is swapped to the signed URL Halo returns — exactly what Halo's own
+ * editor does on paste. This keeps the image bytes OUT of the action note
+ * (which would bloat Halo's busiest table) while still rendering inline.
+ * References that can't be resolved or uploaded are left unchanged so a single
+ * missing image never breaks the rest of the body.
  *
- * Two resolution paths:
- *  1. Synchronous — item.attachments (works in classic desktop Outlook Win/Mac).
- *  2. REST fallback — getCallbackTokenAsync + Outlook REST API, required for OWA
- *     and New Outlook for Windows where inline attachments are not surfaced
- *     through the synchronous property.
+ * `ticketId` (when known) links the uploaded image to the ticket. Two byte
+ * resolution paths:
+ *  1. Synchronous — item.attachments (classic desktop Outlook Win/Mac).
+ *  2. REST fallback — getCallbackTokenAsync + Outlook REST API, for OWA and
+ *     New Outlook for Windows where inline attachments aren't surfaced
+ *     synchronously.
  */
-export async function resolveInlineCidImages(html: string): Promise<string> {
+export async function resolveInlineCidImages(html: string, ticketId?: number): Promise<string> {
   const cids = new Set<string>();
   const cidRe = /src="cid:([^"]+)"/gi;
   let m: RegExpExecArray | null;
@@ -310,41 +314,64 @@ export async function resolveInlineCidImages(html: string): Promise<string> {
   // Office.js sometimes returns "<image002.png@01DC...>" while the HTML has no brackets.
   const normalise = (id: string) => id.replace(/^<|>$/g, "").toLowerCase();
 
+  // Resolve each cid to its raw bytes (base64 + content type).
   // Path 1: synchronous attachment list — available in classic desktop Outlook.
   // OWA and New Outlook return [] here even for emails with inline images;
   // in that case we fall through to the REST path below.
   const attsWithCid = listAttachments().filter((a) => !!a.contentId);
 
-  let cidMap: Map<string, string>;
+  let contentMap: Map<string, { base64: string; contentType: string }>;
 
   if (attsWithCid.length > 0) {
     const resolved = await Promise.all(
-      [...cids].map(async (cid): Promise<[string, string | null]> => {
-        const att = attsWithCid.find(
-          (a) => normalise(a.contentId!) === normalise(cid),
-        );
-        if (!att) return [normalise(cid), null];
-        try {
-          const fetched = await fetchAttachmentContent(att);
-          return [normalise(cid), `data:${fetched.contentType};base64,${fetched.base64}`];
-        } catch {
-          return [normalise(cid), null];
-        }
-      }),
+      [...cids].map(
+        async (cid): Promise<[string, { base64: string; contentType: string } | null]> => {
+          const att = attsWithCid.find(
+            (a) => normalise(a.contentId!) === normalise(cid),
+          );
+          if (!att) return [normalise(cid), null];
+          try {
+            const fetched = await fetchAttachmentContent(att);
+            return [normalise(cid), { base64: fetched.base64, contentType: fetched.contentType }];
+          } catch {
+            return [normalise(cid), null];
+          }
+        },
+      ),
     );
-    cidMap = new Map(resolved.filter((r): r is [string, string] => r[1] !== null));
+    contentMap = new Map(
+      resolved.filter(
+        (r): r is [string, { base64: string; contentType: string }] => r[1] !== null,
+      ),
+    );
   } else {
     // Path 2: OWA / New Outlook for Windows — item.attachments is empty even
     // when the email has inline images. Fetch via Outlook REST API instead.
-    cidMap = await fetchCidMapViaRest(normalise);
+    contentMap = await fetchCidMapViaRest(normalise);
   }
 
-  if (cidMap.size === 0) return html;
+  if (contentMap.size === 0) return html;
 
-  // Keys in cidMap are always normalised; direct lookup avoids repeated iteration.
+  // Upload each image to Halo and map cid → returned link. Fail-soft per image:
+  // an upload failure leaves that cid ref unchanged rather than breaking the body.
+  const linkMap = new Map<string, string>();
+  await Promise.all(
+    [...contentMap.entries()].map(async ([cid, { base64, contentType }]) => {
+      try {
+        const blob = imageBase64ToBlob(base64, contentType);
+        linkMap.set(cid, await uploadInlineImage(blob, ticketId));
+      } catch {
+        /* leave this cid unresolved */
+      }
+    }),
+  );
+
+  if (linkMap.size === 0) return html;
+
+  // Keys are normalised; direct lookup avoids repeated iteration.
   return html.replace(/src="cid:([^"]+)"/gi, (match, cid: string) => {
-    const dataUri = cidMap.get(normalise(cid));
-    return dataUri ? `src="${dataUri}"` : match;
+    const link = linkMap.get(normalise(cid));
+    return link ? `src="${link}"` : match;
   });
 }
 
@@ -420,7 +447,7 @@ interface RestAttachment {
  */
 async function fetchCidMapViaRest(
   normalise: (id: string) => string,
-): Promise<Map<string, string>> {
+): Promise<Map<string, { base64: string; contentType: string }>> {
   try {
     const token = await getCallbackToken();
     const restUrl = Office.context.mailbox.restUrl;
@@ -448,7 +475,7 @@ async function fetchCidMapViaRest(
     );
     if (inlineAtts.length === 0) return new Map();
 
-    const cidMap = new Map<string, string>();
+    const cidMap = new Map<string, { base64: string; contentType: string }>();
 
     await Promise.all(
       inlineAtts.map(async (att) => {
@@ -470,7 +497,7 @@ async function fetchCidMapViaRest(
         }
 
         if (contentBytes && contentId) {
-          cidMap.set(normalise(contentId), `data:${contentType};base64,${contentBytes}`);
+          cidMap.set(normalise(contentId), { base64: contentBytes, contentType });
         }
       }),
     );

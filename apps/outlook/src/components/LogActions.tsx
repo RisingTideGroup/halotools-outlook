@@ -176,8 +176,12 @@ export function QuickImportBanner({
     setStatus("busy");
     setErrorMsg(undefined);
     try {
-      const html = await resolveInlineCidImages(await getBody("html"));
       const defaults = getDefaults();
+      const rawHtml = await getBody("html");
+      const html =
+        defaults.includeInlineImages !== false
+          ? await resolveInlineCidImages(rawHtml, ticket.id)
+          : rawHtml;
       let attachments: HaloAttachmentInline[] = [];
       const rawAttachments = listAttachments().filter((a) => !a.isInline);
       if ((defaults.includeAttachmentsByDefault ?? true) && rawAttachments.length > 0) {
@@ -382,7 +386,11 @@ function AppendDialog({
     if (!selectedId) return;
     setBusy(true);
     try {
-      const html = await resolveInlineCidImages(sanitizeOutlookHtml(await getBody("html")));
+      const rawHtml = sanitizeOutlookHtml(await getBody("html"));
+      const html =
+        getDefaults().includeInlineImages !== false
+          ? await resolveInlineCidImages(rawHtml, selectedId)
+          : rawHtml;
       let attachments: HaloAttachmentInline[] = [];
       let attachWarning: string | undefined;
       if (includeAttachments && attachmentCount > 0) {

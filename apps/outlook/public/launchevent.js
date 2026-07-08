@@ -33,6 +33,7 @@
   var DIAG_LOG_KEY = "halo.diagLog.v1";
   var DEFAULTS_KEY = "halo.defaults.v1";
   var CONTROL_SNAPSHOT_KEY = "halo.controlSnapshot.v1";
+  var MAILBOX_SNAPSHOT_KEY = "halo.mailboxSnapshot.v1";
   // Shorter per-request budget for the auto-lookup path so that two sequential
   // calls (user search → ticket list) still finish well inside SAFETY_MS.
   var AUTO_LOOKUP_FETCH_MS = 1500;
@@ -347,6 +348,28 @@
       var raw = window.localStorage.getItem(CONTROL_SNAPSHOT_KEY);
       return raw ? JSON.parse(raw) : {};
     } catch (e) { return {}; }
+  }
+
+  // Inbound Halo intake mailbox addresses (lowercased) the task pane stashed
+  // from ClientCache. Returns [] when unavailable. Used to avoid double-logging:
+  // if a reply goes to one of these, Halo's native intake will log it itself.
+  function getMailboxSnapshot() {
+    try {
+      var raw = window.localStorage.getItem(MAILBOX_SNAPSHOT_KEY);
+      var arr = raw ? JSON.parse(raw) : [];
+      return Object.prototype.toString.call(arr) === "[object Array]" ? arr : [];
+    } catch (e) { return []; }
+  }
+
+  // True when any recipient address is a Halo intake mailbox.
+  function recipientsHitHaloMailbox(toList, ccList) {
+    var intake = getMailboxSnapshot();
+    if (!intake.length) return false;
+    var recips = (toList || []).concat(ccList || []);
+    for (var i = 0; i < recips.length; i++) {
+      if (intake.indexOf(String(recips[i]).trim().toLowerCase()) >= 0) return true;
+    }
+    return false;
   }
 
   // Try to extract a Halo ticket ID from an email subject using the configured
@@ -835,6 +858,12 @@
             toPromise,
             readRecipientsField(Office.context.mailbox.item.cc),
           ]).then(function (parts) {
+            // If a Halo intake mailbox is among the recipients, native intake
+            // will log this reply itself — appending here too would double-post.
+            if (recipientsHitHaloMailbox(parts[2], parts[3])) {
+              logEvent("info", "auto-log suppressed: halo intake mailbox in recipients");
+              return null;
+            }
             var data = {
               body: parts[0],
               subject: parts[1],
