@@ -15,6 +15,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
   setStorage,
+  setExtraHeaders,
   type Storage,
   type TenantConfig,
   type StoredTokens,
@@ -144,4 +145,39 @@ export function loadEnvAuth(): RequestAuth | undefined {
   const accessToken = process.env.HALO_ACCESS_TOKEN;
   if (!baseUrl || !accessToken) return undefined;
   return { baseUrl, accessToken };
+}
+
+/**
+ * Extra outbound headers from MCP_CUSTOM_HEADER_<id>_NAME / _VALUE env var
+ * pairs — both must be set for the same <id> for a header to be included.
+ * <id> is just an arbitrary key (env var names can't hold characters like `-`
+ * that real header names commonly need); the real header name and value live
+ * in the corresponding _NAME/_VALUE values, e.g.:
+ *
+ *   MCP_CUSTOM_HEADER_RATELIMIT_NAME=X-RateLimit-Bypass
+ *   MCP_CUSTOM_HEADER_RATELIMIT_VALUE=<secret>
+ *
+ * Lets our hosted instance pass a Halo-issued rate-limit-bypass header, or a
+ * self-hoster pass a Cloudflare/WAF bypass secret, without either being
+ * hardcoded anywhere in source.
+ */
+function loadCustomHeadersFromEnv(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const idPattern = /^MCP_CUSTOM_HEADER_(.+)_NAME$/;
+  for (const key of Object.keys(process.env)) {
+    const match = idPattern.exec(key);
+    if (!match) continue;
+    const name = process.env[key];
+    const value = process.env[`MCP_CUSTOM_HEADER_${match[1]}_VALUE`];
+    if (name && value) headers[name] = value;
+  }
+  return headers;
+}
+
+/** Install any configured custom headers onto every outbound Halo call. Call
+ *  once at process startup, same as installRequestStorage(). No-op when no
+ *  matching env var pairs are set. */
+export function installCustomHeaders(): void {
+  const headers = loadCustomHeadersFromEnv();
+  if (Object.keys(headers).length > 0) setExtraHeaders(headers);
 }

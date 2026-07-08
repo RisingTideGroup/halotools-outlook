@@ -141,6 +141,28 @@ Set `MCP_PUBLIC_ORIGIN` so the OAuth metadata advertises the public URL, not wha
 
 The standalone `apps/mcp/Dockerfile` still exists if you want to run just the MCP server in a separate container.
 
+## Environment variables
+
+| Variable                          | Mode        | Purpose                                                                                          |
+| ---------------------------------- | ----------- | -------------------------------------------------------------------------------------------------- |
+| `HALO_BASE_URL` / `HALO_ACCESS_TOKEN` | stdio    | Single tenant's Halo URL + a pre-issued bearer token.                                              |
+| `MCP_TRANSPORT`                    | both        | `http` to force HTTP mode (equivalent to `--http`); defaults to stdio.                             |
+| `PORT`                             | http        | Port for the HTTP server. Defaults to `3001`.                                                      |
+| `MCP_PUBLIC_ORIGIN`                | http        | Public origin advertised in OAuth metadata, since nginx sits in front.                             |
+| `MCP_LOG_REQUESTS`                 | http        | `1`/`true` to log each request's method/URL/status/timing to stderr.                               |
+| `MCP_CUSTOM_HEADER_<id>_NAME` / `MCP_CUSTOM_HEADER_<id>_VALUE` | both | Extra header sent on every outbound Halo call. See below. |
+
+### Custom outbound headers
+
+Set a matching `_NAME`/`_VALUE` pair under the same `<id>` (any identifier — it's not the header name itself, since env var names can't hold characters like `-` that real header names commonly do):
+
+```bash
+MCP_CUSTOM_HEADER_RATELIMIT_NAME=X-RateLimit-Bypass
+MCP_CUSTOM_HEADER_RATELIMIT_VALUE=<secret>
+```
+
+Both must be present for the pair to take effect; multiple pairs (different `<id>`s) can be set at once. Use this for a Halo-issued rate-limit-bypass header on a trusted hosted instance, or for a self-hoster's Cloudflare/WAF bypass secret in front of their own Halo. Not applicable to the Outlook add-in or Teams app — those are browser SPAs with no server-side env vars to read from.
+
 ## Project layout
 
 ```
@@ -169,4 +191,4 @@ apps/mcp/
 - No tests yet.
 - No tool for attachments / ticket updates / time entries / invoices — coming.
 - HTTP state (pending OAuth flows, one-time codes) is in-process; horizontal scaling needs Redis or signed JWTs.
-- No rate limiting.
+- Rate limiting: 429s from Halo are retried with backoff (honoring `Retry-After`, capped at 4 attempts / 30s per wait) — but there's no proactive throttling or request queuing on our side, so a burst of concurrent tool calls (e.g. multiple AI clients against the same tenant) can still trip Halo's limit before the retry kicks in.

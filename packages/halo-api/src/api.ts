@@ -78,7 +78,48 @@ class HaloApiError extends Error {
   }
 }
 
-async function call<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
+// ---- Extra headers (opt-in, Node-side only) ----
+// Lets a hosting environment stamp headers Halo (or a WAF/CDN in front of it)
+// needs to see on every request — e.g. a rate-limit-bypass header on our own
+// hosted instance, or a Cloudflare Access service-token pair for a self-hoster.
+// Empty by default. Only apps/mcp's Node entrypoint ever calls setExtraHeaders()
+// (reading its own process.env) — the Outlook/Teams/browser-extension SPAs never
+// touch this, so it's a no-op for every browser-bundled consumer.
+let extraHeaders: Record<string, string> = {};
+
+export function setExtraHeaders(headers: Record<string, string>): void {
+  extraHeaders = { ...headers };
+}
+
+// ---- 429 backoff ----
+// Halo's hosting fronts many tenants behind shared infrastructure, so a 429
+// isn't necessarily "this tenant is busy" — it can be a shared limit. Either
+// way the fix is the same: wait what Halo told us to wait (or a fallback
+// backoff when it didn't say) and retry. This reacts to whatever 429 actually
+// comes back, so it applies the same whether extraHeaders carries an
+// elevated-limit bypass or the caller is subject to Halo's default limits.
+const MAX_RATE_LIMIT_RETRIES = 4;
+const MAX_RATE_LIMIT_WAIT_MS = 30_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Retry-After per RFC 9110 §10.2.3: either delay-seconds or an HTTP-date. */
+function parseRetryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const dateMs = Date.parse(header);
+  return Number.isNaN(dateMs) ? undefined : Math.max(0, dateMs - Date.now());
+}
+
+async function call<T>(
+  path: string,
+  init: RequestInit = {},
+  retried = false,
+  rateLimitAttempt = 0,
+): Promise<T> {
   const cfg = getConfig();
   if (!cfg) throw new NotAuthenticatedError("No tenant config");
 
@@ -88,6 +129,9 @@ async function call<T>(path: string, init: RequestInit = {}, retried = false): P
   if (!headers.has("Accept")) headers.set("Accept", "application/json");
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
+  }
+  for (const [name, value] of Object.entries(extraHeaders)) {
+    headers.set(name, value);
   }
 
   let res: Response;
@@ -118,6 +162,18 @@ async function call<T>(path: string, init: RequestInit = {}, retried = false): P
         // surface a NotAuthenticatedError so the UI flips to AuthScreen.
       }
     }
+  }
+
+  // 429 → wait and retry, capped at MAX_RATE_LIMIT_RETRIES so a persistently
+  // rate-limited tenant fails loudly instead of hanging the caller forever.
+  if (res.status === 429 && rateLimitAttempt < MAX_RATE_LIMIT_RETRIES) {
+    await res.text().catch(() => undefined);
+    const waitMs = Math.min(
+      parseRetryAfterMs(res.headers.get("retry-after")) ?? 1000 * 2 ** rateLimitAttempt,
+      MAX_RATE_LIMIT_WAIT_MS,
+    );
+    await sleep(waitMs);
+    return call<T>(path, init, retried, rateLimitAttempt + 1);
   }
 
   if (!res.ok) {
