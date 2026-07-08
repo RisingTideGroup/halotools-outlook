@@ -250,6 +250,8 @@ export function withToolPrefix(server: McpServer, prefix: string): McpServer {
   }) as McpServer;
 }
 
+export const TOOL_COUNT = TOOL_REGISTRY.length;
+
 export function registerAllTools(
   server: McpServer,
   suppress?: ReadonlySet<string>,
