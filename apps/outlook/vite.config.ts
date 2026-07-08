@@ -1,7 +1,7 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { MANIFEST_VERSION } from "./src/setup/version";
 
@@ -30,9 +30,25 @@ function emitLatestJson(): Plugin {
   };
 }
 
+// Keep dev-only manifests out of the production build. manifest.dev.json /
+// .zip live in public/ for local sideloading, but Vite copies public/ wholesale
+// into the build — without this they'd be publicly served at /outlook/manifest.dev.*.
+function stripDevManifest(): Plugin {
+  return {
+    name: "strip-dev-manifest",
+    apply: "build",
+    closeBundle() {
+      for (const f of ["manifest.dev.json", "manifest.dev.zip"]) {
+        const p = resolve(__dirname, "dist", f);
+        if (existsSync(p)) rmSync(p);
+      }
+    },
+  };
+}
+
 export default defineConfig({
   base: BASE,
-  plugins: [react(), emitLatestJson()],
+  plugins: [react(), emitLatestJson(), stripDevManifest()],
   build: {
     outDir: "dist",
     sourcemap: true,

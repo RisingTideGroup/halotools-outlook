@@ -11,3 +11,6 @@ dist-node/
 coverage/
 tsconfig.tsbuildinfo
 .claude/
+
+# Dev-only Outlook manifest bundle (generated, not committed)
+apps/outlook/public/manifest.dev.zip

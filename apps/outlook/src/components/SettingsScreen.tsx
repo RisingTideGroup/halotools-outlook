@@ -28,7 +28,7 @@ import {
   downloadEvents,
   type LogEntry,
 } from "../lib/diagnostics";
-import { buildMcpUrl } from "../lib/mcp-url";
+import { buildMcpUrl, MCP_HOST } from "../lib/mcp-url";
 
 const useStyles = makeStyles({
   root: {
@@ -127,6 +127,9 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
   const [autoLogReplies, setAutoLogReplies] = useState<boolean>(
     initialDefaults.autoLogRepliesToTickets ?? false,
   );
+  const [includeInlineImages, setIncludeInlineImages] = useState<boolean>(
+    initialDefaults.includeInlineImages ?? true,
+  );
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [events, setEvents] = useState<LogEntry[]>(() => getEvents());
@@ -196,6 +199,7 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
         defaultAppendOutcome: defaultOutcome,
         includeAttachmentsByDefault: includeAttach,
         autoLogRepliesToTickets: autoLogReplies,
+        includeInlineImages,
       });
       onClose();
     } finally {
@@ -288,6 +292,17 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
           logging (open the Halo pane to pick manually).
         </Text>
 
+        <Switch
+          checked={includeInlineImages}
+          onChange={(_, d) => setIncludeInlineImages(d.checked)}
+          label="Embed inline images when logging"
+        />
+        <Text className={styles.meta}>
+          Uploads images embedded in the email body (signatures, pasted screenshots) to
+          Halo and links them inline on the logged action. When off, embedded images are
+          omitted from the logged note.
+        </Text>
+
         <Divider />
 
         <Button
@@ -319,7 +334,7 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
             Expose your HaloPSA to Claude, ChatGPT, Cursor and any other Model
             Context Protocol client. Paste this URL into the MCP server settings
             of the assistant — sign-in goes through your Halo login. Requires{" "}
-            <strong>https://tools.iusehalo.com/auth/callback</strong> on your
+            <strong>{MCP_HOST}/auth/callback</strong> on your
             Halo Connect app's redirect URIs.
           </Text>
           {mcpUrl ? (
@@ -455,7 +470,7 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
               return null;
             }
           })()}
-          {" · tools.iusehalo.com"}
+          {" · " + window.location.host}
         </Text>
       </div>
     </div>

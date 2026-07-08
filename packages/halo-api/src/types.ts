@@ -137,6 +137,10 @@ export interface HaloMailbox {
   azureemail?: string;
   display_address?: string;
   enabled?: boolean;
+  /** Inbound parse method. 0 = outbound-only (Halo does NOT ingest mail sent
+   *  here), non-zero = parses inbound. Used to decide whether sending a reply
+   *  to this address would be double-logged by native intake. */
+  inbound_method?: number;
 }
 
 /** A row from ClientCache.lookups. lookupid groups rows into categories
