@@ -30,9 +30,11 @@ export interface PendingHaloFlow {
   claudeRedirectUri: string;
   /** Claude's `state` value — we echo it on the redirect back. */
   claudeState: string;
-  /** Claude's code_challenge — we verify it later when Claude POSTs /token. */
-  claudeCodeChallenge: string;
-  claudeCodeChallengeMethod: string;
+  /** Claude's code_challenge — we verify it later when Claude POSTs /token.
+   *  Undefined for PKCE-less clients (classic confidential-client OAuth 2.0,
+   *  e.g. Copilot Studio's Manual/Dynamic modes) — see oauth.ts. */
+  claudeCodeChallenge: string | undefined;
+  claudeCodeChallengeMethod: string | undefined;
   /** Our verifier for the Halo leg — we send it on the Halo /token exchange. */
   haloVerifier: string;
   /** redirect_uri we sent Halo (must match on token exchange too). */
@@ -46,8 +48,8 @@ export interface ClaudeAuthCode {
   haloClientId: string;
   haloTokens: HaloTokenResponse;
   claudeRedirectUri: string;
-  claudeCodeChallenge: string;
-  claudeCodeChallengeMethod: string;
+  claudeCodeChallenge: string | undefined;
+  claudeCodeChallengeMethod: string | undefined;
   expiresAt: number;
 }
 
