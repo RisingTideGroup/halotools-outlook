@@ -1,6 +1,8 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
+import { readFileSync, existsSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { MANIFEST_VERSION } from "./src/setup/version";
 
 // Deployed at https://tools.iusehalo.com/outlook/ — base path matches.
@@ -10,6 +12,20 @@ const BASE = process.env.VITE_BASE ?? "/outlook/";
 // Emit /outlook/latest.json so the running SPA can detect when a newer
 // manifest is available. Compared first-three-segments-only against the `mv`
 // query param baked into the installed manifest's runtime URLs.
+// Remove dev-only manifest files that may exist locally but must never ship.
+function excludeDevManifests(): Plugin {
+  return {
+    name: "exclude-dev-manifests",
+    apply: "build",
+    closeBundle() {
+      for (const f of ["manifest.dev.json", "manifest.dev.zip"]) {
+        const target = resolve(__dirname, "dist", f);
+        if (existsSync(target)) rmSync(target);
+      }
+    },
+  };
+}
+
 function emitLatestJson(): Plugin {
   return {
     name: "emit-latest-json",
@@ -28,9 +44,25 @@ function emitLatestJson(): Plugin {
   };
 }
 
+// Keep dev-only manifests out of the production build. manifest.dev.json /
+// .zip live in public/ for local sideloading, but Vite copies public/ wholesale
+// into the build — without this they'd be publicly served at /outlook/manifest.dev.*.
+function stripDevManifest(): Plugin {
+  return {
+    name: "strip-dev-manifest",
+    apply: "build",
+    closeBundle() {
+      for (const f of ["manifest.dev.json", "manifest.dev.zip"]) {
+        const p = resolve(__dirname, "dist", f);
+        if (existsSync(p)) rmSync(p);
+      }
+    },
+  };
+}
+
 export default defineConfig({
   base: BASE,
-  plugins: [react(), emitLatestJson()],
+  plugins: [react(), emitLatestJson(), stripDevManifest()],
   build: {
     outDir: "dist",
     sourcemap: true,
@@ -52,8 +84,18 @@ export default defineConfig({
   },
   server: {
     port: 3000,
+    host: true,
     // Outlook sideload requires HTTPS — use office-addin-dev-certs locally,
     // or tunnel via ngrok / Cloudflare. Production hosts handle TLS.
+    https: (() => {
+      const certsDir = `${homedir()}/.office-addin-dev-certs`;
+      const key = `${certsDir}/localhost.key`;
+      const cert = `${certsDir}/localhost.crt`;
+      if (existsSync(key) && existsSync(cert)) {
+        return { key: readFileSync(key), cert: readFileSync(cert) };
+      }
+      return undefined;
+    })(),
     headers: {
       // Loosen for local dev only; production CORS is owned by Halo per-tenant.
       "Access-Control-Allow-Origin": "*",

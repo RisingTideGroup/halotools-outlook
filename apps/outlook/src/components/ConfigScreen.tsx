@@ -41,6 +41,9 @@ interface Props {
 
 export function ConfigScreen({ onConfigured }: Props) {
   const styles = useStyles();
+  // Derived from where the add-in is actually served so the registration values
+  // are correct on prod, a dev deployment, or a self-hosted origin.
+  const origin = window.location.origin;
   const [haloUrl, setHaloUrl] = useState("");
   const [clientId, setClientId] = useState("");
   const [error, setError] = useState<string | undefined>();
@@ -65,11 +68,11 @@ export function ConfigScreen({ onConfigured }: Props) {
       <Text className={styles.helpText}>
         Your HaloPSA administrator should register an Application in Halo Config →
         Integrations → Halo Connect → API, with Authorization Code grant, PKCE enabled, and
-        redirect URIs of <strong>https://tools.iusehalo.com/outlook/auth/callback.html</strong>{" "}
-        and <strong>https://tools.iusehalo.com/auth/callback</strong>{" "}
+        redirect URIs of <strong>{origin}/outlook/auth/callback.html</strong>{" "}
+        and <strong>{origin}/auth/callback</strong>{" "}
         (the second is the universal callback shared by Outlook, the MCP server for AI
         assistants, and any future iusehalo tools — register once, never touch again).
-        Add <strong>https://tools.iusehalo.com</strong> to the app's CORS whitelist.
+        Add <strong>{origin}</strong> to the app's CORS whitelist.
       </Text>
 
       <Field label="HaloPSA URL" required hint="e.g. https://halo.yourcompany.com">

@@ -19,6 +19,7 @@ import type {
   HaloFeedItem,
   HaloFeedResponse,
   HaloPriority,
+  HaloControl,
   CreateTicketPayload,
   CreateActionPayload,
   CreateContactPayload,
@@ -77,7 +78,48 @@ class HaloApiError extends Error {
   }
 }
 
-async function call<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
+// ---- Extra headers (opt-in, Node-side only) ----
+// Lets a hosting environment stamp headers Halo (or a WAF/CDN in front of it)
+// needs to see on every request — e.g. a rate-limit-bypass header on our own
+// hosted instance, or a Cloudflare Access service-token pair for a self-hoster.
+// Empty by default. Only apps/mcp's Node entrypoint ever calls setExtraHeaders()
+// (reading its own process.env) — the Outlook/Teams/browser-extension SPAs never
+// touch this, so it's a no-op for every browser-bundled consumer.
+let extraHeaders: Record<string, string> = {};
+
+export function setExtraHeaders(headers: Record<string, string>): void {
+  extraHeaders = { ...headers };
+}
+
+// ---- 429 backoff ----
+// Halo's hosting fronts many tenants behind shared infrastructure, so a 429
+// isn't necessarily "this tenant is busy" — it can be a shared limit. Either
+// way the fix is the same: wait what Halo told us to wait (or a fallback
+// backoff when it didn't say) and retry. This reacts to whatever 429 actually
+// comes back, so it applies the same whether extraHeaders carries an
+// elevated-limit bypass or the caller is subject to Halo's default limits.
+const MAX_RATE_LIMIT_RETRIES = 4;
+const MAX_RATE_LIMIT_WAIT_MS = 30_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Retry-After per RFC 9110 §10.2.3: either delay-seconds or an HTTP-date. */
+function parseRetryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const dateMs = Date.parse(header);
+  return Number.isNaN(dateMs) ? undefined : Math.max(0, dateMs - Date.now());
+}
+
+async function call<T>(
+  path: string,
+  init: RequestInit = {},
+  retried = false,
+  rateLimitAttempt = 0,
+): Promise<T> {
   const cfg = getConfig();
   if (!cfg) throw new NotAuthenticatedError("No tenant config");
 
@@ -87,6 +129,9 @@ async function call<T>(path: string, init: RequestInit = {}, retried = false): P
   if (!headers.has("Accept")) headers.set("Accept", "application/json");
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
+  }
+  for (const [name, value] of Object.entries(extraHeaders)) {
+    headers.set(name, value);
   }
 
   let res: Response;
@@ -117,6 +162,18 @@ async function call<T>(path: string, init: RequestInit = {}, retried = false): P
         // surface a NotAuthenticatedError so the UI flips to AuthScreen.
       }
     }
+  }
+
+  // 429 → wait and retry, capped at MAX_RATE_LIMIT_RETRIES so a persistently
+  // rate-limited tenant fails loudly instead of hanging the caller forever.
+  if (res.status === 429 && rateLimitAttempt < MAX_RATE_LIMIT_RETRIES) {
+    await res.text().catch(() => undefined);
+    const waitMs = Math.min(
+      parseRetryAfterMs(res.headers.get("retry-after")) ?? 1000 * 2 ** rateLimitAttempt,
+      MAX_RATE_LIMIT_WAIT_MS,
+    );
+    await sleep(waitMs);
+    return call<T>(path, init, retried, rateLimitAttempt + 1);
   }
 
   if (!res.ok) {
@@ -387,6 +444,62 @@ export async function findTicketsForEmail(messageIds: string[]): Promise<HaloTic
   return tickets.filter((t): t is HaloTicket => !!t && typeof t.id === "number");
 }
 
+/**
+ * Extract the numeric ticket ID embedded in an email subject by Halo's email
+ * subject tagging feature. Checks every known tag format for the tenant:
+ *   1. System-wide tags from GET /api/Control (email_start_tag / email_end_tag)
+ *   2. Per-ticket-type overrides from the cached ticket type list
+ *      (email_start_tag_override / email_end_tag_override on each type)
+ *
+ * Deduplicates identical tag pairs before trying so a tenant with no overrides
+ * only runs one regex. Returns the first ticket ID found.
+ */
+export async function extractTicketIdFromSubject(subject: string): Promise<number | undefined> {
+  const pairs: Array<{ start: string; end: string }> = [];
+
+  // System-wide pair from /api/Control
+  const control = await getControl();
+  if (control.email_start_tag && control.email_end_tag) {
+    pairs.push({ start: control.email_start_tag, end: control.email_end_tag });
+  }
+
+  // Per-ticket-type override pairs (from the already-cached list)
+  const types = await listTicketTypes();
+  for (const t of types) {
+    if (t.email_start_tag_override && t.email_end_tag_override) {
+      const s = t.email_start_tag_override;
+      const e = t.email_end_tag_override;
+      if (!pairs.some((p) => p.start === s && p.end === e)) {
+        pairs.push({ start: s, end: e });
+      }
+    }
+  }
+
+  for (const { start, end } of pairs) {
+    const es = start.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const ee = end.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const m = subject.match(new RegExp(es + "(\\d+)" + ee));
+    if (m) return parseInt(m[1], 10);
+  }
+
+  return undefined;
+}
+
+/**
+ * Fetch the ticket whose ID is embedded in the email subject tag, or undefined
+ * if no configured tag pattern matches or the ticket can't be retrieved.
+ */
+export async function findTicketBySubjectTag(subject: string): Promise<HaloTicket | undefined> {
+  const id = await extractTicketIdFromSubject(subject);
+  if (!id) return undefined;
+  try {
+    const ticket = await call<HaloTicket | undefined>(`/Tickets/${id}`);
+    return ticket && typeof ticket.id === "number" ? ticket : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // ---------- Reference data (cached in-memory for the session) ----------
 // All keyed by haloBaseUrl so stateless multi-tenant callers don't see each
 // other's data when serving multiple tenants from one process.
@@ -395,6 +508,7 @@ const _ticketTypesCache = new Map<string, HaloTicketType[]>();
 const _agentsCache = new Map<string, HaloAgent[]>();
 const _statusesCache = new Map<string, HaloStatus[]>();
 const _prioritiesCache = new Map<string, HaloPriority[]>();
+const _controlCache = new Map<string, HaloControl>();
 
 export async function listTicketTypes(force = false): Promise<HaloTicketType[]> {
   const key = cacheKey();
@@ -480,6 +594,22 @@ export function clearReferenceCache() {
   _agentsCache.delete(key);
   _statusesCache.delete(key);
   _prioritiesCache.delete(key);
+  _controlCache.delete(key);
+}
+
+/** Fetch and cache GET /api/Control — tenant-wide settings including email subject tags. */
+export async function getControl(force = false): Promise<HaloControl> {
+  const key = cacheKey();
+  const hit = _controlCache.get(key);
+  if (hit && !force) return hit;
+  const res = await call<HaloControl>("/Control");
+  _controlCache.set(key, res);
+  writeControlSnapshot(res);
+  return res;
+}
+
+export function getCachedControl(): HaloControl | undefined {
+  return _controlCache.get(cacheKey());
 }
 
 // ---------- ClientCache (bootstrap data) ----------
@@ -504,6 +634,7 @@ export async function getClientCache(force = false): Promise<HaloClientCache> {
     _clientCache = res;
     _clientCachePromise = undefined;
     writeAgentSnapshot(res.agent);
+    writeMailboxSnapshot(res);
     // Resolve the agent's sales mailbox in the background so it's cached by
     // the time the on-send handler needs it. Non-blocking; failure is
     // expected for tenants without sales mailbox functionality.
@@ -530,6 +661,110 @@ export async function getClientCache(force = false): Promise<HaloClientCache> {
  * Trimmed to just the fields the on-send handler needs.
  */
 const AGENT_SNAPSHOT_KEY = "halo.agentSnapshot.v1";
+const CONTROL_SNAPSHOT_KEY = "halo.controlSnapshot.v1";
+const MAILBOX_SNAPSHOT_KEY = "halo.mailboxSnapshot.v1";
+
+/**
+ * Email addresses of the tenant's INBOUND-parsing mailboxes, lowercased and
+ * deduped. A reply whose recipients include one of these will be ingested by
+ * Halo's native email intake — so the add-in must NOT also log it (double
+ * action). Outbound-only mailboxes (inbound_method === 0) are excluded since
+ * Halo won't ingest mail sent to them.
+ */
+export function intakeMailboxAddresses(cache: HaloClientCache): string[] {
+  const out = new Set<string>();
+  for (const mb of cache.mailboxes ?? []) {
+    if (mb.enabled === false) continue;
+    if (mb.inbound_method === 0) continue;
+    for (const addr of [mb.azureemail, mb.smtpaddress, mb.display_address]) {
+      const a = addr?.trim().toLowerCase();
+      if (a) out.add(a);
+    }
+  }
+  return [...out];
+}
+
+function writeMailboxSnapshot(cache: HaloClientCache): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      MAILBOX_SNAPSHOT_KEY,
+      JSON.stringify(intakeMailboxAddresses(cache)),
+    );
+  } catch {
+    /* swallow — quota, private mode, etc. */
+  }
+}
+
+/** Decode a base64 string (bare or "data:<mime>;base64,<...>") into a Blob. */
+function base64ToBlob(base64: string, contentType: string): Blob {
+  const comma = base64.indexOf(",");
+  const raw = base64.startsWith("data:") && comma >= 0 ? base64.slice(comma + 1) : base64;
+  const bin = atob(raw);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: contentType });
+}
+
+/**
+ * Upload an inline image to Halo and return a renderable URL for it.
+ *
+ * Mirrors what Halo's own editor does when an image is pasted: POST the binary
+ * to /api/attachment/image as multipart/form-data; Halo stores the bytes in its
+ * attachment/CDN store and returns `{ link }` — a signed, self-contained URL
+ * that renders for anyone (it 301s to the CDN). Used to keep image bytes OUT of
+ * the action note (which would bloat the busiest table) while still rendering
+ * inline. Content-Type is intentionally NOT set so the browser supplies the
+ * multipart boundary; the bearer is still sent.
+ */
+export async function uploadInlineImage(
+  blob: Blob,
+  ticketId?: number,
+): Promise<string> {
+  const base = getConfig()?.haloBaseUrl?.replace(/\/+$/, "");
+  const token = getTokens()?.accessToken;
+  if (!base) throw new Error("uploadInlineImage: no Halo base URL configured");
+  if (!token) throw new Error("uploadInlineImage: not authenticated");
+
+  const form = new FormData();
+  form.append("file", blob);
+  form.append("ticket_id", String(ticketId ?? 0));
+  form.append("image_upload_id", "0");
+  form.append("image_upload_key", "");
+
+  const res = await fetch(`${base}/api/attachment/image`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  if (!res.ok) {
+    throw new Error(`Halo /api/attachment/image returned ${res.status}`);
+  }
+  const json = (await res.json()) as { link?: string };
+  if (!json.link) throw new Error("Halo /api/attachment/image returned no link");
+  return json.link;
+}
+
+/** Base64 → Blob, exposed so surface code can hand fetched image bytes to
+ *  uploadInlineImage without re-implementing the decode. */
+export function imageBase64ToBlob(base64: string, contentType: string): Blob {
+  return base64ToBlob(base64, contentType);
+}
+
+function writeControlSnapshot(control: HaloControl): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      CONTROL_SNAPSHOT_KEY,
+      JSON.stringify({
+        email_start_tag: control.email_start_tag ?? "",
+        email_end_tag: control.email_end_tag ?? "",
+      }),
+    );
+  } catch {
+    /* swallow — quota, private mode, etc. */
+  }
+}
 
 interface AgentSnapshot {
   id: number;

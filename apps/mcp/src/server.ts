@@ -1,5 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { registerAllTools } from "./tools/index.js";
+import { registerAllTools, TOOL_COUNT } from "./tools/index.js";
 import { instanceSlug } from "./http/tenant.js";
 
 export interface CreateServerOpts {
@@ -40,6 +40,15 @@ export function createHaloMcpServer(opts: CreateServerOpts = {}): McpServer {
       `instances don't collide in your client. Tool names below omit that prefix ` +
       `for readability — prepend \`${slug}_\` when calling.\n\n`
     : "";
+  const toolDiscoveryNote = slug
+    ? `TOOL DISCOVERY: this connection exposes ${TOOL_COUNT} tools, all deferred until ` +
+      `fetched via ToolSearch. Plain descriptive queries are unreliable — many tool ` +
+      `names/descriptions share vocabulary (ticket, client, report) and the tool you ` +
+      `want can rank outside the default top-5 results. Always: (a) hard-filter to ` +
+      `this connector with \`+${slug} <keyword>\`, and (b) set max_results to at ` +
+      `least 15. Prefer \`select:${slug}_<exact_tool_name>\` outright whenever this ` +
+      `instructions block has already named the tool you need.\n\n`
+    : "";
   const server = new McpServer(
     {
       name: buildServerName(opts.tenant),
@@ -59,6 +68,7 @@ export function createHaloMcpServer(opts: CreateServerOpts = {}): McpServer {
       },
       instructions:
         toolPrefixNote +
+        toolDiscoveryNote +
         "HaloPSA tools for an MSP. The point of this MCP is to crunch data a human can't quickly assemble from Halo's UI — cross-client trends, time-series rollups, profitability, MTTR/SLA by category, ticket similarity, categorisation. Per-ticket edits are usually faster in Halo's UI; prefer this MCP for analysis and bulk operations.\n\n" +
         "TOOL FAMILIES:\n" +
         "- Ad-hoc analysis: exploreSchema (START HERE for unfamiliar data — discover tables/columns and sample real rows so you understand the schema before querying), runSql (highest-leverage — SELECT via Report Center; read its 7 rules), listReports + getReport (check for an existing saved report FIRST, and read its SQL as a worked example — but validate it loads). haloApiGet is the read-only REST lens (GET only; endpoint name ≈ table name — handy for decoding columns); haloApiRaw is the write escape hatch (POST/PUT/PATCH/DELETE).\n" +

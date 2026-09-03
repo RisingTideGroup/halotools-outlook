@@ -17,7 +17,7 @@ import { getConfig, type DialogOpener, type DialogResultMessage } from "@iusehal
 const LEGACY_REDIRECT_PATH = "/outlook/auth/callback.html";
 const UNIVERSAL_REDIRECT_PATH = "/auth/callback";
 const START_PATH = "/outlook/auth/start.html";
-const ADDIN_ORIGIN = "https://tools.iusehalo.com";
+const ADDIN_ORIGIN = window.location.origin;
 
 export type CallbackMode = "legacy" | "universal";
 

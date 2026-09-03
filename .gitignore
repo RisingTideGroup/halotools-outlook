@@ -1,4 +1,6 @@
 node_modules/
+apps/outlook/public/manifest.dev.json
+apps/outlook/public/manifest.dev.zip
 dist/
 dist-node/
 .env
@@ -11,3 +13,6 @@ dist-node/
 coverage/
 tsconfig.tsbuildinfo
 .claude/
+
+# Dev-only Outlook manifest bundle (generated, not committed)
+apps/outlook/public/manifest.dev.zip

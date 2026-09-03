@@ -48,6 +48,21 @@ export interface HaloTicketType {
   anonymouscanselect?: boolean;
   /** Visible at all in any picker. Some types are flagged invisible without being inactive. */
   visible?: boolean;
+  /** Per-type email subject tag overrides from /api/TicketType/{id}. When set,
+   *  Halo stamps this type's tickets with these tags instead of the system-wide
+   *  email_start_tag / email_end_tag from /api/Control. Empty string = use system default. */
+  email_start_tag_override?: string;
+  email_end_tag_override?: string;
+}
+
+/** Tenant-wide email and UI settings from GET /api/Control.
+ *  The endpoint returns hundreds of keys; we type the ones we use. */
+export interface HaloControl {
+  /** Prefix Halo stamps before the ticket ID in email subjects, e.g. "[Ticket #". */
+  email_start_tag?: string;
+  /** Suffix after the ticket ID, e.g. "]". */
+  email_end_tag?: string;
+  [k: string]: unknown;
 }
 
 export interface HaloStatus {
@@ -122,6 +137,10 @@ export interface HaloMailbox {
   azureemail?: string;
   display_address?: string;
   enabled?: boolean;
+  /** Inbound parse method. 0 = outbound-only (Halo does NOT ingest mail sent
+   *  here), non-zero = parses inbound. Used to decide whether sending a reply
+   *  to this address would be double-logged by native intake. */
+  inbound_method?: number;
 }
 
 /** A row from ClientCache.lookups. lookupid groups rows into categories
@@ -260,9 +279,9 @@ export interface CreateActionPayload {
   emailfromname?: string;
   emailsubject?: string;
   /** Decimal hours spent on this action (e.g., 0.25 for 15 minutes). */
-  time_taken?: number;
+  timetaken?: number;
   /** Charge rate id from ClientCache.lookups (lookupid 17). 0 == No Charge. */
-  chargerate_id?: number;
+  chargerate?: number;
   /** RFC 5322 Message-ID of the source email — Halo threads on this natively. */
   internetmessageid?: string;
   /** Parent's Message-ID from the In-Reply-To header. */

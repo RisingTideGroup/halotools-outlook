@@ -4,13 +4,19 @@
 //   /authorize  → 302 to halo.<tenant>/auth/authorize (user sees real Halo login)
 //   /token      → POST to halo.<tenant>/auth/token, return Halo's tokens to Claude
 //
-// PKCE is enforced on both legs:
-//   - Claude verifies us (its leg) via the standard /authorize code_challenge
-//     + /token code_verifier. We hold the challenge in pendingState and check
-//     verifier when Claude redeems the auth code we minted.
-//   - We verify Halo (our leg) the same way: we mint our own verifier+challenge,
-//     send the challenge with the authorize request, and send the verifier with
-//     the token exchange. Stored in pendingState.
+// PKCE:
+//   - Our leg to Halo always uses PKCE: we mint our own verifier+challenge,
+//     send the challenge with the authorize request, and send the verifier
+//     with the token exchange. Stored in pendingState.
+//   - The client's leg to us uses PKCE WHEN THE CLIENT SENDS IT (Claude,
+//     Cursor, ChatGPT always do) but it's not mandatory — classic
+//     confidential-client OAuth 2.0 clients that skip PKCE entirely (e.g.
+//     Copilot Studio's Manual/Dynamic modes, which authenticate via
+//     client_secret instead) are still allowed through. When no challenge was
+//     presented at /authorize, /token skips verifier verification for that
+//     code. The one-time, single-use authorization code plus the redirect_uri
+//     match remain the operative protections on that path — the classic OAuth
+//     2.0 model PKCE was layered on top of, not a new hole.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getCallbackUrl } from "./origin.js";
@@ -63,8 +69,8 @@ export function handleAuthorize(
 
   const responseType = params.get("response_type");
   const redirectUri = params.get("redirect_uri");
-  const codeChallenge = params.get("code_challenge");
-  const codeChallengeMethod = params.get("code_challenge_method") ?? "plain";
+  const codeChallenge = params.get("code_challenge") ?? undefined;
+  const codeChallengeMethod = params.get("code_challenge_method") ?? undefined;
   const state = params.get("state") ?? "";
   // client_id is ignored — we don't enforce a client registry, see metadata.ts.
 
@@ -82,11 +88,12 @@ export function handleAuthorize(
     });
     return;
   }
-  if (!codeChallenge || codeChallengeMethod !== "S256") {
+  // PKCE is optional — see the file header. When a client does send a
+  // challenge, S256 is the only method we accept (reject "plain" outright).
+  if (codeChallenge && codeChallengeMethod !== "S256") {
     writeJson(res, 400, {
       error: "invalid_request",
-      error_description:
-        "PKCE is required: send code_challenge and code_challenge_method=S256.",
+      error_description: "When sending code_challenge, code_challenge_method=S256 is required.",
     });
     return;
   }
@@ -153,14 +160,13 @@ async function exchangeCode(
   res: ServerResponse,
 ): Promise<void> {
   const code = form.get("code");
-  const codeVerifier = form.get("code_verifier");
+  const codeVerifier = form.get("code_verifier") ?? undefined;
   const redirectUri = form.get("redirect_uri");
 
-  if (!code || !codeVerifier || !redirectUri) {
+  if (!code || !redirectUri) {
     writeJson(res, 400, {
       error: "invalid_request",
-      error_description:
-        "code, code_verifier, and redirect_uri are required for authorization_code grant.",
+      error_description: "code and redirect_uri are required for authorization_code grant.",
     });
     return;
   }
@@ -180,12 +186,20 @@ async function exchangeCode(
     });
     return;
   }
-  if (!verifyPkce(codeVerifier, entry.claudeCodeChallenge, entry.claudeCodeChallengeMethod)) {
-    writeJson(res, 400, {
-      error: "invalid_grant",
-      error_description: "PKCE verification failed.",
-    });
-    return;
+  // Only enforce PKCE when the client actually used it at /authorize (see file
+  // header) — a client_secret-based classic OAuth 2.0 client never sent a
+  // challenge, so there's nothing to verify here for it.
+  if (entry.claudeCodeChallenge) {
+    if (
+      !codeVerifier ||
+      !verifyPkce(codeVerifier, entry.claudeCodeChallenge, entry.claudeCodeChallengeMethod ?? "")
+    ) {
+      writeJson(res, 400, {
+        error: "invalid_grant",
+        error_description: "PKCE verification failed.",
+      });
+      return;
+    }
   }
 
   writeJson(res, 200, {

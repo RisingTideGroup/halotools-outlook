@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createHaloMcpServer } from "./server.js";
 import {
   installRequestStorage,
+  installCustomHeaders,
   loadEnvAuth,
   withRequestAuth,
 } from "./halo/context.js";
@@ -11,6 +12,8 @@ import { createHttpServer } from "./http/server.js";
 // halo-api reads tenant + token via its storage adapter; install ours (which is
 // AsyncLocalStorage-backed) before any tool can run.
 installRequestStorage();
+// Optional MCP_CUSTOM_HEADER_<id>_NAME/_VALUE pairs — no-op unless configured.
+installCustomHeaders();
 
 function pickTransport(argv: string[]): "stdio" | "http" {
   if (argv.includes("--http")) return "http";

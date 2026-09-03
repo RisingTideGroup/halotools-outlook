@@ -16,11 +16,12 @@ import {
   Spinner,
   MessageBar,
   MessageBarBody,
+  MessageBarActions,
   Text,
   Switch,
   Input,
 } from "@fluentui/react-components";
-import { Add24Regular, Attach24Regular } from "@fluentui/react-icons";
+import { Add24Regular, Attach24Regular, Dismiss24Regular } from "@fluentui/react-icons";
 import {
   appendAction,
   createTicket,
@@ -39,6 +40,7 @@ import {
   getCurrentUserEmail,
   getItemImportance,
   formatHaloDate,
+  resolveInlineCidImages,
   type EmailContext,
   type FetchedAttachment,
 } from "../lib/office";
@@ -153,6 +155,146 @@ export function LogActions({
   );
 }
 
+// ---------- Quick import banner ----------
+
+export function QuickImportBanner({
+  email,
+  contact,
+  ticket,
+  onDismissed,
+}: {
+  email: EmailContext;
+  contact?: HaloUser;
+  ticket: HaloTicket;
+  onDismissed: () => void;
+}) {
+  const [status, setStatus] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const [errorMsg, setErrorMsg] = useState<string | undefined>();
+  const [actionUrl, setActionUrl] = useState<string | undefined>();
+
+  const handleImport = async () => {
+    setStatus("busy");
+    setErrorMsg(undefined);
+    try {
+      const defaults = getDefaults();
+      const rawHtml = await getBody("html");
+      const html =
+        defaults.includeInlineImages !== false
+          ? await resolveInlineCidImages(rawHtml, ticket.id)
+          : rawHtml;
+      let attachments: HaloAttachmentInline[] = [];
+      const rawAttachments = listAttachments().filter((a) => !a.isInline);
+      if ((defaults.includeAttachmentsByDefault ?? true) && rawAttachments.length > 0) {
+        const fetched = await fetchAllAttachments();
+        attachments = fetched.attachments.map(toHaloAttachment);
+      }
+
+      const noteHtml = extractTopReply(html);
+      const notePlain = htmlToText(noteHtml);
+      const action = await appendAction({
+        ticket_id: ticket.id,
+        outcome: defaults.defaultAppendOutcome ?? "Email Received",
+        outcome_id: 0,
+        _isuserupdate: true,
+        note: notePlain,
+        note_html: noteHtml,
+        hiddenfromuser: false,
+        actionhide: 0,
+        emailfrom: email.senderName || email.senderEmail,
+        emailfromname: email.senderName,
+        emailfromaddress: email.senderEmail,
+        emailsubjectnew: email.subject,
+        emailto: getCurrentUserEmail() ?? "",
+        emailimportance: getItemImportance(),
+        dateemailed: formatHaloDate(email.receivedAt),
+        attachments: attachments.length ? attachments : undefined,
+        user_id: contact?.id,
+        actionby_user_id: contact?.id,
+        agent_id: undefined,
+        who: email.senderName || email.senderEmail,
+        who_agentid: -1,
+        who_type: 2,
+        internetmessageid: email.internetMessageId,
+        inreplyto: email.inReplyTo,
+        references: email.references.length ? email.references.join(" ") : undefined,
+        mailentryid: email.itemId,
+        emaildirection: "I",
+        email_status: 2,
+        emailbody_html: html,
+        emailbody: htmlToText(html),
+      });
+
+      setActionUrl(ticketDeepLink(action.ticket_id, action.id));
+      setStatus("done");
+      setTimeout(onDismissed, 5000);
+    } catch (e) {
+      setErrorMsg((e as Error).message);
+      setStatus("error");
+    }
+  };
+
+  if (status === "done") {
+    return (
+      <MessageBar intent="success">
+        <MessageBarBody>
+          Imported to #{ticket.id}
+          {actionUrl && (
+            <>
+              {" — "}
+              <a href={actionUrl} target="_blank" rel="noopener noreferrer">
+                Open in Halo
+              </a>
+            </>
+          )}
+        </MessageBarBody>
+        <MessageBarActions
+          containerAction={
+            <Button
+              appearance="transparent"
+              size="small"
+              icon={<Dismiss24Regular />}
+              onClick={onDismissed}
+              aria-label="Dismiss"
+            />
+          }
+        />
+      </MessageBar>
+    );
+  }
+
+  return (
+    <MessageBar intent={status === "error" ? "error" : "info"}>
+      <MessageBarBody>
+        {status === "error"
+          ? errorMsg
+          : `#${ticket.id} · ${ticket.summary ?? "open ticket"} — import this reply?`}
+      </MessageBarBody>
+      <MessageBarActions
+        containerAction={
+          <Button
+            appearance="transparent"
+            size="small"
+            icon={<Dismiss24Regular />}
+            onClick={onDismissed}
+            aria-label="Dismiss"
+            disabled={status === "busy"}
+          />
+        }
+      >
+        <Button
+          appearance="primary"
+          size="small"
+          onClick={handleImport}
+          disabled={status === "busy"}
+          icon={status === "busy" ? <Spinner size="tiny" /> : undefined}
+        >
+          {status === "busy" ? "Importing…" : status === "error" ? "Retry" : "Import"}
+        </Button>
+      </MessageBarActions>
+    </MessageBar>
+  );
+}
+
 // ---------- Append to ticket ----------
 
 function AppendDialog({
@@ -244,10 +386,11 @@ function AppendDialog({
     if (!selectedId) return;
     setBusy(true);
     try {
-      // sanitizeOutlookHtml strips MSO conditional comments, <o:p> tags,
-      // class="MsoNormal" margins, and runs of empty paragraphs — without
-      // this, the recorded action renders with huge vertical gaps in Halo.
-      const html = sanitizeOutlookHtml(await getBody("html"));
+      const rawHtml = sanitizeOutlookHtml(await getBody("html"));
+      const html =
+        getDefaults().includeInlineImages !== false
+          ? await resolveInlineCidImages(rawHtml, selectedId)
+          : rawHtml;
       let attachments: HaloAttachmentInline[] = [];
       let attachWarning: string | undefined;
       if (includeAttachments && attachmentCount > 0) {

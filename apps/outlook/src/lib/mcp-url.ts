@@ -5,7 +5,9 @@
 //
 // Keep this in sync with apps/mcp/src/http/tenant.ts::decodeTenant.
 
-const MCP_HOST = "https://tools.iusehalo.com";
+/** Host of the hosted MCP hub. The MCP server is a distinct service from the
+ *  Outlook add-in, so its callback/host is keyed here (not window.location). */
+export const MCP_HOST = "https://tools.iusehalo.com";
 
 function base64url(input: string): string {
   // btoa handles ASCII fine; Halo URLs + UUIDs are ASCII so we don't bother
