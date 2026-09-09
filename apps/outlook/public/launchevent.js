@@ -116,7 +116,7 @@
           if (user && user.id) {
             return fetchWithTimeout(
               cfg.haloBaseUrl + "/api/Tickets?user_id=" + user.id +
-                "&open_only=true&pageinate=false&includedetails=true",
+                "&open_only=true&pageinate=false&includedetails=true&domain=all",
               { headers: hdrs },
               AUTO_LOOKUP_FETCH_MS
             ).then(function (r) {
@@ -151,7 +151,7 @@
 
             return fetchWithTimeout(
               cfg.haloBaseUrl + "/api/Tickets?client_id=" + client.id +
-                "&open_only=true&pageinate=false&includedetails=true",
+                "&open_only=true&pageinate=false&includedetails=true&domain=all",
               { headers: hdrs },
               AUTO_LOOKUP_FETCH_MS
             ).then(function (r) {

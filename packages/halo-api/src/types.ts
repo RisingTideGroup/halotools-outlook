@@ -245,6 +245,32 @@ export interface HaloTicket {
   /** Some Halo versions expose a hard deadline separately. Empty/zero-date when unset. */
   deadlinedate?: string;
   customfields?: Array<{ name: string; value: unknown }>;
+  /** Parent ticket id for project sub-tasks / child tickets. 0 or absent when top-level. */
+  parent_id?: number;
+  /** Root project id for anything inside a project tree. */
+  main_project_id?: number;
+  child_count?: number;
+  /** ISO datetime of the most recent action on the ticket. */
+  lastactiondate?: string;
+  last_update?: string;
+  team?: string;
+  user_email?: string;
+  /** Always "ticket" in list responses regardless of type — do NOT use it to detect
+   *  opportunities/projects; classify via tickettype_id → HaloTicketType.use instead. */
+  use?: string;
+}
+
+/** Coarse bucket for a ticket, derived from its type's `use` and its parent linkage. */
+export type TicketKind = "reactive" | "sale" | "project";
+
+/** Options for the scoped ticket search used by the append pickers. */
+export interface TicketSearchOptions {
+  /** Only open tickets (default true). */
+  openOnly?: boolean;
+  /** Restrict to a client. */
+  clientId?: number;
+  /** Restrict to tickets assigned to an agent. */
+  agentId?: number;
 }
 
 export interface HaloAction {

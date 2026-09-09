@@ -7,6 +7,8 @@ import type {
   HaloTicket,
   HaloAction,
   HaloTicketType,
+  TicketKind,
+  TicketSearchOptions,
   HaloStatus,
   HaloAgent,
   HaloClientCache,
@@ -240,14 +242,75 @@ export async function searchClients(query: string, limit = 25): Promise<HaloClie
 }
 
 /** Free-text ticket search — used by the compose surface to insert ticket links. */
-export async function searchTickets(query: string, limit = 25): Promise<HaloTicket[]> {
+/**
+ * /Tickets and /Opportunities are the same endpoint; the only thing that decides
+ * whether opportunities and projects come back is the `domain` filter. The
+ * default is `reqs`, which silently drops every opportunity. Every list/search
+ * call in this module passes `all` so sales tickets show up alongside the rest.
+ * (tickettype_id / ticketarea_id / isopportunity are ignored by this endpoint.)
+ */
+const TICKET_DOMAIN_ALL = "all";
+
+/** "#9517" → "9517"; anything else trimmed. Halo's `search` never matches a
+ *  leading '#', so pickers that let people type the id with a hash got nothing. */
+export function normalizeTicketQuery(query: string): string {
+  return query.trim().replace(/^#\s*/, "");
+}
+
+export async function searchTickets(
+  query: string,
+  limit = 25,
+  opts: TicketSearchOptions = {},
+): Promise<HaloTicket[]> {
+  const term = normalizeTicketQuery(query);
+  if (!term) return [];
   const q = new URLSearchParams({
-    search: query,
+    search: term,
     pageinate: "false",
     count: String(limit),
+    domain: TICKET_DOMAIN_ALL,
   });
-  const res = await call<{ tickets: HaloTicket[] } | HaloTicket[]>(`/Tickets?${q}`);
-  return Array.isArray(res) ? res : res.tickets;
+  if (opts.openOnly !== false) q.set("open_only", "true");
+  if (opts.clientId != null) q.set("client_id", String(opts.clientId));
+  if (opts.agentId != null) q.set("agent_id", String(opts.agentId));
+
+  const [byId, res] = await Promise.all([
+    // A bare number is almost always a ticket id — put that ticket first even
+    // when Halo's text search ranks it below body-text matches (or misses it).
+    /^\d+$/.test(term) ? getTicketOrUndefined(Number(term)) : Promise.resolve(undefined),
+    call<{ tickets: HaloTicket[] } | HaloTicket[]>(`/Tickets?${q}`),
+  ]);
+  const list = Array.isArray(res) ? res : res.tickets ?? [];
+  if (!byId) return list;
+  const matchesScope =
+    (opts.clientId == null || byId.client_id === opts.clientId) &&
+    (opts.agentId == null || byId.agent_id === opts.agentId);
+  if (!matchesScope) return list;
+  return [byId, ...list.filter((t) => t.id !== byId.id)];
+}
+
+async function getTicketOrUndefined(id: number): Promise<HaloTicket | undefined> {
+  try {
+    const t = await call<HaloTicket | undefined>(`/Tickets/${id}`);
+    return t && typeof t.id === "number" ? t : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Bucket a ticket for grouping in the add-in. Uses the ticket type's `use`
+ * ("tickets" / "opps" / "projects") from the cached type list; anything hanging
+ * off a project (parent_id / main_project_id) is a project task regardless of
+ * its type. Unknown types fall back to "reactive".
+ */
+export function classifyTicket(ticket: HaloTicket, types: readonly HaloTicketType[]): TicketKind {
+  const type = ticket.tickettype_id != null ? types.find((t) => t.id === ticket.tickettype_id) : undefined;
+  const use = (type?.use ?? "").toLowerCase();
+  if (use.startsWith("opp")) return "sale";
+  if (use.startsWith("proj")) return "project";
+  if ((ticket.parent_id ?? 0) > 0 || (ticket.main_project_id ?? 0) > 0) return "project";
+  return "reactive";
 }
 
 // ---------- Canned text ----------
@@ -361,6 +424,7 @@ export async function listOpenTicketsForClient(clientId: number): Promise<HaloTi
     client_id: String(clientId),
     open_only: "true",
     pageinate: "false",
+    domain: TICKET_DOMAIN_ALL,
     // Without these, Halo's list response omits agent name, priority, SLA and
     // custom fields — the row pills then read "Unassigned" / "—" for tickets
     // that are actually assigned.
@@ -376,6 +440,7 @@ export async function listOpenTicketsForUser(userId: number): Promise<HaloTicket
     user_id: String(userId),
     open_only: "true",
     pageinate: "false",
+    domain: TICKET_DOMAIN_ALL,
     includedetails: "true",
     includeagentdetails: "true",
   });
