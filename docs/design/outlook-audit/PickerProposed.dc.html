@@ -1,0 +1,82 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; font-family: "Segoe UI", "Segoe UI Web (West European)", -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", sans-serif; color: #242424; background: #ffffff; font-size: 14px; line-height: 20px; -webkit-font-smoothing: antialiased; }
+    a { color: #0f6cbd; text-decoration: none; } a:hover { color: #115ea3; text-decoration: underline; }
+  </style>
+</helmet>
+<div style="width: 360px; height: 640px; background: #f5f5f5; display: flex; align-items: flex-start; justify-content: center; padding: 16px; box-sizing: border-box;">
+  <div style="width: 328px; background: #ffffff; border-radius: 8px; box-shadow: 0 8px 16px rgba(0,0,0,0.14), 0 0 2px rgba(0,0,0,0.12); padding: 20px; box-sizing: border-box; display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 20px; line-height: 28px; font-weight: 600;">Append email to ticket</div>
+
+    <div style="display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; border: 1px solid #d1d1d1; border-bottom: 1px solid #0f6cbd; border-radius: 4px; background: #ffffff;">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#424242" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"></circle><path d="M10.5 10.5 14 14"></path></svg>
+      <span style="color: #242424; flex: 1;">printer</span>
+      <span style="font-size: 12px; color: #616161;">or a ticket #</span>
+    </div>
+
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+      <div style="display: inline-flex; border: 1px solid #d1d1d1; border-radius: 4px; overflow: hidden; height: 28px;">
+        <span style="display: inline-flex; align-items: center; padding: 0 10px; font-size: 12px; font-weight: 600; background: #ebf3fc; color: #0f548c; border-right: 1px solid #d1d1d1;">This client</span>
+        <span style="display: inline-flex; align-items: center; padding: 0 10px; font-size: 12px; font-weight: 600; color: #424242; border-right: 1px solid #d1d1d1;">Mine</span>
+        <span style="display: inline-flex; align-items: center; padding: 0 10px; font-size: 12px; font-weight: 600; color: #424242;">All</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: #424242;">
+        <span style="width: 32px; height: 18px; border-radius: 9999px; background: #0f6cbd; position: relative; display: inline-block;"><span style="position: absolute; right: 2px; top: 2px; width: 12px; height: 12px; border-radius: 50%; background: #ffffff;"></span></span>
+        <span>Open only</span>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 2px; border: 1px solid #e0e0e0; border-radius: 4px; padding: 4px;">
+      <div style="font-size: 10px; line-height: 14px; font-weight: 600; color: #616161; text-transform: uppercase; letter-spacing: 0.04em; padding: 6px 8px 2px;">This conversation</div>
+      <div style="display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 4px; background: #ebf3fc;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span style="display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 3px; border: 1px solid #d1d1d1; background: #ffffff; color: #424242; font-size: 10px; line-height: 14px; font-weight: 600;">Ticket</span>
+          <span style="flex: 1; min-width: 0; font-size: 14px; line-height: 20px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">#4571 Printer mapping not creating tickets correctly</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 16px; color: #616161;"><span>Central Point Networks</span><span style="color: #707070;">·</span><span style="width: 8px; height: 8px; border-radius: 50%; background: #007ac1; display: inline-block;"></span><span>In Progress</span><span style="color: #707070;">·</span><span>El Copeland</span><span style="color: #707070;">·</span><span>3d</span></div>
+      </div>
+
+      <div style="font-size: 10px; line-height: 14px; font-weight: 600; color: #616161; text-transform: uppercase; letter-spacing: 0.04em; padding: 8px 8px 2px;">Central Point Networks</div>
+      <div style="display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 4px;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span style="display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 3px; background: #ebf3fc; color: #0f548c; font-size: 10px; line-height: 14px; font-weight: 600;">Sale</span>
+          <span style="flex: 1; min-width: 0; font-size: 14px; line-height: 20px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">#16901 Print server replacement quote</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 16px; color: #616161;"><span style="width: 8px; height: 8px; border-radius: 50%; background: #007ac1; display: inline-block;"></span><span>Quote Sent</span><span style="color: #707070;">·</span><span>Mendy Green</span><span style="color: #707070;">·</span><span>6d</span></div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 4px;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span style="display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 3px; background: #f0f0f0; color: #424242; font-size: 10px; line-height: 14px; font-weight: 600;">Project</span>
+          <span style="flex: 1; min-width: 0; font-size: 14px; line-height: 20px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">#4224 Printer Management Issues</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 16px; color: #616161;"><span style="width: 8px; height: 8px; border-radius: 50%; background: #a1acbd; display: inline-block;"></span><span>Task - Waiting User</span><span style="color: #707070;">·</span><span>Unassigned</span><span style="color: #707070;">·</span><span>3w</span></div>
+      </div>
+
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 8px 8px 4px; font-size: 12px; line-height: 16px; color: #616161;">
+        <span>2 closed tickets match</span>
+        <a href="#" style="font-size: 12px;">Show closed</a>
+      </div>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 16px; font-size: 12px; color: #424242;">
+      <span style="display: inline-flex; align-items: center; gap: 6px;"><span style="width: 32px; height: 18px; border-radius: 9999px; border: 1px solid #616161; position: relative; display: inline-block;"><span style="position: absolute; left: 2px; top: 2px; width: 12px; height: 12px; border-radius: 50%; background: #616161;"></span></span>Private note</span>
+      <span style="display: inline-flex; align-items: center; gap: 6px;"><span style="width: 32px; height: 18px; border-radius: 9999px; background: #0f6cbd; position: relative; display: inline-block;"><span style="position: absolute; right: 2px; top: 2px; width: 12px; height: 12px; border-radius: 50%; background: #ffffff;"></span></span>2 attachments</span>
+    </div>
+
+    <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px;">
+      <div style="display: inline-flex; align-items: center; justify-content: center; height: 32px; min-width: 96px; padding: 0 12px; border-radius: 4px; border: 1px solid #d1d1d1; font-weight: 600;">Cancel</div>
+      <div style="display: inline-flex; align-items: center; justify-content: center; height: 32px; min-width: 96px; padding: 0 12px; border-radius: 4px; background: #0f6cbd; color: #ffffff; font-weight: 600;">Append to #4571</div>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

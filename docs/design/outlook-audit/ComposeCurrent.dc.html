@@ -1,0 +1,91 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; font-family: "Segoe UI", "Segoe UI Web (West European)", -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", sans-serif; color: #242424; background: #ffffff; font-size: 14px; line-height: 20px; -webkit-font-smoothing: antialiased; }
+    a { color: #0f6cbd; text-decoration: none; } a:hover { color: #115ea3; text-decoration: underline; }
+  </style>
+</helmet>
+<div style="width: 320px; height: 1080px; background: #ffffff; display: flex; flex-direction: column; border: 1px solid #e0e0e0; box-sizing: border-box; overflow: hidden;">
+  <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid #e0e0e0;">
+    <div style="font-size: 14px; line-height: 20px; font-weight: 600;">HaloPSA</div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 16px; padding: 12px;">
+
+    <div style="display: flex; flex-direction: column; gap: 6px;">
+      <div style="display: flex; align-items: center; justify-content: space-between;">
+        <div style="font-size: 12px; line-height: 16px; font-weight: 600; color: #424242; text-transform: uppercase; letter-spacing: 0.04em;">Recipients</div>
+        <span style="font-size: 12px; color: #424242; padding: 0 8px; height: 24px; display: inline-flex; align-items: center;">Refresh</span>
+      </div>
+      <div style="display: flex; gap: 10px; align-items: center; padding: 6px 8px; border-radius: 4px; border: 1px solid #e0e0e0;">
+        <div style="width: 28px; height: 28px; border-radius: 50%; background: #0f61a1; color: #ffffff; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 11px;">TF</div>
+        <div style="flex: 1; min-width: 0; display: flex; flex-direction: column;">
+          <div style="font-size: 12px; line-height: 16px; font-weight: 600;">Ted Freitas</div>
+          <div style="font-size: 10px; line-height: 14px; color: #616161;">Central Point Networks, LLC</div>
+        </div>
+        <span style="display: inline-flex; align-items: center; height: 16px; padding: 0 6px; border-radius: 9999px; background: #dff6dd; color: #0e700e; font-size: 10px; font-weight: 600;">Contact</span>
+      </div>
+    </div>
+
+    <div style="height: 1px; background: #e0e0e0;"></div>
+
+    <div style="display: flex; flex-direction: column; gap: 6px;">
+      <div style="font-size: 12px; line-height: 16px; font-weight: 600; color: #424242; text-transform: uppercase; letter-spacing: 0.04em;">Insert canned text</div>
+      <div style="display: flex; flex-direction: column; gap: 4px;"><span style="font-size: 14px; font-weight: 600;">Filter by group</span><div style="display: flex; align-items: center; justify-content: space-between; height: 30px; padding: 4px 8px; border: 1px solid #d1d1d1; border-radius: 4px; box-sizing: border-box;"><span>All groups</span><svg width="12" height="12" viewBox="0 0 16 16" fill="#424242"><path d="M3 5.5h10L8 11z"></path></svg></div></div>
+      <div style="display: flex; flex-direction: column; gap: 4px;"><span style="font-size: 14px; font-weight: 600;">Search</span><div style="display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; border: 1px solid #d1d1d1; border-bottom-color: #616161; border-radius: 4px; color: #616161; box-sizing: border-box;"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#424242" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"></circle><path d="M10.5 10.5 14 14"></path></svg>Filter by name or body…</div></div>
+      <span style="display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; font-size: 12px; color: #424242; align-self: flex-start;"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#424242" stroke-width="1.6" stroke-linecap="round"><path d="M8 3v10M3 8h10"></path></svg>Save current draft as canned text</span>
+      <div style="border: 1px solid #e0e0e0; border-radius: 4px; display: flex; flex-direction: column;">
+        <div style="padding: 8px 10px; border-bottom: 1px solid #f0f0f0;"><div style="font-size: 12px; font-weight: 600;">CX - Refill Hours</div><div style="font-size: 10px; line-height: 14px; color: #616161;">Hi {name}, your prepaid block is down to…</div></div>
+        <div style="padding: 8px 10px; border-bottom: 1px solid #f0f0f0;"><div style="font-size: 12px; font-weight: 600;">Service - Ticket Closed</div><div style="font-size: 10px; line-height: 14px; color: #616161;">We've marked this resolved. If anything…</div></div>
+        <div style="padding: 8px 10px;"><div style="font-size: 12px; font-weight: 600;">SOW - Kickoff</div><div style="font-size: 10px; line-height: 14px; color: #616161;">Attached is the statement of work for…</div></div>
+      </div>
+    </div>
+
+    <div style="height: 1px; background: #e0e0e0;"></div>
+
+    <div style="display: flex; flex-direction: column; gap: 6px;">
+      <div style="font-size: 12px; line-height: 16px; font-weight: 600; color: #424242; text-transform: uppercase; letter-spacing: 0.04em;">Insert ticket link</div>
+      <div style="display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; border: 1px solid #d1d1d1; border-bottom-color: #616161; border-radius: 4px; color: #616161; box-sizing: border-box;"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#424242" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"></circle><path d="M10.5 10.5 14 14"></path></svg>Search tickets…</div>
+    </div>
+
+    <div style="height: 1px; background: #e0e0e0;"></div>
+
+    <div style="display: flex; flex-direction: column; gap: 6px;">
+      <div style="font-size: 12px; line-height: 16px; font-weight: 600; color: #424242; text-transform: uppercase; letter-spacing: 0.04em;">Insert KB article</div>
+      <div style="display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; border: 1px solid #d1d1d1; border-bottom-color: #616161; border-radius: 4px; color: #616161; box-sizing: border-box;"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#424242" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"></circle><path d="M10.5 10.5 14 14"></path></svg>Search KB…</div>
+    </div>
+
+    <div style="height: 1px; background: #e0e0e0;"></div>
+
+    <div style="display: flex; flex-direction: column; gap: 6px;">
+      <div style="font-size: 12px; line-height: 16px; font-weight: 600; color: #424242; text-transform: uppercase; letter-spacing: 0.04em;">Log on send</div>
+      <div style="display: flex; gap: 8px;">
+        <div style="flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; height: 32px; border-radius: 4px; border: 1px solid #d1d1d1; font-weight: 600;">Append</div>
+        <div style="flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; height: 32px; border-radius: 4px; background: #0f6cbd; color: #ffffff; font-weight: 600;">Create</div>
+      </div>
+      <div style="font-size: 10px; line-height: 14px; color: #616161;">3 related tickets found — click Append to pick one.</div>
+    </div>
+
+    <div style="height: 1px; background: #e0e0e0;"></div>
+
+    <div style="display: flex; flex-direction: column; gap: 6px;">
+      <div style="font-size: 12px; line-height: 16px; font-weight: 600; color: #424242; text-transform: uppercase; letter-spacing: 0.04em;">Time on this email</div>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <div style="flex: 1; font-family: Consolas, 'Courier New', monospace; font-size: 20px; line-height: 28px; font-weight: 600;">04:12</div>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="#424242"><rect x="4" y="3" width="3" height="10" rx="0.5"></rect><rect x="9" y="3" width="3" height="10" rx="0.5"></rect></svg>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#424242" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8a5 5 0 1 0 1.5-3.6"></path><path d="M3 3v3h3"></path></svg>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 6px;"><span style="font-size: 14px; font-weight: 600;">Charge rate</span><div style="display: flex; align-items: center; justify-content: space-between; height: 32px; padding: 0 10px; border: 1px solid #d1d1d1; border-bottom-color: #616161; border-radius: 4px; box-sizing: border-box;"><span>No Charge</span><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#424242" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"></path></svg></div></div>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>
