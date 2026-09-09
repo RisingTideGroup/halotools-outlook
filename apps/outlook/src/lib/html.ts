@@ -24,6 +24,16 @@ export function htmlToText(html: string): string {
     .trim();
 }
 
+/** Escape a plain string for safe insertion into HTML text or attribute content. */
+export function escapeHtml(value: string): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 /**
  * Strip Outlook/Word-specific noise from an email body before sending it to
  * Halo. The raw HTML Office.js returns includes MSO conditional comments,

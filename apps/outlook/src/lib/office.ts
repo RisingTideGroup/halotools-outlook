@@ -33,10 +33,23 @@ export function installStorageAdapter(): void {
   }
 }
 
+/** One RFC 5322 mailbox — display name (may be empty) + address. */
+export interface EmailAddress {
+  name: string;
+  email: string;
+}
+
 export interface EmailContext {
   /** Direction relative to the signed-in user. "outgoing" means we sent it
    * (viewing a Sent Items message); "incoming" means we received it. */
   direction: "incoming" | "outgoing";
+  /** Structured From: — same data as senderName / senderEmail, kept here so
+   * the envelope footer can format all header rows uniformly. */
+  from: EmailAddress;
+  /** Full To: recipient list as shown in the read pane (display name + address). */
+  to: EmailAddress[];
+  /** Full Cc: recipient list. Empty when the message had no Cc. */
+  cc: EmailAddress[];
   /** The literal sender of the message per RFC 5322 — what goes into
    * Halo Action `emailfrom`. For outgoing this is the agent. */
   senderEmail: string;
@@ -115,8 +128,16 @@ export async function getCurrentEmailContext(): Promise<EmailContext | undefined
     }
   }
 
+  const toAddress = (r: Office.EmailAddressDetails): EmailAddress => ({
+    name: r.displayName ?? "",
+    email: r.emailAddress ?? "",
+  });
+
   return {
     direction: isOutgoing ? "outgoing" : "incoming",
+    from: toAddress(from),
+    to: (msg.to ?? []).map(toAddress).filter((a) => a.email),
+    cc: (msg.cc ?? []).map(toAddress).filter((a) => a.email),
     senderEmail,
     senderName: from.displayName ?? "",
     customerEmail,
@@ -372,6 +393,62 @@ export async function resolveInlineCidImages(html: string, ticketId?: number): P
   return html.replace(/src="cid:([^"]+)"/gi, (match, cid: string) => {
     const link = linkMap.get(normalise(cid));
     return link ? `src="${link}"` : match;
+  });
+}
+
+// ---------- Whole-message export (.eml) ----------
+
+type EmlCapableItem = {
+  getAsFileAsync?: (cb: (r: Office.AsyncResult<string>) => void) => void;
+};
+
+/**
+ * True when the host can hand us the current message as an RFC 822 file.
+ * `getAsFileAsync` is Mailbox 1.14 (new Outlook / OWA / recent desktop
+ * builds); classic Outlook and older hosts don't have it. Synchronous and
+ * never throws so UI can decide whether to show the ".eml" toggle at all.
+ */
+export function isEmlExportSupported(): boolean {
+  try {
+    if (!Office.context?.mailbox?.item) return false;
+    const reqs = Office.context.requirements;
+    if (!reqs || typeof reqs.isSetSupported !== "function") return false;
+    if (!reqs.isSetSupported("Mailbox", "1.14")) return false;
+    const item = Office.context.mailbox.item as unknown as EmlCapableItem;
+    return typeof item.getAsFileAsync === "function";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Export the current message as a base64-encoded .eml. Resolves undefined
+ * (never rejects) when the host lacks `getAsFileAsync` or the call fails, so
+ * callers can treat the attachment as optional. The filename is derived from
+ * the subject, sanitised for Halo.
+ */
+export function getMessageAsEml(): Promise<{ filename: string; base64: string } | undefined> {
+  return new Promise((resolve) => {
+    if (!isEmlExportSupported()) {
+      resolve(undefined);
+      return;
+    }
+    try {
+      const item = Office.context.mailbox.item as unknown as EmlCapableItem & {
+        subject?: string;
+      };
+      item.getAsFileAsync!((result) => {
+        if (result.status !== Office.AsyncResultStatus.Succeeded || !result.value) {
+          resolve(undefined);
+          return;
+        }
+        const subject = typeof item.subject === "string" ? item.subject : "";
+        const base = sanitizeFilename(subject).replace(/\.+$/, "") || "message";
+        resolve({ filename: `${base}.eml`, base64: result.value });
+      });
+    } catch {
+      resolve(undefined);
+    }
   });
 }
 

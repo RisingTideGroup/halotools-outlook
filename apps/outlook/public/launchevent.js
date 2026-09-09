@@ -546,6 +546,115 @@
       .trim();
   }
 
+  // ---------- Email envelope footer ----------
+  // Mirrors apps/outlook/src/lib/envelope.ts — keep in sync. Appends a small
+  // header table (direction/date, From, To, Cc, Subject) BELOW the note body
+  // so Halo list previews keep showing the message text first. Inline styles
+  // only; degrades to readable "Label  Value" rows if Halo strips them.
+  function escapeHtml(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function formatEnvelopeDate(d) {
+    try {
+      var dt = d ? new Date(d) : new Date();
+      if (isNaN(dt.getTime())) return "";
+      return dt.toLocaleString(undefined, {
+        weekday: "short", month: "short", day: "numeric", year: "numeric",
+        hour: "numeric", minute: "2-digit",
+      });
+    } catch (e) {
+      try { return new Date().toISOString(); } catch (e2) { return ""; }
+    }
+  }
+
+  function formatEnvelopeAddress(name, email) {
+    var n = String(name || "").trim();
+    var a = String(email || "").trim();
+    if (!a) return n;
+    if (!n || n.toLowerCase() === a.toLowerCase()) return a;
+    return n + " <" + a + ">";
+  }
+
+  // ctx: { direction, fromName, fromEmail, to: [addr], cc: [addr], subject, date }
+  function envelopeRows(ctx) {
+    var rows = [];
+    var when = formatEnvelopeDate(ctx.date);
+    rows.push(["Email", when ? (ctx.direction + " · " + when) : ctx.direction]);
+    var from = formatEnvelopeAddress(ctx.fromName, ctx.fromEmail);
+    if (from) rows.push(["From", from]);
+    var to = (ctx.to || []).filter(Boolean).join("; ");
+    if (to) rows.push(["To", to]);
+    var cc = (ctx.cc || []).filter(Boolean).join("; ");
+    if (cc) rows.push(["Cc", cc]);
+    if (ctx.subject) rows.push(["Subject", ctx.subject]);
+    return rows;
+  }
+
+  var ENVELOPE_LABEL_STYLE =
+    "padding:2px 10px 2px 0;color:#707070;font-weight:600;white-space:nowrap;vertical-align:top;";
+  var ENVELOPE_VALUE_STYLE = "padding:2px 0;color:#242424;vertical-align:top;word-break:break-word;";
+  var ENVELOPE_TABLE_STYLE =
+    "border-collapse:collapse;font-family:Segoe UI,Helvetica,Arial,sans-serif;font-size:12px;line-height:16px;color:#242424;";
+  var ENVELOPE_RULE_HTML = '<hr style="border:none;border-top:1px solid #e0e0e0;margin:12px 0 8px 0;">';
+  var ENVELOPE_RULE_TEXT = "\n\n----------------------------------------\n";
+
+  function buildEnvelopeHtml(ctx) {
+    var rows = envelopeRows(ctx);
+    var body = "";
+    for (var i = 0; i < rows.length; i++) {
+      body += '<tr><td style="' + ENVELOPE_LABEL_STYLE + '">' + escapeHtml(rows[i][0]) + "</td>" +
+        '<td style="' + ENVELOPE_VALUE_STYLE + '">' + escapeHtml(rows[i][1]) + "</td></tr>";
+    }
+    return '<table border="0" cellpadding="0" cellspacing="0" style="' + ENVELOPE_TABLE_STYLE + '">' +
+      body + "</table>";
+  }
+
+  function buildEnvelopeText(ctx) {
+    var rows = envelopeRows(ctx);
+    var out = [];
+    for (var i = 0; i < rows.length; i++) out.push(rows[i][0] + ": " + rows[i][1]);
+    return out.join("\n");
+  }
+
+  // Defensive wrappers: any failure returns the body untouched so the send
+  // is never blocked by the footer.
+  // If the body still carries its </body> wrapper the footer goes inside it,
+  // not after </html> where a document-mode renderer could drop it.
+  function appendEnvelopeHtml(bodyHtml, ctx) {
+    try {
+      var body = bodyHtml || "";
+      var footer = ENVELOPE_RULE_HTML + buildEnvelopeHtml(ctx);
+      var close = body.search(/<\/body\s*>/i);
+      if (close >= 0) return body.slice(0, close) + footer + body.slice(close);
+      return body + footer;
+    }
+    catch (e) { return bodyHtml || ""; }
+  }
+  function appendEnvelopeText(bodyText, ctx) {
+    try { return String(bodyText || "").replace(/\s+$/, "") + ENVELOPE_RULE_TEXT + buildEnvelopeText(ctx); }
+    catch (e) { return bodyText || ""; }
+  }
+
+  // On-send is always outbound: From = the sending agent, To/Cc = the draft's
+  // recipient lists (bare addresses — see readRecipientsField).
+  function outboundEnvelope(data, senderName, senderEmail) {
+    return {
+      direction: "Outbound",
+      fromName: senderName,
+      fromEmail: senderEmail,
+      to: data.to || [],
+      cc: data.cc || [],
+      subject: data.subject || "",
+      date: new Date(),
+    };
+  }
+
   /**
    * Create a ticket from the compose draft + email metadata, return its id.
    * Used by the on-send create-then-append path when the compose pane
@@ -576,8 +685,12 @@
       // Native-intake convention: details (= note for the auto-created action)
       // gets only the topmost reply; emailbody_html below keeps the full body
       // including the quoted thread.
-      var detailsHtml = extractTopReply(cleanedBody);
-      var detailsPlain = htmlToText(detailsHtml);
+      // Envelope footer (From/To/Cc/Subject) trails the body — see
+      // appendEnvelopeHtml. Same block the task pane appends.
+      var envelope = outboundEnvelope(data, senderName, senderEmail);
+      var topHtml = extractTopReply(cleanedBody);
+      var detailsHtml = appendEnvelopeHtml(topHtml, envelope);
+      var detailsPlain = appendEnvelopeText(htmlToText(topHtml), envelope);
 
       var payload = [{
         summary: pending.summary,
@@ -676,8 +789,12 @@
       // body for parity with native intake.
       // Sanitize first so all downstream patterns see the cleaned HTML.
       var cleanedBody = sanitizeOutlookHtml(data.body || "");
-      var noteHtml = stripSignature(extractTopReply(cleanedBody), agent.signature);
-      var notePlain = htmlToText(noteHtml);
+      var topHtml = stripSignature(extractTopReply(cleanedBody), agent.signature);
+      // Envelope footer (From/To/Cc/Subject) trails the body — see
+      // appendEnvelopeHtml. Same block the task pane appends.
+      var envelope = outboundEnvelope(data, senderName, senderEmail);
+      var noteHtml = appendEnvelopeHtml(topHtml, envelope);
+      var notePlain = appendEnvelopeText(htmlToText(topHtml), envelope);
       var payload = [{
         ticket_id: Number(ticketId),
         outcome: "Outgoing Email",
