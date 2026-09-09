@@ -1,15 +1,9 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import {
   Text,
   makeStyles,
   tokens,
   Badge,
-  Menu,
-  MenuTrigger,
-  MenuList,
-  MenuItem,
-  MenuPopover,
-  MenuButton,
   Spinner,
   Popover,
   PopoverTrigger,
@@ -20,8 +14,6 @@ import {
   Textarea,
 } from "@fluentui/react-components";
 import {
-  Open16Regular,
-  MoreVertical16Regular,
   Clock16Regular,
   Person16Regular,
   Calendar16Regular,
@@ -46,58 +38,18 @@ import {
 import { getCurrentUserEmail, openExternalUrl } from "../lib/office";
 import { getDefaults } from "../lib/defaults";
 
+/**
+ * Ticket editing primitives shared by the ticket rows in RelatedTickets:
+ *
+ *  - `useTicketLookups()`     — cached statuses / priorities / agents / current agent
+ *  - `useTicketMutations()`   — per-ticket busy + error state and the update / log-time calls
+ *  - `<TicketPillStrip />`    — the Status / Priority / Agent / Due / Log-time popover pills
+ *  - `openTicketInHalo()`, `formatDue()`, `resolveAgentName()` helpers
+ *
+ * The old flat <TicketList> section lived here; it was replaced by RelatedTickets.
+ */
+
 const useStyles = makeStyles({
-  root: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "6px",
-  },
-  label: {
-    fontSize: tokens.fontSizeBase200,
-    fontWeight: tokens.fontWeightSemibold,
-    color: tokens.colorNeutralForeground2,
-    textTransform: "uppercase",
-    letterSpacing: "0.04em",
-  },
-  empty: {
-    fontSize: tokens.fontSizeBase200,
-    color: tokens.colorNeutralForeground3,
-    fontStyle: "italic",
-  },
-  card: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "6px",
-    padding: "8px 10px",
-    borderRadius: tokens.borderRadiusMedium,
-    border: `1px solid ${tokens.colorNeutralStroke2}`,
-    backgroundColor: tokens.colorNeutralBackground1,
-    transition: "background-color 80ms, border-color 80ms",
-    ":hover": {
-      backgroundColor: tokens.colorNeutralBackground1Hover,
-      border: `1px solid ${tokens.colorNeutralStroke1}`,
-    },
-  },
-  topRow: {
-    display: "flex",
-    alignItems: "flex-start",
-    gap: "4px",
-  },
-  titleWrap: {
-    flex: 1,
-    minWidth: 0,
-    display: "flex",
-    flexDirection: "column",
-    gap: "2px",
-  },
-  title: {
-    fontSize: tokens.fontSizeBase200,
-    fontWeight: tokens.fontWeightSemibold,
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-    cursor: "pointer",
-  },
   pillsRow: {
     display: "flex",
     alignItems: "center",
@@ -163,27 +115,96 @@ const useStyles = makeStyles({
   },
 });
 
-interface Props {
-  label: string;
-  tickets: HaloTicket[];
-  onTicketUpdated?: (updated: HaloTicket) => void;
+export type BusyField = "status" | "priority" | "agent" | "due" | "log";
+
+// ---------- Shared helpers ----------
+
+/** Deep-link a ticket in the tenant's Halo UI; falls back to copying the URL. */
+export function openTicketInHalo(ticketId: number): void {
+  const haloUrl = getConfig()?.haloBaseUrl;
+  if (!haloUrl) return;
+  // Halo's deep-link path for a single ticket. Add &action_id=N to jump to a
+  // specific action within the ticket.
+  const url = `${haloUrl}/ticket?id=${ticketId}`;
+  if (!openExternalUrl(url)) {
+    // Both Outlook's API and window.open were blocked. Drop the URL in the
+    // clipboard so the user can paste it manually.
+    navigator.clipboard?.writeText(url).catch(() => {});
+  }
 }
 
-type BusyField = "status" | "priority" | "agent" | "due" | "log";
+/**
+ * Halo returns the assigned agent under several different field names depending on
+ * tenant version. Resolve to whichever one is populated so an assigned ticket never
+ * mis-renders as "Unassigned".
+ */
+export function resolveAgentName(
+  ticket: HaloTicket,
+  agents: readonly HaloAgent[],
+): string | undefined {
+  return (
+    ticket.agent_name ||
+    ticket.agentname ||
+    ticket.assignedagent_name ||
+    ticket.agent?.name ||
+    (() => {
+      const id = ticket.agent_id ?? ticket.assignedagent_id ?? ticket.agent?.id;
+      if (!id) return undefined;
+      return agents.find((a) => a.id === id)?.name;
+    })()
+  );
+}
 
-export function TicketList({ label, tickets, onTicketUpdated }: Props) {
-  const styles = useStyles();
-  const cfg = getConfig();
-  const haloUrl = cfg?.haloBaseUrl;
+export interface DueFormat {
+  text: string;
+  kind: "set" | "today" | "overdue" | "unset";
+}
 
+/**
+ * Human label for a due date. `relative` (default, used on the pill) renders
+ * near dates as "3d" / "2w"; `absolute` (used inline on compact rows) renders
+ * any future date as "Mon D". Overdue / Today are the same in both modes.
+ */
+export function formatDue(
+  iso: string | undefined,
+  mode: "relative" | "absolute" = "relative",
+): DueFormat {
+  if (!iso) return { text: "Set due", kind: "unset" };
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return { text: "Set due", kind: "unset" };
+  const today = new Date();
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const startOfTarget = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const days = Math.round(
+    (startOfTarget.getTime() - startOfToday.getTime()) / 86400000,
+  );
+  if (days === 0) return { text: "Today", kind: "today" };
+  if (days < 0) return { text: `Overdue ${Math.abs(days)}d`, kind: "overdue" };
+  if (mode === "relative") {
+    if (days < 7) return { text: `${days}d`, kind: "set" };
+    if (days < 31) return { text: `${Math.round(days / 7)}w`, kind: "set" };
+  }
+  return {
+    text: d.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+    kind: "set",
+  };
+}
+
+// ---------- Lookups + mutations ----------
+
+export interface TicketLookups {
+  statuses: HaloStatus[];
+  priorities: HaloPriority[];
+  agents: HaloAgent[];
+  currentAgent?: HaloAgent;
+}
+
+/** Loads the cached status / priority / agent lists plus the signed-in agent once. */
+export function useTicketLookups(): TicketLookups {
   const [statuses, setStatuses] = useState<HaloStatus[]>([]);
   const [priorities, setPriorities] = useState<HaloPriority[]>([]);
   const [agents, setAgents] = useState<HaloAgent[]>([]);
   const [currentAgent, setCurrentAgent] = useState<HaloAgent | undefined>();
-
-  // Per-ticket per-field busy state and per-ticket error.
-  const [busy, setBusy] = useState<Record<number, BusyField | undefined>>({});
-  const [errors, setErrors] = useState<Record<number, string | undefined>>({});
 
   useEffect(() => {
     listStatuses().then(setStatuses).catch(() => {});
@@ -193,47 +214,51 @@ export function TicketList({ label, tickets, onTicketUpdated }: Props) {
     if (email) getCurrentAgent(email).then(setCurrentAgent).catch(() => {});
   }, []);
 
-  const openInHalo = (ticketId: number) => {
-    if (!haloUrl) return;
-    // Halo's deep-link path for a single ticket. Add &action_id=N to jump to a
-    // specific action within the ticket.
-    const url = `${haloUrl}/ticket?id=${ticketId}`;
-    if (!openExternalUrl(url)) {
-      // Both Outlook's API and window.open were blocked. Drop the URL in the
-      // clipboard so the user can paste it manually.
-      navigator.clipboard?.writeText(url).catch(() => {});
-    }
-  };
+  return { statuses, priorities, agents, currentAgent };
+}
 
-  const apply = async (
-    ticket: HaloTicket,
-    field: BusyField,
-    partial: Partial<HaloTicket>,
-  ) => {
-    setBusy((b) => ({ ...b, [ticket.id]: field }));
-    setErrors((e) => ({ ...e, [ticket.id]: undefined }));
-    try {
-      // Only forward fields the UpdateTicketPayload supports; name-only fields stay local.
-      const updated = await updateTicket({
-        id: ticket.id,
-        status_id: partial.status_id,
-        agent_id: partial.agent_id,
-        priority_id: partial.priority_id,
-        targetdate: partial.targetdate,
-      });
-      // Merge server response with any optimistic name fields we set locally.
-      onTicketUpdated?.({ ...updated, ...partial, id: ticket.id });
-    } catch (e) {
-      setErrors((prev) => ({
-        ...prev,
-        [ticket.id]: `Update failed: ${(e as Error).message}`,
-      }));
-    } finally {
-      setBusy((b) => ({ ...b, [ticket.id]: undefined }));
-    }
-  };
+export interface TicketMutations {
+  busy: Record<number, BusyField | undefined>;
+  errors: Record<number, string | undefined>;
+  apply: (ticket: HaloTicket, field: BusyField, partial: Partial<HaloTicket>) => Promise<void>;
+  logTime: (ticket: HaloTicket, minutes: number, note: string) => Promise<void>;
+}
 
-  const logTime = async (ticket: HaloTicket, minutes: number, note: string) => {
+/** Per-ticket busy/error state and the Halo update calls behind the pill strip. */
+export function useTicketMutations(
+  onTicketUpdated?: (updated: HaloTicket) => void,
+): TicketMutations {
+  const [busy, setBusy] = useState<Record<number, BusyField | undefined>>({});
+  const [errors, setErrors] = useState<Record<number, string | undefined>>({});
+
+  const apply = useCallback(
+    async (ticket: HaloTicket, field: BusyField, partial: Partial<HaloTicket>) => {
+      setBusy((b) => ({ ...b, [ticket.id]: field }));
+      setErrors((e) => ({ ...e, [ticket.id]: undefined }));
+      try {
+        // Only forward fields the UpdateTicketPayload supports; name-only fields stay local.
+        const updated = await updateTicket({
+          id: ticket.id,
+          status_id: partial.status_id,
+          agent_id: partial.agent_id,
+          priority_id: partial.priority_id,
+          targetdate: partial.targetdate,
+        });
+        // Merge server response with any optimistic name fields we set locally.
+        onTicketUpdated?.({ ...updated, ...partial, id: ticket.id });
+      } catch (e) {
+        setErrors((prev) => ({
+          ...prev,
+          [ticket.id]: `Update failed: ${(e as Error).message}`,
+        }));
+      } finally {
+        setBusy((b) => ({ ...b, [ticket.id]: undefined }));
+      }
+    },
+    [onTicketUpdated],
+  );
+
+  const logTime = useCallback(async (ticket: HaloTicket, minutes: number, note: string) => {
     setBusy((b) => ({ ...b, [ticket.id]: "log" }));
     setErrors((e) => ({ ...e, [ticket.id]: undefined }));
     try {
@@ -252,97 +277,36 @@ export function TicketList({ label, tickets, onTicketUpdated }: Props) {
     } finally {
       setBusy((b) => ({ ...b, [ticket.id]: undefined }));
     }
-  };
+  }, []);
 
-  return (
-    <div className={styles.root}>
-      <Text className={styles.label}>{label}</Text>
-      {tickets.length === 0 ? (
-        <Text className={styles.empty}>None.</Text>
-      ) : (
-        tickets.map((t) => (
-          <TicketRow
-            key={t.id}
-            ticket={t}
-            statuses={statuses}
-            priorities={priorities}
-            agents={agents}
-            currentAgent={currentAgent}
-            busy={busy[t.id]}
-            error={errors[t.id]}
-            onOpen={() => openInHalo(t.id)}
-            onApply={(field, partial) => apply(t, field, partial)}
-            onLogTime={(min, note) => logTime(t, min, note)}
-          />
-        ))
-      )}
-    </div>
-  );
+  return { busy, errors, apply, logTime };
 }
 
-// ---------- Single row ----------
+// ---------- Pill strip ----------
 
-interface RowProps {
+export interface TicketPillStripProps {
   ticket: HaloTicket;
-  statuses: HaloStatus[];
-  priorities: HaloPriority[];
-  agents: HaloAgent[];
-  currentAgent?: HaloAgent;
+  lookups: TicketLookups;
   busy?: BusyField;
   error?: string;
-  onOpen: () => void;
   onApply: (field: BusyField, partial: Partial<HaloTicket>) => void;
   onLogTime: (minutes: number, note: string) => Promise<void>;
 }
 
-function TicketRow({
+/** The editable Status / Priority / Agent / Due / Log-time pills for one ticket. */
+export function TicketPillStrip({
   ticket,
-  statuses,
-  priorities,
-  agents,
-  currentAgent,
+  lookups,
   busy,
   error,
-  onOpen,
   onApply,
   onLogTime,
-}: RowProps) {
+}: TicketPillStripProps) {
   const styles = useStyles();
+  const { statuses, priorities, agents, currentAgent } = lookups;
 
   return (
-    <div className={styles.card}>
-      <div className={styles.topRow}>
-        <div className={styles.titleWrap}>
-          <Text
-            className={styles.title}
-            onClick={onOpen}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => e.key === "Enter" && onOpen()}
-            title={ticket.summary}
-          >
-            #{ticket.id} · {ticket.summary}
-          </Text>
-        </div>
-        <Menu>
-          <MenuTrigger disableButtonEnhancement>
-            <MenuButton
-              appearance="subtle"
-              size="small"
-              icon={<MoreVertical16Regular />}
-              aria-label="More actions"
-            />
-          </MenuTrigger>
-          <MenuPopover>
-            <MenuList>
-              <MenuItem icon={<Open16Regular />} onClick={onOpen}>
-                Open in HaloPSA
-              </MenuItem>
-            </MenuList>
-          </MenuPopover>
-        </Menu>
-      </div>
-
+    <>
       <div className={styles.pillsRow}>
         <StatusPill
           ticket={ticket}
@@ -378,7 +342,7 @@ function TicketRow({
       </div>
 
       {error && <Text className={styles.errorText}>{error}</Text>}
-    </div>
+    </>
   );
 }
 
@@ -594,21 +558,7 @@ function AgentPill({
     return agents.filter((a) => a.name.toLowerCase().includes(q)).slice(0, 50);
   }, [agents, query]);
 
-  // Halo returns the assigned agent under several different field names depending on
-  // tenant version. Resolve to whichever one is populated so an assigned ticket never
-  // mis-renders as "Unassigned".
-  const agentName =
-    ticket.agent_name ||
-    ticket.agentname ||
-    ticket.assignedagent_name ||
-    ticket.agent?.name ||
-    (() => {
-      const id =
-        ticket.agent_id ?? ticket.assignedagent_id ?? ticket.agent?.id;
-      if (!id) return undefined;
-      return agents.find((a) => a.id === id)?.name;
-    })();
-  const label = agentName ?? "Unassigned";
+  const label = resolveAgentName(ticket, agents) ?? "Unassigned";
 
   if (busy) {
     return (
@@ -689,29 +639,6 @@ function AgentPill({
 }
 
 // ---------- Due-date pill ----------
-
-function formatDue(iso: string | undefined): {
-  text: string;
-  kind: "set" | "today" | "overdue" | "unset";
-} {
-  if (!iso) return { text: "Set due", kind: "unset" };
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return { text: "Set due", kind: "unset" };
-  const today = new Date();
-  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const startOfTarget = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  const days = Math.round(
-    (startOfTarget.getTime() - startOfToday.getTime()) / 86400000,
-  );
-  if (days === 0) return { text: "Today", kind: "today" };
-  if (days < 0) return { text: `Overdue ${Math.abs(days)}d`, kind: "overdue" };
-  if (days < 7) return { text: `${days}d`, kind: "set" };
-  if (days < 31) return { text: `${Math.round(days / 7)}w`, kind: "set" };
-  return {
-    text: d.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
-    kind: "set",
-  };
-}
 
 function DuePill({
   ticket,

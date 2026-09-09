@@ -17,15 +17,12 @@ import {
 import {
   MoreHorizontal24Regular,
   ArrowClockwise24Regular,
-  ArrowUpRight16Regular,
-  Note24Regular,
 } from "@fluentui/react-icons";
 import { ContactCard } from "./ContactCard";
-import { TicketList } from "./TicketList";
-import { LogActions, QuickImportBanner } from "./LogActions";
+import { RelatedTickets } from "./RelatedTickets";
+import { LogActions } from "./LogActions";
 import { SettingsScreen } from "./SettingsScreen";
 import { ActivityFeed } from "./ActivityFeed";
-import { LogNoteDialog } from "./LogNoteDialog";
 import { UpdateBanner } from "./UpdateBanner";
 import {
   findUserByEmail,
@@ -35,8 +32,8 @@ import {
   findTicketBySubjectTag,
 } from "@iusehalo/halo-api";
 import { signOut } from "@iusehalo/halo-api";
-import { clearConfig, getConfig, getCachedClientCache } from "@iusehalo/halo-api";
-import { domainOf, openExternalUrl, type EmailContext } from "../lib/office";
+import { clearConfig, getCachedClientCache } from "@iusehalo/halo-api";
+import { domainOf, type EmailContext } from "../lib/office";
 import type { HaloUser, HaloClient, HaloTicket } from "@iusehalo/halo-api";
 
 interface Props {
@@ -105,7 +102,6 @@ export function Dashboard({ email, onSignedOut }: Props) {
   // Auto-resolve sender → contact + client whenever the open email changes.
   // Refresh button bumps `refreshTick` to trigger a re-run.
   const [refreshTick, setRefreshTick] = useState(0);
-  const [bannerDismissed, setBannerDismissed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -115,7 +111,6 @@ export function Dashboard({ email, onSignedOut }: Props) {
     setClient(undefined);
     setOpenTickets([]);
     setThreadTickets([]);
-    setBannerDismissed(false);
 
     (async () => {
       try {
@@ -235,6 +230,10 @@ export function Dashboard({ email, onSignedOut }: Props) {
     );
   }
 
+  // Exactly one thread-matched ticket → LogActions turns Append into
+  // "Append to #<id>" with that ticket preselected.
+  const primaryTicket = threadTickets.length === 1 ? threadTickets[0] : undefined;
+
   return (
     <div className={styles.root}>
       <UpdateBanner />
@@ -296,6 +295,7 @@ export function Dashboard({ email, onSignedOut }: Props) {
 
       {!loadingResolve && !error && (
         <div className={styles.body}>
+          {/* Compact contact header; overrides / Halo links / Log note live in its ⋮ menu. */}
           <ContactCard
             email={email}
             contact={contact}
@@ -303,21 +303,6 @@ export function Dashboard({ email, onSignedOut }: Props) {
             onContactChange={setContact}
             onClientChange={setClient}
           />
-
-          <Divider />
-
-          {/* 1-click import banner: show when exactly one thread-matched ticket
-              is found on an incoming email so the agent can log it in one tap. */}
-          {email.direction !== "outgoing" &&
-            threadTickets.length === 1 &&
-            !bannerDismissed && (
-              <QuickImportBanner
-                email={email}
-                contact={contact}
-                ticket={threadTickets[0]}
-                onDismissed={() => setBannerDismissed(true)}
-              />
-            )}
 
           {/* Primary actions sit above the ticket lists so they're always
               visible without scrolling, regardless of how many tickets a
@@ -331,33 +316,17 @@ export function Dashboard({ email, onSignedOut }: Props) {
               ...openTickets.filter((t) => !threadTickets.find((tt) => tt.id === t.id)),
             ]}
             preferAppend={threadTickets.length > 0}
+            primaryTicket={primaryTicket}
+            threadTickets={threadTickets}
           />
 
-          <QuickHaloLinks contact={contact} client={client} />
-
-          <Divider />
-
-          {threadTickets.length > 0 && (
-            <TicketList
-              label="This conversation"
-              tickets={threadTickets}
-              onTicketUpdated={handleTicketUpdated}
-            />
-          )}
-
-          {loadingTickets ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <Spinner size="extra-tiny" /> <Text size={200}>Loading tickets…</Text>
-            </div>
-          ) : (
-            <TicketList
-              label={threadTickets.length > 0 ? "Other open tickets" : "Open tickets"}
-              tickets={openTickets.filter(
-                (t) => !threadTickets.find((tt) => tt.id === t.id),
-              )}
-              onTicketUpdated={handleTicketUpdated}
-            />
-          )}
+          <RelatedTickets
+            threadTickets={threadTickets}
+            openTickets={openTickets}
+            loading={loadingTickets}
+            scopeKey={client?.id}
+            onTicketUpdated={handleTicketUpdated}
+          />
 
           {(contact || client) && (
             <>
@@ -367,76 +336,6 @@ export function Dashboard({ email, onSignedOut }: Props) {
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-function QuickHaloLinks({
-  contact,
-  client,
-}: {
-  contact?: HaloUser;
-  client?: HaloClient;
-}) {
-  const haloUrl = getConfig()?.haloBaseUrl;
-  const [noteOpen, setNoteOpen] = useState(false);
-  if (!haloUrl) return null;
-  const open = (path: string) => {
-    const url = `${haloUrl}${path}`;
-    if (!openExternalUrl(url)) {
-      // Outlook blocked both popup methods — copy the URL so the agent can
-      // paste it themselves. Never navigate the task pane to the target; sites
-      // that set X-Frame-Options will refuse to render and the pane goes blank.
-      navigator.clipboard?.writeText(url).catch(() => {});
-    }
-  };
-  const hasAny = !!contact || !!client;
-  if (!hasAny) return null;
-  return (
-    <div
-      style={{
-        display: "flex",
-        flexWrap: "wrap",
-        gap: 6,
-        marginTop: 4,
-      }}
-    >
-      {(contact || client) && (
-        <Button
-          size="small"
-          appearance="subtle"
-          icon={<Note24Regular />}
-          onClick={() => setNoteOpen(true)}
-        >
-          Log note
-        </Button>
-      )}
-      {contact && (
-        <Button
-          size="small"
-          appearance="subtle"
-          icon={<ArrowUpRight16Regular />}
-          onClick={() => open(`/customer?userid=${contact.id}`)}
-        >
-          Open contact
-        </Button>
-      )}
-      {client && (
-        <Button
-          size="small"
-          appearance="subtle"
-          icon={<ArrowUpRight16Regular />}
-          onClick={() => open(`/customer?clientid=${client.id}`)}
-        >
-          Open client
-        </Button>
-      )}
-      <LogNoteDialog
-        open={noteOpen}
-        contact={contact}
-        client={client}
-        onClose={() => setNoteOpen(false)}
-      />
     </div>
   );
 }
