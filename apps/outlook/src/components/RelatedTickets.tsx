@@ -27,6 +27,7 @@ import {
 } from "@fluentui/react-icons";
 import type { HaloTicket, HaloTicketType, TicketKind } from "@iusehalo/halo-api";
 import { classifyTicket, listTicketTypes } from "@iusehalo/halo-api";
+import { setDiagContext } from "../lib/diagnostics";
 import {
   TicketPillStrip,
   useTicketLookups,
@@ -277,7 +278,16 @@ export function RelatedTickets({
 
   const [ticketTypes, setTicketTypes] = useState<HaloTicketType[]>([]);
   useEffect(() => {
-    listTicketTypes().then(setTicketTypes).catch(() => {});
+    listTicketTypes()
+      .then((t) => {
+        setTicketTypes(t);
+        setDiagContext("ticketTypes", {
+          count: t.length,
+          opps: t.filter((x) => /^opp/i.test(x.use ?? "")).map((x) => x.id),
+          projects: t.filter((x) => /^proj/i.test(x.use ?? "")).map((x) => x.id),
+        });
+      })
+      .catch((e) => setDiagContext("ticketTypes", { error: String(e) }));
   }, []);
 
   const [mineOnly, setMineOnly] = useState(false);
@@ -343,6 +353,15 @@ export function RelatedTickets({
     for (const t of visible) c[kinds.get(t.id) ?? "reactive"]++;
     return c;
   }, [visible, kinds]);
+  useEffect(() => {
+    setDiagContext("relatedTickets", {
+      total: allTickets.length,
+      visible: visible.length,
+      mineOnly,
+      counts,
+      kinds: Object.fromEntries(Array.from(kinds.entries()).slice(0, 50)),
+    });
+  }, [allTickets.length, visible.length, mineOnly, counts, kinds]);
 
   // If the active filter no longer has any tickets (e.g. "Mine only" toggled),
   // fall back to All rather than showing an empty list under a hidden pill —

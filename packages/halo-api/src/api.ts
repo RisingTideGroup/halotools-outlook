@@ -103,6 +103,51 @@ export function setExtraHeaders(headers: Record<string, string>): void {
 const MAX_RATE_LIMIT_RETRIES = 4;
 const MAX_RATE_LIMIT_WAIT_MS = 30_000;
 
+// ---------- Request tracing (diagnostics) ----------
+//
+// Hosts can install a tracer to see every Halo call the client makes: path
+// (query string included — it never carries the token), status, elapsed time
+// and a best-effort record count parsed from the response. Used by the Outlook
+// add-in's Diagnostics panel so a user can paste exactly what their pane asked
+// Halo and what came back.
+
+export interface RequestTrace {
+  ts: string;
+  method: string;
+  path: string;
+  /** HTTP status; 0 when fetch itself failed (network / CORS). */
+  status: number;
+  ms: number;
+  /** Array length, `record_count`, first array property's length, or 1 for a single record. */
+  count?: number;
+  error?: string;
+}
+
+let requestTracer: ((t: RequestTrace) => void) | undefined;
+
+export function setRequestTracer(fn?: (t: RequestTrace) => void): void {
+  requestTracer = fn;
+}
+
+function traceRequest(t: RequestTrace): void {
+  try {
+    requestTracer?.(t);
+  } catch {
+    /* tracing must never affect the call */
+  }
+}
+
+function countOf(json: unknown): number | undefined {
+  if (Array.isArray(json)) return json.length;
+  if (json && typeof json === "object") {
+    const o = json as Record<string, unknown>;
+    if (typeof o.record_count === "number") return o.record_count;
+    for (const v of Object.values(o)) if (Array.isArray(v)) return v.length;
+    if (typeof o.id === "number") return 1;
+  }
+  return undefined;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -125,6 +170,18 @@ async function call<T>(
   const cfg = getConfig();
   if (!cfg) throw new NotAuthenticatedError("No tenant config");
 
+  const started = Date.now();
+  const method = (init.method ?? "GET").toUpperCase();
+  const trace = (status: number, extra: Partial<RequestTrace> = {}) =>
+    traceRequest({
+      ts: new Date(started).toISOString(),
+      method,
+      path,
+      status,
+      ms: Date.now() - started,
+      ...extra,
+    });
+
   const token = await getAccessToken();
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${token}`);
@@ -143,6 +200,7 @@ async function call<T>(
     // Fetch only throws on network-level failures (CORS preflight rejection, offline, DNS, TLS).
     // Surface the most likely cause first since CORS misconfiguration is the dominant failure mode
     // for SPAs talking to a Halo tenant.
+    trace(0, { error: (e as Error).message });
     throw new HaloApiError(
       0,
       `Network call to ${cfg.haloBaseUrl} failed. Most common cause: the add-in's origin (https://tools.iusehalo.com) is not on this Halo Connect app's CORS allowed origins list. Original error: ${(e as Error).message}`,
@@ -156,6 +214,7 @@ async function call<T>(
   if (res.status === 401 && !retried) {
     const tokens = getTokens();
     if (tokens?.refreshToken) {
+      trace(401, { error: "token rejected — refreshing and retrying" });
       try {
         await refresh(tokens.refreshToken);
         return call<T>(path, init, true);
@@ -169,6 +228,7 @@ async function call<T>(
   // 429 → wait and retry, capped at MAX_RATE_LIMIT_RETRIES so a persistently
   // rate-limited tenant fails loudly instead of hanging the caller forever.
   if (res.status === 429 && rateLimitAttempt < MAX_RATE_LIMIT_RETRIES) {
+    trace(429, { error: `rate limited — retry ${rateLimitAttempt + 1}` });
     await res.text().catch(() => undefined);
     const waitMs = Math.min(
       parseRetryAfterMs(res.headers.get("retry-after")) ?? 1000 * 2 ** rateLimitAttempt,
@@ -180,6 +240,7 @@ async function call<T>(
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
+    trace(res.status, { error: body.slice(0, 300) });
     // Classify auth failures vs every-other-thing-can-go-wrong:
     //   - 401 (and we already tried refresh) → token rejected
     //   - 403 → scope / permission revoked, treat as needing re-auth
@@ -199,8 +260,13 @@ async function call<T>(
     throw new HaloApiError(res.status, body);
   }
 
-  if (res.status === 204) return undefined as unknown as T;
-  return (await res.json()) as T;
+  if (res.status === 204) {
+    trace(204, { count: 0 });
+    return undefined as unknown as T;
+  }
+  const json = (await res.json()) as T;
+  trace(res.status, { count: countOf(json) });
+  return json;
 }
 
 // ---------- Read paths ----------

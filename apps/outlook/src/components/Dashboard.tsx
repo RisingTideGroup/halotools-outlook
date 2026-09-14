@@ -34,6 +34,7 @@ import {
 import { signOut } from "@iusehalo/halo-api";
 import { clearConfig, getCachedClientCache } from "@iusehalo/halo-api";
 import { domainOf, type EmailContext } from "../lib/office";
+import { setDiagContext } from "../lib/diagnostics";
 import type { HaloUser, HaloClient, HaloTicket } from "@iusehalo/halo-api";
 
 interface Props {
@@ -136,6 +137,15 @@ export function Dashboard({ email, onSignedOut }: Props) {
 
         setContact(matchedContact);
         setClient(matchedClient);
+        setDiagContext("resolve", {
+          customerEmail: email.customerEmail,
+          direction: email.direction,
+          contact: matchedContact
+            ? { id: matchedContact.id, name: matchedContact.name, client_id: matchedContact.client_id }
+            : null,
+          client: matchedClient ? { id: matchedClient.id, name: matchedClient.name } : null,
+          via: matchedContact?.client_id ? "contact.client_id" : "client search by domain",
+        });
 
         const threadIds = [
           email.internetMessageId,
@@ -156,6 +166,7 @@ export function Dashboard({ email, onSignedOut }: Props) {
           const seen = new Set<number>();
           const merged = [...rfc, ...tag].filter((t) => !seen.has(t.id) && seen.add(t.id));
           setThreadTickets(merged);
+          setDiagContext("threadTickets", { ids: merged.map((t) => t.id), messageIds: threadIds.length });
         });
       } catch (e) {
         if (!cancelled) setError((e as Error).message);
@@ -178,8 +189,20 @@ export function Dashboard({ email, onSignedOut }: Props) {
     let cancelled = false;
     setLoadingTickets(true);
     listOpenTicketsForClient(client.id)
-      .then((t) => !cancelled && setOpenTickets(t))
-      .catch((e) => !cancelled && setError((e as Error).message))
+      .then((t) => {
+        if (cancelled) return;
+        setOpenTickets(t);
+        setDiagContext("openTickets", {
+          clientId: client.id,
+          count: t.length,
+          tickets: t.slice(0, 50).map((x) => ({ id: x.id, type: x.tickettype_id, status: x.status_id })),
+        });
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError((e as Error).message);
+        setDiagContext("openTickets", { clientId: client.id, error: (e as Error).message });
+      })
       .finally(() => !cancelled && setLoadingTickets(false));
     return () => {
       cancelled = true;
