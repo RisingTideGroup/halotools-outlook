@@ -274,18 +274,24 @@ export async function searchTickets(
   if (opts.clientId != null) q.set("client_id", String(opts.clientId));
   if (opts.agentId != null) q.set("agent_id", String(opts.agentId));
 
-  const [byId, res] = await Promise.all([
-    // A bare number is almost always a ticket id — put that ticket first even
-    // when Halo's text search ranks it below body-text matches (or misses it).
-    /^\d+$/.test(term) ? getTicketOrUndefined(Number(term)) : Promise.resolve(undefined),
+  // A bare number is an explicit ticket id: fetch it directly and put it first,
+  // regardless of the client/agent/open-only scope — someone who typed the id
+  // wants that ticket, and Halo's text search may rank it low or miss it. The
+  // two lookups are independent: a failing text search must not take the id
+  // hit down with it (Promise.all would), and vice versa.
+  const isId = /^\d+$/.test(term);
+  const [byIdResult, listResult] = await Promise.allSettled([
+    isId ? getTicketOrUndefined(Number(term)) : Promise.resolve(undefined),
     call<{ tickets: HaloTicket[] } | HaloTicket[]>(`/Tickets?${q}`),
   ]);
+  const byId = byIdResult.status === "fulfilled" ? byIdResult.value : undefined;
+  if (listResult.status === "rejected") {
+    if (byId) return [byId];
+    throw listResult.reason;
+  }
+  const res = listResult.value;
   const list = Array.isArray(res) ? res : res.tickets ?? [];
   if (!byId) return list;
-  const matchesScope =
-    (opts.clientId == null || byId.client_id === opts.clientId) &&
-    (opts.agentId == null || byId.agent_id === opts.agentId);
-  if (!matchesScope) return list;
   return [byId, ...list.filter((t) => t.id !== byId.id)];
 }
 
