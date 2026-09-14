@@ -258,6 +258,9 @@ interface Props {
   threadTickets: HaloTicket[];
   /** Open tickets (all domains) for the active client. */
   openTickets: HaloTicket[];
+  /** Ids Halo returned under domain=opportunities — authoritative Sales set,
+   *  independent of the ticket-type list. */
+  opportunityIds?: ReadonlySet<number>;
   /** Whether openTickets is still being fetched. */
   loading?: boolean;
   /** Key used to remember the Projects expand state per client for the session. */
@@ -268,6 +271,7 @@ interface Props {
 export function RelatedTickets({
   threadTickets,
   openTickets,
+  opportunityIds,
   loading = false,
   scopeKey,
   onTicketUpdated,
@@ -338,9 +342,9 @@ export function RelatedTickets({
 
   const kinds = useMemo(() => {
     const m = new Map<number, TicketKind>();
-    for (const t of allTickets) m.set(t.id, classifyTicket(t, ticketTypes));
+    for (const t of allTickets) m.set(t.id, classifyTicket(t, ticketTypes, opportunityIds));
     return m;
-  }, [allTickets, ticketTypes]);
+  }, [allTickets, ticketTypes, opportunityIds]);
 
   const currentAgentId = lookups.currentAgent?.id;
   const visible = useMemo(() => {

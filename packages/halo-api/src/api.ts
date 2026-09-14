@@ -376,7 +376,14 @@ async function getTicketOrUndefined(id: number): Promise<HaloTicket | undefined>
  * off a project (parent_id / main_project_id) is a project task regardless of
  * its type. Unknown types fall back to "reactive".
  */
-export function classifyTicket(ticket: HaloTicket, types: readonly HaloTicketType[]): TicketKind {
+export function classifyTicket(
+  ticket: HaloTicket,
+  types: readonly HaloTicketType[],
+  /** Ids Halo itself returned under `domain=opportunities` — authoritative, and
+   *  independent of whether the type list loaded for this agent. */
+  knownOpportunityIds?: ReadonlySet<number>,
+): TicketKind {
+  if (knownOpportunityIds?.has(ticket.id)) return "sale";
   const type = ticket.tickettype_id != null ? types.find((t) => t.id === ticket.tickettype_id) : undefined;
   const use = (type?.use ?? "").toLowerCase();
   if (use.startsWith("opp")) return "sale";
@@ -505,6 +512,26 @@ export async function listOpenTicketsForClient(clientId: number): Promise<HaloTi
   });
   const res = await call<{ tickets: HaloTicket[] } | HaloTicket[]>(`/Tickets?${q}`);
   return Array.isArray(res) ? res : res.tickets;
+}
+
+/**
+ * Open opportunities only (`domain=opportunities`). Used alongside
+ * listOpenTicketsForClient so the add-in has an authoritative "these are the
+ * sales tickets" set that doesn't depend on the ticket-type list loading or on
+ * the type's `use` flag — and as a safety net if a tenant's `domain=all`
+ * ever omits them.
+ */
+export async function listOpenOpportunitiesForClient(clientId: number): Promise<HaloTicket[]> {
+  const q = new URLSearchParams({
+    client_id: String(clientId),
+    open_only: "true",
+    pageinate: "false",
+    domain: "opportunities",
+    includedetails: "true",
+    includeagentdetails: "true",
+  });
+  const res = await call<{ tickets: HaloTicket[] } | HaloTicket[]>(`/Tickets?${q}`);
+  return Array.isArray(res) ? res : res.tickets ?? [];
 }
 
 export async function listOpenTicketsForUser(userId: number): Promise<HaloTicket[]> {

@@ -28,6 +28,7 @@ import {
   findUserByEmail,
   findClientByDomain,
   listOpenTicketsForClient,
+  listOpenOpportunitiesForClient,
   findTicketsForEmail,
   findTicketBySubjectTag,
 } from "@iusehalo/halo-api";
@@ -94,6 +95,8 @@ export function Dashboard({ email, onSignedOut }: Props) {
   const [contact, setContact] = useState<HaloUser | undefined>();
   const [client, setClient] = useState<HaloClient | undefined>();
   const [openTickets, setOpenTickets] = useState<HaloTicket[]>([]);
+  /** Ids Halo returned under domain=opportunities for the active client. */
+  const [opportunityIds, setOpportunityIds] = useState<ReadonlySet<number>>(() => new Set());
   const [threadTickets, setThreadTickets] = useState<HaloTicket[]>([]);
   const [error, setError] = useState<string | undefined>();
   const [loadingResolve, setLoadingResolve] = useState(true);
@@ -188,14 +191,30 @@ export function Dashboard({ email, onSignedOut }: Props) {
     }
     let cancelled = false;
     setLoadingTickets(true);
-    listOpenTicketsForClient(client.id)
-      .then((t) => {
+    // Two calls in parallel: the full open list (domain=all) and the
+    // opportunities-only list. The second is the authoritative "Sales" set —
+    // it doesn't depend on the ticket-type list loading for this agent — and
+    // anything in it that the first call missed is unioned in, so an
+    // opportunity can't silently disappear from the pane.
+    Promise.all([
+      listOpenTicketsForClient(client.id),
+      listOpenOpportunitiesForClient(client.id).catch((e) => {
+        setDiagContext("openOpportunities", { clientId: client.id, error: (e as Error).message });
+        return [] as HaloTicket[];
+      }),
+    ])
+      .then(([all, opps]) => {
         if (cancelled) return;
-        setOpenTickets(t);
+        const seen = new Set(all.map((t) => t.id));
+        const merged = [...all, ...opps.filter((t) => !seen.has(t.id))];
+        setOpenTickets(merged);
+        setOpportunityIds(new Set(opps.map((t) => t.id)));
         setDiagContext("openTickets", {
           clientId: client.id,
-          count: t.length,
-          tickets: t.slice(0, 50).map((x) => ({ id: x.id, type: x.tickettype_id, status: x.status_id })),
+          count: merged.length,
+          fromDomainAll: all.length,
+          fromDomainOpportunities: opps.map((t) => t.id),
+          tickets: merged.slice(0, 50).map((x) => ({ id: x.id, type: x.tickettype_id, status: x.status_id })),
         });
       })
       .catch((e) => {
@@ -221,8 +240,13 @@ export function Dashboard({ email, onSignedOut }: Props) {
       // Then refetch open tickets so status changes (e.g., closed) remove tickets from the list
       if (client) {
         try {
-          const fresh = await listOpenTicketsForClient(client.id);
-          setOpenTickets(fresh);
+          const [all, opps] = await Promise.all([
+            listOpenTicketsForClient(client.id),
+            listOpenOpportunitiesForClient(client.id).catch(() => [] as HaloTicket[]),
+          ]);
+          const seen = new Set(all.map((t) => t.id));
+          setOpenTickets([...all, ...opps.filter((t) => !seen.has(t.id))]);
+          setOpportunityIds(new Set(opps.map((t) => t.id)));
         } catch {
           /* keep optimistic state */
         }
@@ -346,6 +370,7 @@ export function Dashboard({ email, onSignedOut }: Props) {
           <RelatedTickets
             threadTickets={threadTickets}
             openTickets={openTickets}
+            opportunityIds={opportunityIds}
             loading={loadingTickets}
             scopeKey={client?.id}
             onTicketUpdated={handleTicketUpdated}
