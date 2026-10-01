@@ -15,6 +15,7 @@ import {
 import { ArrowLeft24Regular } from "@fluentui/react-icons";
 import { getConfig } from "@iusehalo/halo-api";
 import { getDefaults, setDefaults } from "../lib/defaults";
+import { buildDiagnosticsReport } from "../lib/diagnostics";
 import {
   listTicketTypes,
   ticketTypesForAgentCreate,
@@ -130,6 +131,8 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
   const [includeInlineImages, setIncludeInlineImages] = useState<boolean>(
     initialDefaults.includeInlineImages ?? true,
   );
+  const [apiTrace, setApiTrace] = useState<boolean>(initialDefaults.apiTrace ?? false);
+  const [reportCopyStatus, setReportCopyStatus] = useState<string | undefined>();
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [events, setEvents] = useState<LogEntry[]>(() => getEvents());
@@ -180,6 +183,25 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
     clearEvents();
     setEvents([]);
   };
+  // The trace flag persists immediately (not on Save) so a user can flip it,
+  // reproduce the problem, and copy the report without leaving this screen.
+  const handleToggleApiTrace = async (checked: boolean) => {
+    setApiTrace(checked);
+    try {
+      await setDefaults({ ...getDefaults(), apiTrace: checked });
+    } catch {
+      /* non-fatal — the in-memory flag still applies for this session */
+    }
+  };
+  const handleCopyReport = async () => {
+    try {
+      await navigator.clipboard.writeText(buildDiagnosticsReport());
+      setReportCopyStatus("Report copied — paste it into your support message");
+    } catch {
+      setReportCopyStatus("Copy failed — use Download below instead");
+    }
+    setTimeout(() => setReportCopyStatus(undefined), 3000);
+  };
   const handleCopyMcpUrl = async () => {
     if (!mcpUrl) return;
     try {
@@ -200,6 +222,7 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
         includeAttachmentsByDefault: includeAttach,
         autoLogRepliesToTickets: autoLogReplies,
         includeInlineImages,
+        apiTrace,
       });
       onClose();
     } finally {
@@ -367,6 +390,25 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
             Useful when something fails in a runtime whose console isn't reachable
             from devtools. {events.length} entries captured.
           </Text>
+          <Switch
+            checked={apiTrace}
+            onChange={(_, d) => void handleToggleApiTrace(d.checked)}
+            label="Trace HaloPSA API requests"
+          />
+          <Text block className={styles.meta}>
+            Records every request the add-in sends to HaloPSA (path, status, record count,
+            timing — never your token). Turn on, reproduce the problem, then copy the report.
+          </Text>
+          <div className={styles.diagButtons}>
+            <Button appearance="primary" size="small" onClick={handleCopyReport}>
+              Copy support report
+            </Button>
+          </div>
+          {reportCopyStatus && (
+            <Text block className={styles.meta}>
+              {reportCopyStatus}
+            </Text>
+          )}
           {/* Raw on-send entry tracer. Written by launchevent.js directly via
               localStorage.setItem as the FIRST statement of the handler, before
               any closure-captured helper is touched. If this shows a timestamp

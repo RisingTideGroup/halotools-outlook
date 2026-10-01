@@ -19,6 +19,9 @@ export interface UserDefaults {
   /** Upload + inline-render images embedded in the email when logging.
    *  Treated as on when undefined. */
   includeInlineImages?: boolean;
+  /** Diagnostics flag: record every HaloPSA API request (path, status, count,
+   *  timing — never the token) in the diagnostic log. Off by default. */
+  apiTrace?: boolean;
 }
 
 export function getDefaults(): UserDefaults {

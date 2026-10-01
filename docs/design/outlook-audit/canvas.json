@@ -1,0 +1,20 @@
+{
+  "artboards": [
+    { "file": "DashboardCurrent.dc.html", "title": "1 · Read pane — current", "x": 0, "y": 0, "w": 320, "h": 1000 },
+    { "file": "Main.dc.html", "title": "1 · Read pane — proposed", "x": 420, "y": 0, "w": 320, "h": 1000 },
+    { "file": "PickerCurrent.dc.html", "title": "2 · Append picker — current", "x": 0, "y": 1180, "w": 360, "h": 540 },
+    { "file": "PickerProposed.dc.html", "title": "2 · Append picker — proposed", "x": 460, "y": 1180, "w": 360, "h": 640 },
+    { "file": "HaloActionCurrent.dc.html", "title": "3 · Logged email in Halo — current", "x": 0, "y": 2000, "w": 560, "h": 420 },
+    { "file": "HaloActionProposed.dc.html", "title": "3 · Logged email in Halo — proposed", "x": 660, "y": 2000, "w": 560, "h": 560 },
+    { "file": "ComposeCurrent.dc.html", "title": "4 · Compose pane — current", "x": 0, "y": 2740, "w": 320, "h": 1080 },
+    { "file": "ComposeProposed.dc.html", "title": "4 · Compose pane — proposed", "x": 420, "y": 2740, "w": 320, "h": 560 }
+  ],
+  "annotations": [
+    { "id": "f1-tickets", "x": 860, "y": 0, "w": 360, "text": "VERIFIED — Open-ticket list\n\n/Tickets and /Opportunities are the same endpoint; the difference is the `domain` filter. The default (domain=reqs) returns 3,924 open tickets; domain=all returns 4,242 — matching the DB. The 318 missing are opportunities (domain=opportunities). The add-in never passes domain, and tickettype_id / ticketarea_id / isopportunity on /Tickets are silently ignored.\n\nFor the biggest clients 85–90% of what IS returned is project sub-tasks (DaVinci: 98 of 116 are 'Project User To-Dos'; CIT: 51 of 75). 2,509 of 3,924 sit in 'Task - Waiting User'; 2,779 are Unassigned. The list renders them flat, unsorted, with 5 interactive pills per row." },
+    { "id": "f1-client", "x": 860, "y": 500, "w": 360, "text": "VERIFIED — Client resolution\n\nWhen the sender isn't already an exact-email contact, the fallback is /Client?search=<email domain>. That returns 0 for a real customer (cpnllc.com → Central Point Networks) because client search matches names, and the AREA.ADomain / aAzureDomain fields are populated on 0 of 496 active clients. Result: no client → no ticket list → agent sees 'None'.\n\nfindUserByEmail also takes the first fuzzy hit when there's no exact match — 'freitas' returns a service account first." },
+    { "id": "f2-picker", "x": 900, "y": 1180, "w": 360, "text": "VERIFIED — Append picker\n\n/Tickets?search= returns closed tickets (4 of 5 'printer' hits are closed), matches on body text, and does not return statusname — so the '· status' suffix the picker tries to show is always blank. client_name IS returned but never shown.\n\nsearch=#9517 → 0 results; search=9517 → the ticket. The compose pane looks up staged tickets as '#<id>', so the 'Will append to…' banner never gets its summary.\n\nCap is 15 mixed rows, no scope, no open/closed distinction." },
+    { "id": "f3-action", "x": 1300, "y": 2000, "w": 380, "text": "VERIFIED — What actually lands in Halo\n\nThe 4 add-in-logged actions in the DB (signature: AMailEntryID set; none of the last 30 native rows have it) all stored EmailDirection = '', emailto = '', emailcc = '', emailbodyhtml = NULL. Only noteHTML survived. Native intake rows store full To/Cc lists.\n\nCaveat: those rows came from the previous production build; the payload now sends direction/to/body but no add-in email has been logged since Sep 3, so whether Halo persists the new fields is still unproven. The note body is the one channel proven to survive — hence the envelope block.\n\nOffice.js gives the read pane To/Cc synchronously (item.to / item.cc) and the full .eml via getAsFileAsync (Mailbox 1.14; the task pane manifest floor is 1.10, so feature-detect)." },
+    { "id": "f4-compose", "x": 860, "y": 2740, "w": 360, "text": "CODE-VERIFIED — Compose pane\n\nSix stacked sections behind dividers; 'Log on send' — the reason the pane exists — is fifth, below three insert tools and a native <select>. The timer takes a full section. The staged-ticket banner is what the agent needs to see before hitting Send, so it moves to the top." }
+  ],
+  "launch": { "view": "canvas" }
+}

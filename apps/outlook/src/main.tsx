@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { FluentProvider, webLightTheme } from "@fluentui/react-components";
 import { App } from "./App";
 import { awaitOffice, installStorageAdapter } from "./lib/office";
+import { installApiTracer } from "./lib/diagnostics";
 import { applyUrlParamConfig } from "@iusehalo/halo-api";
 
 class ErrorBoundary extends React.Component<
@@ -59,6 +60,7 @@ class ErrorBoundary extends React.Component<
 async function bootstrap() {
   await awaitOffice();
   installStorageAdapter();
+  installApiTracer("taskpane");
   await applyUrlParamConfig();
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>

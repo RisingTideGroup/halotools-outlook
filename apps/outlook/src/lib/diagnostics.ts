@@ -12,6 +12,15 @@
 // The launch-event runtime has a parallel ES5 implementation in
 // public/launchevent.js — they MUST agree on the storage key and entry shape.
 
+import {
+  getCachedClientCache,
+  getConfig,
+  setRequestTracer,
+  type RequestTrace,
+} from "@iusehalo/halo-api";
+import { getDefaults } from "./defaults";
+import { MANIFEST_VERSION } from "../setup/version";
+
 export type LogLevel = "info" | "warn" | "error";
 
 export interface LogEntry {
@@ -90,6 +99,88 @@ export function clearEvents(): void {
   } catch {
     /* swallow */
   }
+}
+
+// ---------- API request tracing + support report ----------
+
+/** Free-form facts the surfaces record about the current state (resolved
+ *  contact/client, ticket counts, type list…) so the report explains WHY the
+ *  pane shows what it shows, not just which calls it made. In-memory only. */
+const context: Record<string, unknown> = {};
+
+export function setDiagContext(key: string, value: unknown): void {
+  context[key] = value;
+}
+
+/**
+ * Route every Halo API call through the diagnostic log when the `apiTrace`
+ * flag is on (Settings → Diagnostics). The flag is read per request so
+ * toggling it takes effect immediately, without a reload.
+ */
+export function installApiTracer(runtime: string): void {
+  setRequestTracer((t: RequestTrace) => {
+    if (!getDefaults().apiTrace) return;
+    const failed = t.status === 0 || t.status >= 400;
+    const count = t.count != null ? ` → ${t.count} record${t.count === 1 ? "" : "s"}` : "";
+    logEvent(
+      failed ? "error" : "info",
+      `api:${runtime}`,
+      `${t.method} ${t.path} · ${t.status}${count} · ${t.ms}ms`,
+      { path: t.path, status: t.status, ms: t.ms, count: t.count, error: t.error },
+    );
+  });
+}
+
+function officeFacts(): Record<string, unknown> {
+  try {
+    const d = Office.context?.diagnostics;
+    const req = Office.context?.requirements;
+    const sets = ["1.8", "1.10", "1.13", "1.14"].filter((v) => {
+      try {
+        return req?.isSetSupported("Mailbox", v);
+      } catch {
+        return false;
+      }
+    });
+    return {
+      host: d?.host,
+      platform: d?.platform,
+      version: d?.version,
+      mailboxSets: sets,
+    };
+  } catch {
+    return { host: "unknown (Office.js not loaded)" };
+  }
+}
+
+/** Plain-text support report: environment, tenant/agent, recorded context, recent log. */
+export function buildDiagnosticsReport(): string {
+  const cfg = getConfig();
+  const agent = getCachedClientCache()?.agent;
+  let installedMv: string | null = null;
+  try {
+    installedMv = new URLSearchParams(window.location.search).get("mv");
+  } catch {
+    /* ignore */
+  }
+  const lines: string[] = [
+    "HaloPSA for Outlook — diagnostics",
+    `generated: ${new Date().toISOString()}`,
+    `build: manifest ${MANIFEST_VERSION}${installedMv ? ` (installed ${installedMv})` : ""} · ${window.location.host}`,
+    `office: ${JSON.stringify(officeFacts())}`,
+    `tenant: ${cfg?.haloBaseUrl ?? "not configured"}`,
+    `agent: ${agent ? `${agent.id} ${agent.name ?? ""}`.trim() : "unknown"}`,
+    `apiTrace: ${getDefaults().apiTrace ? "on" : "off"}`,
+    "",
+    "context:",
+    ...Object.entries(context).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`),
+    "",
+    "recent log (oldest first):",
+    ...read()
+      .slice(-80)
+      .map((e) => `  ${e.ts} [${e.level}] [${e.source}] ${e.message}${e.data?.error ? ` — ${String(e.data.error)}` : ""}`),
+  ];
+  return lines.join("\n");
 }
 
 /** Trigger a browser download of the current log as JSON. */

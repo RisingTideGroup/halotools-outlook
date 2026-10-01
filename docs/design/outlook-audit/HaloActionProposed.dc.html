@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; font-family: "Segoe UI", "Segoe UI Web (West European)", -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", sans-serif; color: #242424; background: #ffffff; font-size: 14px; line-height: 20px; -webkit-font-smoothing: antialiased; }
+    a { color: #0f6cbd; text-decoration: none; } a:hover { color: #115ea3; text-decoration: underline; }
+  </style>
+</helmet>
+<div style="width: 560px; height: 560px; background: #f7f7f7; padding: 20px; box-sizing: border-box; display: flex; flex-direction: column; gap: 12px;">
+  <div style="font-size: 12px; line-height: 16px; font-weight: 600; color: #616161; text-transform: uppercase; letter-spacing: 0.04em;">Ticket #9830 · proposed: envelope block inside the note</div>
+
+  <div style="background: #ffffff; border: 1px solid #e0e0e0; border-radius: 4px; display: flex; flex-direction: column;">
+    <div style="display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid #f0f0f0;">
+      <div style="width: 32px; height: 32px; border-radius: 50%; background: #616161; color: #ffffff; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 12px;">MM</div>
+      <div style="display: flex; flex-direction: column; flex: 1; min-width: 0;">
+        <div style="display: flex; align-items: center; gap: 8px;"><span style="font-weight: 600;">Mark Miller</span><span style="display: inline-block; padding: 1px 6px; font-size: 10px; color: #616161; border: 1px solid #e0e0e0; border-radius: 2px;">Email Received</span></div>
+        <div style="font-size: 12px; line-height: 16px; color: #616161;">Jul 9, 2026 · 3:01 PM · logged from Outlook by Mendy Green</div>
+      </div>
+    </div>
+
+    <div style="padding: 14px 16px; display: flex; flex-direction: column; gap: 12px;">
+      <div style="border: 1px solid #e0e0e0; border-radius: 4px; background: #fafafa; padding: 10px 12px; display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 4px 10px; font-size: 12px; line-height: 16px;">
+        <div style="color: #707070; font-weight: 600;">Email</div>
+        <div style="display: flex; align-items: center; gap: 8px;"><span style="display: inline-flex; align-items: center; gap: 4px; height: 18px; padding: 0 6px; border-radius: 3px; background: #dff6dd; color: #0e700e; font-size: 10px; line-height: 14px; font-weight: 600;"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v10M4 9l4 4 4-4"></path></svg>Inbound</span><span style="color: #616161;">Thu, Jul 9 2026 2:58 PM</span></div>
+        <div style="color: #707070; font-weight: 600;">From</div>
+        <div>Mark Miller &lt;mark.miller@lazerware.com&gt;</div>
+        <div style="color: #707070; font-weight: 600;">To</div>
+        <div>Mendy Green &lt;mendy@risingtidegroup.net&gt;; Jason Parsons &lt;jason@risingtidegroup.net&gt;</div>
+        <div style="color: #707070; font-weight: 600;">Cc</div>
+        <div>Dana Whitfield &lt;dana.whitfield@lazerware.com&gt;</div>
+        <div style="color: #707070; font-weight: 600;">Subject</div>
+        <div>RE: Billing template update</div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 8px; font-size: 14px; line-height: 20px;">
+        <p style="margin: 0;">Hi Mendy,</p>
+        <p style="margin: 0;">Thanks for the update on the billing template — that fixed the alignment issue. One more thing: can we also get the PO number field showing on the recurring invoice?</p>
+        <p style="margin: 0;">Mark</p>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; padding: 10px 16px; border-top: 1px solid #f0f0f0; font-size: 12px; line-height: 16px; color: #616161;">
+      <span style="display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border: 1px solid #d1d1d1; border-radius: 4px; color: #242424;"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#424242" stroke-width="1.5" stroke-linecap="round"><path d="M10.5 4.5 5.8 9.2a1.8 1.8 0 0 0 2.5 2.5l5-5a3 3 0 0 0-4.3-4.3L3.6 7.8a4.2 4.2 0 0 0 6 6L13 10.5"></path></svg>RE Billing template update.eml · 42 KB</span>
+      <span>Also stored: To/Cc lists, sender address, direction</span>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

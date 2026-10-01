@@ -40,7 +40,7 @@ type Mode = "new" | "update";
 // /outlook/auth/callback.html still works for older deployed manifests.
 const REDIRECT_URI = `${window.location.origin}/auth/callback`;
 const MANIFEST_TEMPLATE_URL = "/outlook/manifest.json";
-const BRAND_RED = "#EF3340";
+const BRAND_NAVY = "#002D5B";
 
 const useStyles = makeStyles({
   page: {
@@ -85,7 +85,7 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
   },
   stepActive: {
-    color: BRAND_RED,
+    color: BRAND_NAVY,
     fontWeight: tokens.fontWeightSemibold,
   },
   stepNumber: {
@@ -101,7 +101,7 @@ const useStyles = makeStyles({
     marginRight: "6px",
   },
   stepNumberActive: {
-    backgroundColor: BRAND_RED,
+    backgroundColor: BRAND_NAVY,
     color: "#fff",
   },
   helpText: {
@@ -159,16 +159,16 @@ const useStyles = makeStyles({
     outline: "1px solid transparent",
     outlineOffset: "-1px",
     ":hover": {
-      outline: `2px solid ${BRAND_RED}`,
-      boxShadow: `0 10px 24px rgba(239,51,64,0.12)`,
+      outline: `2px solid ${BRAND_NAVY}`,
+      boxShadow: `0 10px 24px rgba(0,45,91,0.12)`,
     },
   },
   modeIconWrap: {
     width: "40px",
     height: "40px",
     borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: "#FEE7E9",
-    color: BRAND_RED,
+    backgroundColor: "#E5F7FC",
+    color: BRAND_NAVY,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -185,7 +185,7 @@ const useStyles = makeStyles({
   },
   modeArrow: {
     marginTop: "auto",
-    color: BRAND_RED,
+    color: BRAND_NAVY,
     fontSize: tokens.fontSizeBase200,
     fontWeight: tokens.fontWeightSemibold,
   },
@@ -212,11 +212,11 @@ const useStyles = makeStyles({
     "::after": { content: '""', flex: 1, height: "1px", backgroundColor: tokens.colorNeutralStroke2 },
   },
   primary: {
-    backgroundColor: BRAND_RED,
-    border: `1px solid ${BRAND_RED}`,
+    backgroundColor: BRAND_NAVY,
+    border: `1px solid ${BRAND_NAVY}`,
     color: "#fff",
     ":hover": {
-      backgroundColor: "#d92733",
+      backgroundColor: "#051830",
       color: "#fff",
     },
     ":hover:active": {
@@ -302,7 +302,7 @@ function BrandHeader() {
         <summary
           style={{
             cursor: "pointer",
-            color: BRAND_RED,
+            color: BRAND_NAVY,
             fontWeight: tokens.fontWeightSemibold,
           }}
         >

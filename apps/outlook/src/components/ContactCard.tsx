@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Text,
   makeStyles,
@@ -6,12 +6,20 @@ import {
   Avatar,
   Badge,
   Tag,
+  Link,
+  Tooltip,
   Skeleton,
   SkeletonItem,
   MessageBar,
   MessageBarBody,
   MessageBarTitle,
   Button,
+  Menu,
+  MenuTrigger,
+  MenuList,
+  MenuItem,
+  MenuPopover,
+  MenuDivider,
   Dialog,
   DialogTrigger,
   DialogSurface,
@@ -25,10 +33,18 @@ import {
   Option,
   Spinner,
 } from "@fluentui/react-components";
-import { PersonAdd24Regular } from "@fluentui/react-icons";
+import {
+  PersonAdd24Regular,
+  MoreVertical16Regular,
+  Search16Regular,
+  Open16Regular,
+  Note16Regular,
+} from "@fluentui/react-icons";
 import type { HaloUser, HaloClient } from "@iusehalo/halo-api";
-import { domainOf, type EmailContext } from "../lib/office";
+import { getConfig } from "@iusehalo/halo-api";
+import { domainOf, openExternalUrl, type EmailContext } from "../lib/office";
 import { SearchPicker, type PickerItem } from "./SearchPicker";
+import { LogNoteDialog } from "./LogNoteDialog";
 import {
   searchClients,
   searchUsers,
@@ -41,12 +57,12 @@ const useStyles = makeStyles({
   root: {
     display: "flex",
     flexDirection: "column",
-    gap: "10px",
+    gap: "8px",
   },
   header: {
     display: "flex",
-    gap: "12px",
-    alignItems: "flex-start",
+    gap: "10px",
+    alignItems: "center",
   },
   identity: {
     display: "flex",
@@ -59,60 +75,81 @@ const useStyles = makeStyles({
     display: "flex",
     alignItems: "center",
     gap: "6px",
-    flexWrap: "wrap",
+    minWidth: 0,
   },
   name: {
     fontWeight: tokens.fontWeightSemibold,
-    fontSize: tokens.fontSizeBase400,
+    fontSize: tokens.fontSizeBase300,
+    lineHeight: tokens.lineHeightBase300,
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
+    minWidth: 0,
   },
-  jobTitle: {
-    color: tokens.colorNeutralForeground3,
-    fontSize: tokens.fontSizeBase200,
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
+  directionBadge: {
+    flexShrink: 0,
   },
-  contactLines: {
+  subLine: {
     display: "flex",
-    flexDirection: "column",
-    gap: "2px",
-  },
-  link: {
-    color: tokens.colorBrandForeground1,
+    alignItems: "center",
+    gap: "6px",
     fontSize: tokens.fontSizeBase200,
+    lineHeight: tokens.lineHeightBase200,
+    color: tokens.colorNeutralForeground3,
+    minWidth: 0,
+  },
+  subText: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    minWidth: 0,
+  },
+  clientLink: {
+    fontSize: tokens.fontSizeBase200,
+    lineHeight: tokens.lineHeightBase200,
+    fontWeight: tokens.fontWeightSemibold,
+    flexShrink: 0,
+    maxWidth: "60%",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  quietLink: {
+    color: "inherit",
     textDecoration: "none",
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
-    ":hover": { textDecoration: "underline" },
+    minWidth: 0,
+    ":hover": { textDecoration: "underline", color: tokens.colorBrandForeground1 },
   },
-  orgRow: {
-    display: "flex",
-    flexWrap: "wrap",
-    gap: "6px",
-    alignItems: "center",
+  dot: {
+    color: tokens.colorNeutralForeground4,
+    flexShrink: 0,
   },
   tagsRow: {
     display: "flex",
-    flexWrap: "wrap",
+    flexWrap: "nowrap",
     gap: "4px",
+    overflow: "hidden",
+    minWidth: 0,
+  },
+  menu: {
+    flexShrink: 0,
+    alignSelf: "flex-start",
+    marginRight: "-6px",
   },
   stats: {
     display: "flex",
     alignItems: "center",
     gap: "6px",
     fontSize: tokens.fontSizeBase200,
+    lineHeight: tokens.lineHeightBase200,
     color: tokens.colorNeutralForeground2,
     flexWrap: "wrap",
-    padding: "6px 8px",
+    padding: "4px 8px",
     backgroundColor: tokens.colorNeutralBackground2,
     borderRadius: tokens.borderRadiusMedium,
-  },
-  statsDot: {
-    color: tokens.colorNeutralForeground4,
   },
   actions: {
     display: "flex",
@@ -124,6 +161,15 @@ const useStyles = makeStyles({
     gap: "10px",
     alignItems: "center",
     flex: 1,
+  },
+  /** Keeps a SearchPicker mounted (so its dialog can be opened from the menu)
+   *  without rendering its trigger button in the layout. */
+  hiddenTrigger: {
+    position: "absolute",
+    width: "0px",
+    height: "0px",
+    overflow: "hidden",
+    visibility: "hidden",
   },
   dialogForm: {
     display: "flex",
@@ -149,6 +195,7 @@ export function ContactCard({
   onClientChange,
 }: Props) {
   const styles = useStyles();
+  const haloUrl = getConfig()?.haloBaseUrl;
   // Direction-aware: for sent items, the "customer" represented in this card
   // is the recipient, not the agent. customerEmail/Name flip automatically.
   const displayName = contact?.name || email.customerName || email.customerEmail;
@@ -219,62 +266,136 @@ export function ContactCard({
     [stats?.lastActivityAt],
   );
 
+  // Site + contact tags render inline only when they fit on one line; when
+  // they'd overflow the 320px pane they move into a tooltip on the client name.
+  const tagsKey = [siteName ?? "", ...tags.map((t) => t.value)].join("|");
+  const tagsRowRef = useRef<HTMLDivElement>(null);
+  const [tagsOverflow, setTagsOverflow] = useState(false);
+  // Two-phase: whenever the tag set changes, render the row again, then measure
+  // it before paint and pull it out if it overflows.
+  useLayoutEffect(() => {
+    setTagsOverflow(false);
+  }, [tagsKey]);
+  useLayoutEffect(() => {
+    const el = tagsRowRef.current;
+    if (el && el.scrollWidth > el.clientWidth + 1) setTagsOverflow(true);
+  });
+  const hasTags = !!siteName || tags.length > 0;
+  const tagsTooltip = hasTags
+    ? [siteName ? `Site: ${siteName}` : "", tags.length ? `Tags: ${tags.map((t) => t.value).join(", ")}` : ""]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
+
+  // Hidden SearchPicker triggers, opened from the ⋮ menu.
+  const changeContactRef = useRef<HTMLDivElement>(null);
+  const changeClientRef = useRef<HTMLDivElement>(null);
+  const clickHidden = (ref: typeof changeContactRef) =>
+    ref.current?.querySelector("button")?.click();
+
+  const [noteOpen, setNoteOpen] = useState(false);
+
+  const openHalo = (path: string) => {
+    if (!haloUrl) return;
+    const url = `${haloUrl}${path}`;
+    if (!openExternalUrl(url)) {
+      // Outlook blocked both popup methods — copy the URL so the agent can
+      // paste it themselves. Never navigate the task pane to the target; sites
+      // that set X-Frame-Options will refuse to render and the pane goes blank.
+      navigator.clipboard?.writeText(url).catch(() => {});
+    }
+  };
+
+  const pickContact = (u: HaloUser) => {
+    onContactChange(u);
+    if (u.client_id && u.client_name) {
+      onClientChange({ id: u.client_id, name: u.client_name });
+    }
+  };
+  const searchContacts = async (q: string) => {
+    const users = await searchUsers(q);
+    return users.map<PickerItem<HaloUser>>((u) => ({
+      key: u.id,
+      primary: u.name,
+      secondary: [u.emailaddress, u.client_name].filter(Boolean).join(" · "),
+      value: u,
+    }));
+  };
+
+  const clientNameEl = client ? (
+    haloUrl ? (
+      <Link
+        className={styles.clientLink}
+        title={tagsOverflow ? undefined : `Open ${client.name} in HaloPSA`}
+        onClick={() => openHalo(`/customer?clientid=${client.id}`)}
+      >
+        {client.name}
+      </Link>
+    ) : (
+      <Text className={styles.clientLink}>{client.name}</Text>
+    )
+  ) : null;
+
   return (
     <div className={styles.root}>
-      {/* Header: avatar + name + job title + matched badge */}
+      {/* Header: avatar · name + direction · client · email · phone/title · ⋮ */}
       <div className={styles.header}>
-        <Avatar name={displayName} color="colorful" size={40} />
+        <Avatar name={displayName} color="colorful" size={32} />
         <div className={styles.identity}>
           <div className={styles.nameRow}>
-            <Text className={styles.name}>{displayName}</Text>
-            {contact && (
-              <Badge appearance="tint" color="success" size="small">
-                Contact matched
-              </Badge>
-            )}
+            <Text className={styles.name} title={displayName}>
+              {displayName}
+            </Text>
             {/* Direction badge: makes clear when viewing a sent item that
                 the card is showing the recipient, not the agent. */}
             <Badge
               appearance="outline"
               color={email.direction === "outgoing" ? "informative" : "subtle"}
               size="small"
+              className={styles.directionBadge}
             >
               {email.direction === "outgoing" ? "Sent to" : "From"}
             </Badge>
           </div>
-          {contact?.jobtitle && (
-            <Text className={styles.jobTitle}>{contact.jobtitle}</Text>
-          )}
-        </div>
-      </div>
 
-      {/* Contact details: email + phone */}
-      <div className={styles.contactLines}>
-        <a className={styles.link} href={`mailto:${contactEmail}`}>
-          {contactEmail}
-        </a>
-        {phone && (
-          <a className={styles.link} href={`tel:${phone}`}>
-            {phone}
-          </a>
-        )}
-      </div>
+          <div className={styles.subLine}>
+            {clientNameEl &&
+              (tagsOverflow && tagsTooltip ? (
+                <Tooltip content={tagsTooltip} relationship="description" withArrow>
+                  {clientNameEl}
+                </Tooltip>
+              ) : (
+                clientNameEl
+              ))}
+            {clientNameEl && <span className={styles.dot}>·</span>}
+            <a className={styles.quietLink} href={`mailto:${contactEmail}`} title={contactEmail}>
+              {contactEmail}
+            </a>
+          </div>
 
-      {/* Org context: client / site / tags */}
-      {(client || siteName || tags.length > 0) && (
-        <div className={styles.orgRow}>
-          {client && (
-            <Tag appearance="brand" size="small" shape="rounded">
-              {client.name}
-            </Tag>
+          {(phone || contact?.jobtitle) && (
+            <div className={styles.subLine}>
+              {phone && (
+                <a className={styles.quietLink} href={`tel:${phone}`}>
+                  {phone}
+                </a>
+              )}
+              {phone && contact?.jobtitle && <span className={styles.dot}>·</span>}
+              {contact?.jobtitle && (
+                <span className={styles.subText} title={contact.jobtitle}>
+                  {contact.jobtitle}
+                </span>
+              )}
+            </div>
           )}
-          {siteName && (
-            <Tag appearance="outline" size="small" shape="rounded">
-              {siteName}
-            </Tag>
-          )}
-          {tags.length > 0 && (
-            <div className={styles.tagsRow}>
+
+          {hasTags && !tagsOverflow && (
+            <div className={styles.tagsRow} ref={tagsRowRef}>
+              {siteName && (
+                <Tag appearance="outline" size="extra-small" shape="rounded">
+                  {siteName}
+                </Tag>
+              )}
               {tags.map((t, i) => (
                 <Tag key={`${t.value}-${i}`} size="extra-small" shape="circular">
                   {t.value}
@@ -283,7 +404,62 @@ export function ContactCard({
             </div>
           )}
         </div>
-      )}
+
+        <Menu>
+          <MenuTrigger disableButtonEnhancement>
+            <Button
+              appearance="subtle"
+              size="small"
+              icon={<MoreVertical16Regular />}
+              aria-label="Contact actions"
+              className={styles.menu}
+            />
+          </MenuTrigger>
+          <MenuPopover>
+            <MenuList>
+              {contact && (
+                <MenuItem
+                  icon={<Search16Regular />}
+                  onClick={() => clickHidden(changeContactRef)}
+                >
+                  Change contact…
+                </MenuItem>
+              )}
+              <MenuItem
+                icon={<Search16Regular />}
+                onClick={() => clickHidden(changeClientRef)}
+              >
+                Change client…
+              </MenuItem>
+              {haloUrl && (contact || client) && <MenuDivider />}
+              {haloUrl && contact && (
+                <MenuItem
+                  icon={<Open16Regular />}
+                  onClick={() => openHalo(`/customer?userid=${contact.id}`)}
+                >
+                  Open contact in HaloPSA
+                </MenuItem>
+              )}
+              {haloUrl && client && (
+                <MenuItem
+                  icon={<Open16Regular />}
+                  onClick={() => openHalo(`/customer?clientid=${client.id}`)}
+                >
+                  Open client in HaloPSA
+                </MenuItem>
+              )}
+              {(contact || client) && (
+                <>
+                  <MenuDivider />
+                  <MenuItem icon={<Note16Regular />} onClick={() => setNoteOpen(true)}>
+                    Log note…
+                  </MenuItem>
+                </>
+              )}
+            </MenuList>
+          </MenuPopover>
+        </Menu>
+      </div>
 
       {/* Unmatched callout with primary actions */}
       {!contact && (
@@ -301,21 +477,8 @@ export function ContactCard({
             triggerAppearance="primary"
             title="Find contact in HaloPSA"
             initialQuery={email.customerEmail}
-            onSearch={async (q) => {
-              const users = await searchUsers(q);
-              return users.map<PickerItem<HaloUser>>((u) => ({
-                key: u.id,
-                primary: u.name,
-                secondary: [u.emailaddress, u.client_name].filter(Boolean).join(" · "),
-                value: u,
-              }));
-            }}
-            onPick={(u) => {
-              onContactChange(u);
-              if (u.client_id && u.client_name) {
-                onClientChange({ id: u.client_id, name: u.client_name });
-              }
-            }}
+            onSearch={searchContacts}
+            onPick={pickContact}
           />
           <CreateContactDialog
             email={email}
@@ -343,11 +506,11 @@ export function ContactCard({
                 {stats?.openTicketCount ?? 0} open{" "}
                 {stats?.openTicketCount === 1 ? "ticket" : "tickets"}
               </Text>
-              <span className={styles.statsDot}>·</span>
+              <span className={styles.dot}>·</span>
               <Text size={200}>Last activity {lastActivityText}</Text>
               {accountManager && (
                 <>
-                  <span className={styles.statsDot}>·</span>
+                  <span className={styles.dot}>·</span>
                   <Text size={200}>AM: {accountManager}</Text>
                 </>
               )}
@@ -356,52 +519,49 @@ export function ContactCard({
         </div>
       )}
 
-      {/* De-emphasized override row when we have a match */}
+      {/* Override pickers, triggered from the ⋮ menu. Their trigger buttons are
+          hidden; the dialogs themselves render in a portal. */}
       {contact && (
-        <div className={styles.actions}>
+        <div className={styles.hiddenTrigger} ref={changeContactRef} aria-hidden>
           <SearchPicker<HaloUser>
             triggerLabel="Change contact"
             triggerAppearance="subtle"
             title="Find contact in HaloPSA"
             initialQuery={email.customerEmail}
-            onSearch={async (q) => {
-              const users = await searchUsers(q);
-              return users.map<PickerItem<HaloUser>>((u) => ({
-                key: u.id,
-                primary: u.name,
-                secondary: [u.emailaddress, u.client_name].filter(Boolean).join(" · "),
-                value: u,
-              }));
-            }}
-            onPick={(u) => {
-              onContactChange(u);
-              if (u.client_id && u.client_name) {
-                onClientChange({ id: u.client_id, name: u.client_name });
-              }
-            }}
-          />
-          <SearchPicker<HaloClient>
-            triggerLabel="Change client"
-            triggerAppearance="subtle"
-            title="Find client in HaloPSA"
-            initialQuery={domain}
-            onSearch={async (q) => {
-              const clients = await searchClients(q);
-              return clients.map<PickerItem<HaloClient>>((c) => ({
-                key: c.id,
-                primary: c.name,
-                value: c,
-              }));
-            }}
-            onPick={(c) => {
-              onClientChange(c);
-              if (contact && contact.client_id && contact.client_id !== c.id) {
-                onContactChange(undefined);
-              }
-            }}
+            onSearch={searchContacts}
+            onPick={pickContact}
           />
         </div>
       )}
+      <div className={styles.hiddenTrigger} ref={changeClientRef} aria-hidden>
+        <SearchPicker<HaloClient>
+          triggerLabel="Change client"
+          triggerAppearance="subtle"
+          title="Find client in HaloPSA"
+          initialQuery={domain}
+          onSearch={async (q) => {
+            const clients = await searchClients(q);
+            return clients.map<PickerItem<HaloClient>>((c) => ({
+              key: c.id,
+              primary: c.name,
+              value: c,
+            }));
+          }}
+          onPick={(c) => {
+            onClientChange(c);
+            if (contact && contact.client_id && contact.client_id !== c.id) {
+              onContactChange(undefined);
+            }
+          }}
+        />
+      </div>
+
+      <LogNoteDialog
+        open={noteOpen}
+        contact={contact}
+        client={client}
+        onClose={() => setNoteOpen(false)}
+      />
     </div>
   );
 }

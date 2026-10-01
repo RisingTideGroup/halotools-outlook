@@ -3,11 +3,13 @@ import ReactDOM from "react-dom/client";
 import { FluentProvider, webLightTheme } from "@fluentui/react-components";
 import { ComposeApp } from "./ComposeApp";
 import { awaitOffice, installStorageAdapter } from "../lib/office";
+import { installApiTracer } from "../lib/diagnostics";
 import { applyUrlParamConfig } from "@iusehalo/halo-api";
 
 async function bootstrap() {
   await awaitOffice();
   installStorageAdapter();
+  installApiTracer("compose");
   await applyUrlParamConfig();
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
