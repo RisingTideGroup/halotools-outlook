@@ -254,7 +254,7 @@
           ? ("Halo request timed out after " + ms + "ms (network/CORS)")
           : ("fetch failed: " + (e && e.message ? e.message : String(e)));
         throw new Error(msg);
-      },
+      }
     );
   }
 
@@ -469,11 +469,11 @@
     out = out.replace(/\s*style=(?:"|')\s*(?:"|')/g, "");
     out = out.replace(
       /(?:<p[^>]*>(?:\s|&nbsp;| )*<\/p>\s*){2,}/gi,
-      "<p>&nbsp;</p>",
+      "<p>&nbsp;</p>"
     );
     out = out.replace(
       /(?:<div[^>]*>(?:\s|&nbsp;|<br\s*\/?>)*<\/div>\s*){2,}/gi,
-      "<div>&nbsp;</div>",
+      "<div>&nbsp;</div>"
     );
     out = out.replace(/(?:<br\s*\/?>\s*){3,}/gi, "<br><br>");
     return out;

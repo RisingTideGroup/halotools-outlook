@@ -636,6 +636,10 @@ function AppendDialog({
         sales_mailbox_override_id: isOutgoing ? getCachedSalesMailboxId() : undefined,
       });
 
+      // Halo returns 200 and still discards parts of the payload (notably
+      // attachments) — it says so in `_warning`. Treat that as a warning, not
+      // a success, so the user sees it.
+      if (action._warning) warnings.push(`HaloPSA: ${action._warning}`);
       if (warnings.length) {
         onResult("warning", `Appended to #${action.ticket_id}, but: ${warnings.join(" ")}`);
         setOpen(false);
@@ -1022,6 +1026,7 @@ function CreateDialog({
         await setDefaults({ ...getDefaults(), defaultTicketTypeId: ticketTypeId });
       }
 
+      if (ticket._warning) warnings.push(`HaloPSA: ${ticket._warning}`);
       if (warnings.length) {
         onResult("warning", `Created #${ticket.id}, but: ${warnings.join(" ")}`);
       } else {
