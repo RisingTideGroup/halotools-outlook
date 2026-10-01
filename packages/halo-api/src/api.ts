@@ -6,6 +6,7 @@ import type {
   HaloUser,
   HaloTicket,
   HaloAction,
+  HaloAttachmentInline,
   HaloTicketType,
   TicketKind,
   TicketSearchOptions,
@@ -1137,10 +1138,31 @@ function unwrapWriteResponse<T>(
   return res as T;
 }
 
+/**
+ * Halo only stores an inline attachment when `data_base64` is a data URI
+ * (`data:<mime>;base64,<payload>`). Bare base64 is accepted by the endpoint
+ * but the file is silently dropped — the response carries a `_warning`
+ * ("The input is not a valid Base-64 string") and `attachments[].id === 0`.
+ * Verified against Halo SaaS 2026-10-01 on POST /Actions: bare → dropped,
+ * prefixed → stored, including `message/rfc822` (.eml). Normalise here so
+ * every caller (Outlook pane, MCP, future hosts) gets the working form.
+ */
+function withDataUriAttachments<T extends { attachments?: HaloAttachmentInline[] }>(payload: T): T {
+  if (!payload.attachments?.length) return payload;
+  return {
+    ...payload,
+    attachments: payload.attachments.map((a) =>
+      /^data:/i.test(a.data_base64)
+        ? a
+        : { ...a, data_base64: `data:${a.contenttype || "application/octet-stream"};base64,${a.data_base64}` },
+    ),
+  };
+}
+
 export async function appendAction(payload: CreateActionPayload): Promise<HaloAction> {
   const res = await call<HaloAction | HaloAction[] | { actions?: HaloAction[] }>("/Actions", {
     method: "POST",
-    body: JSON.stringify([payload]),
+    body: JSON.stringify([withDataUriAttachments(payload)]),
   });
   return unwrapWriteResponse<HaloAction>(res, "actions");
 }
@@ -1148,7 +1170,7 @@ export async function appendAction(payload: CreateActionPayload): Promise<HaloAc
 export async function createTicket(payload: CreateTicketPayload): Promise<HaloTicket> {
   const res = await call<HaloTicket | HaloTicket[] | { tickets?: HaloTicket[] }>("/Tickets", {
     method: "POST",
-    body: JSON.stringify([payload]),
+    body: JSON.stringify([withDataUriAttachments(payload)]),
   });
   return unwrapWriteResponse<HaloTicket>(res, "tickets");
 }

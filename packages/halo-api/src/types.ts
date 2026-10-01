@@ -258,6 +258,8 @@ export interface HaloTicket {
   /** Always "ticket" in list responses regardless of type — do NOT use it to detect
    *  opportunities/projects; classify via tickettype_id → HaloTicketType.use instead. */
   use?: string;
+  /** Set by Halo on a 200 write when part of the payload was discarded. */
+  _warning?: string;
 }
 
 /** Coarse bucket for a ticket, derived from its type's `use` and its parent linkage. */
@@ -281,6 +283,10 @@ export interface HaloAction {
   who?: string;
   datetime?: string;
   actionnumber?: number;
+  /** Set by Halo on a 200 write when part of the payload was discarded
+   *  (e.g. "Unable to save attachment…"). Surface it — the write "succeeded". */
+  _warning?: string;
+  attachment_count?: number;
 }
 
 export interface HaloAttachmentInline {

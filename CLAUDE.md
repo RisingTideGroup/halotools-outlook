@@ -74,8 +74,9 @@ Email-to-ticket threading uses RFC 5322 headers — no Halo custom fields, no ad
 ## Gotchas
 
 - **Halo API payload variations.** Halo's REST endpoints vary slightly between versions. Two places to watch:
-  1. Inline attachment field name: `data_base64` vs `data` vs `base64`. Currently using `data_base64`.
+  1. Inline attachments on `/Actions` and `/Tickets`: the field is `data_base64` but the value MUST be a data URI (`data:<mime>;base64,<payload>`). Bare base64 returns 200 with `_warning: "Unable to save attachment…"` and `attachments[].id === 0` — nothing stored. Verified 2026-10-01 against Halo SaaS (also works for `message/rfc822` .eml). `appendAction`/`createTicket` in `packages/halo-api` normalise this; don't bypass them.
   2. Action `outcome` strings are tenant-configurable (`"Email Received"` is the assumed default).
+  Halo also reports partial failures on a 200 via `_warning` on the returned record — always surface it.
   If something breaks at runtime, try the alternates before assuming a deeper bug.
 - **Office.js loads from MS CDN**, not from npm. The `<script>` tag in `index.html` and `auth/callback.html` pulls it. `@types/office-js` provides the TS types.
 - **Office Dialog API for OAuth.** `displayDialogAsync` requires HTTPS even for localhost dev, and the initial URL must be on the add-in's own origin. We wrap third-party authorize URLs in a same-origin `/outlook/auth/start.html` bounce page.
