@@ -3,6 +3,7 @@ import { Text, Spinner } from "@fluentui/react-components";
 import { ConfigScreen } from "../components/ConfigScreen";
 import { AuthScreen } from "../components/AuthScreen";
 import { getConfig, isAuthenticated, warmClientCacheForCompose } from "@iusehalo/halo-api";
+import { getDefaults } from "../lib/defaults";
 import { useComposeStyles } from "./styles";
 import { TimerChip } from "./TimerChip";
 import { LogOnSendCard } from "./LogOnSendCard";
@@ -25,7 +26,7 @@ export function ComposeApp() {
     // Warm the compact ClientCache slice before rendering so synchronous
     // reads like getChargeRates() find data when sections mount. Only falls
     // back to the full ~3 MB /ClientCache when the slice is missing or stale.
-    await warmClientCacheForCompose();
+    await warmClientCacheForCompose({ useSlice: getDefaults().composeCacheEnabled !== false });
     setPhase("ready");
   }, []);
 

@@ -306,6 +306,21 @@ export async function searchUsers(query: string, limit = 25): Promise<HaloUser[]
 // Anything else → undefined. Mirrored in apps/outlook/public/launchevent.js
 // (vanilla JS, can't import) — keep the two in sync.
 
+/** Consumer / free-mail domains are never evidence of a client: a tenant
+ *  where only one client happens to have a gmail contact would otherwise
+ *  attribute every gmail.com sender to that client. Applies to the domain
+ *  step only — an exact contact match at such an address is still a match. */
+export const FREE_MAIL_DOMAINS: ReadonlySet<string> = new Set([
+  "gmail.com", "googlemail.com", "hotmail.com", "hotmail.co.uk", "outlook.com", "live.com",
+  "live.co.uk", "msn.com", "yahoo.com", "yahoo.co.uk", "ymail.com", "icloud.com", "me.com",
+  "mac.com", "aol.com", "proton.me", "protonmail.com", "pm.me", "gmx.com", "gmx.net",
+  "mail.com", "zoho.com", "fastmail.com", "comcast.net", "att.net", "verizon.net",
+]);
+
+export function isFreeMailDomain(domain: string): boolean {
+  return FREE_MAIL_DOMAINS.has(domain.toLowerCase().trim());
+}
+
 /** Halo exposes a client's email domain under different names across
  *  versions; the value may list several domains separated by , ; or
  *  whitespace. */
@@ -350,7 +365,7 @@ export function clientIdFromUsers(users: HaloUser[], domain: string): number | u
 
 export async function findClientByDomain(domain: string): Promise<HaloClient | undefined> {
   const d = domain.toLowerCase().trim();
-  if (!d) return undefined;
+  if (!d || isFreeMailDomain(d)) return undefined;
   // 1. Other contacts on this domain, all under one client.
   const uq = new URLSearchParams({ search: `@${d}`, includeinactive: "false", pageinate: "false" });
   const ures = await call<{ users: HaloUser[] } | HaloUser[]>(`/Users?${uq}`);
@@ -1099,12 +1114,25 @@ function readLiteCache(): ClientCacheLite | undefined {
  * (no network), otherwise load the full ClientCache once (which also writes
  * the slice for the next compose window). Never throws.
  */
-export async function warmClientCacheForCompose(): Promise<void> {
-  if (_clientCache || readLiteCache()) return;
+export async function warmClientCacheForCompose({ useSlice = true }: { useSlice?: boolean } = {}): Promise<void> {
+  if (_clientCache || (useSlice && readLiteCache())) return;
   try {
     await getClientCache();
   } catch {
     /* non-fatal — charge rates degrade to No Charge, intake check to empty */
+  }
+}
+
+/** Drop the compact slice and the in-memory ClientCache so the next read
+ *  (or an immediate getClientCache()) fetches fresh from Halo. */
+export function clearComposeCache(): void {
+  _lite = undefined;
+  clearClientCache();
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(LITE_CACHE_KEY);
+  } catch {
+    /* swallow */
   }
 }
 

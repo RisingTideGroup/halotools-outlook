@@ -20,6 +20,8 @@ import {
   listTicketTypes,
   ticketTypesForAgentCreate,
   clearReferenceCache,
+  clearComposeCache,
+  getClientCache,
 } from "@iusehalo/halo-api";
 import type { HaloTicketType } from "@iusehalo/halo-api";
 import { MANIFEST_VERSION } from "../setup/version";
@@ -134,6 +136,8 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
     initialDefaults.includeInlineImages ?? true,
   );
   const [apiTrace, setApiTrace] = useState<boolean>(initialDefaults.apiTrace ?? false);
+  const [composeCache, setComposeCache] = useState<boolean>(initialDefaults.composeCacheEnabled !== false);
+  const [reloadStatus, setReloadStatus] = useState<string | undefined>();
   const [reportCopyStatus, setReportCopyStatus] = useState<string | undefined>();
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -229,6 +233,22 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
     setTimeout(() => setMcpCopyStatus(undefined), 2500);
   };
 
+  // Drop every cached copy of Halo reference data (ClientCache + its compact
+  // compose slice + ticket types etc.) and fetch fresh, so a charge rate or
+  // intake mailbox added in Halo shows up without waiting for the TTL.
+  const handleReloadHaloData = async () => {
+    setReloadStatus("Reloading…");
+    try {
+      clearComposeCache();
+      clearReferenceCache();
+      await getClientCache(true);
+      setReloadStatus("Halo data reloaded");
+    } catch (e) {
+      setReloadStatus(`Reload failed: ${(e as Error).message}`);
+    }
+    setTimeout(() => setReloadStatus(undefined), 3000);
+  };
+
   const save = async () => {
     setSaving(true);
     try {
@@ -239,6 +259,7 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
         autoLogRepliesToTickets: autoLogReplies,
         includeInlineImages,
         apiTrace,
+        composeCacheEnabled: composeCache,
       });
       onClose();
     } finally {
@@ -341,6 +362,24 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
           Halo and links them inline on the logged action. When off, embedded images are
           omitted from the logged note.
         </Text>
+
+        <Switch
+          checked={composeCache}
+          onChange={(_, d) => setComposeCache(d.checked)}
+          label="Use cached Halo data in compose windows"
+        />
+        <Text className={styles.meta}>
+          Compose windows start from a small cached copy of your Halo data (your agent
+          record, charge rates, intake mailboxes) saved by this pane, refreshed every 6
+          hours. When off, every compose window downloads the full Halo cache (~3 MB).
+          Turn off only to rule the cache out when troubleshooting.
+        </Text>
+        <div className={styles.diagButtons}>
+          <Button appearance="secondary" size="small" onClick={() => void handleReloadHaloData()}>
+            Reload Halo data now
+          </Button>
+          {reloadStatus && <Text className={styles.meta}>{reloadStatus}</Text>}
+        </div>
 
         <Divider />
 

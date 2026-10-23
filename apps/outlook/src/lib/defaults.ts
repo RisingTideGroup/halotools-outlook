@@ -22,6 +22,11 @@ export interface UserDefaults {
   /** Diagnostics flag: record every HaloPSA API request (path, status, count,
    *  timing — never the token) in the diagnostic log. Off by default. */
   apiTrace?: boolean;
+  /** Compose windows boot from a compact ClientCache slice the task pane
+   *  persists (agent, charge rates, intake mailboxes) instead of downloading
+   *  the full ~3 MB /ClientCache every time. Treated as on when undefined;
+   *  turn off to rule the cache out when troubleshooting. */
+  composeCacheEnabled?: boolean;
 }
 
 export function getDefaults(): UserDefaults {

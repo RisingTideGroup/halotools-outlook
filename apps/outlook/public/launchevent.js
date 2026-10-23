@@ -335,6 +335,20 @@
     return at >= 0 ? String(email).slice(at + 1).toLowerCase().trim() : "";
   }
 
+  // Consumer / free-mail domains are never evidence of a client (a tenant
+  // where only one client has a gmail contact would otherwise own every
+  // gmail.com sender). Domain step only — an exact contact match at such an
+  // address is still a match. Mirrors FREE_MAIL_DOMAINS in halo-api/api.ts.
+  var FREE_MAIL_DOMAINS = [
+    "gmail.com", "googlemail.com", "hotmail.com", "hotmail.co.uk", "outlook.com", "live.com",
+    "live.co.uk", "msn.com", "yahoo.com", "yahoo.co.uk", "ymail.com", "icloud.com", "me.com",
+    "mac.com", "aol.com", "proton.me", "protonmail.com", "pm.me", "gmx.com", "gmx.net",
+    "mail.com", "zoho.com", "fastmail.com", "comcast.net", "att.net", "verizon.net",
+  ];
+  function isFreeMailDomain(domain) {
+    return FREE_MAIL_DOMAINS.indexOf(String(domain || "").toLowerCase().trim()) >= 0;
+  }
+
   // Email domains configured on a Halo client record, if any. Halo exposes
   // the client's domain under different names across versions/endpoints and
   // the value may hold several domains separated by , ; or whitespace. Every
@@ -444,6 +458,10 @@
             var user = exactUserByEmail(unwrapList(json, "users"), email);
             if (user && user.id) return openTickets("user_id=" + user.id);
             if (!domain) return [];
+            if (isFreeMailDomain(domain)) {
+              logEvent("info", "auto-lookup: free-mail domain, no client match attempted", { domain: domain });
+              return [];
+            }
 
             // 2a. Client via other contacts on the same domain (exact, unique).
             return getJson(cfg.haloBaseUrl + "/api/Users?search=" + encodeURIComponent("@" + domain) + "&pageinate=false")
@@ -1185,7 +1203,7 @@
   // Pure helpers for unit tests (Node). Never reached in Outlook.
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
-      domainOf: domainOf, clientDomains: clientDomains, matchClientByDomain: matchClientByDomain,
+      domainOf: domainOf, clientDomains: clientDomains, matchClientByDomain: matchClientByDomain, isFreeMailDomain: isFreeMailDomain,
       clientIdFromUsers: clientIdFromUsers, exactUserByEmail: exactUserByEmail,
       extractTicketIdFromSubject: extractTicketIdFromSubject, extractTopReply: extractTopReply,
       formEncode: formEncode, trimEntries: trimEntries, htmlToText: htmlToText,

@@ -99,8 +99,10 @@ Email-to-ticket threading uses RFC 5322 headers — no Halo custom fields, no ad
   accepted evidence that a domain belongs to a client is (1) every contact on
   that exact domain sharing one `client_id`, else (2) exactly one client record
   with that exact domain configured (`findClientByDomain` / `pickClientByDomain`
-  in `api.ts`, mirrored in `launchevent.js`). No match → log nothing. A
-  substring fallback once logged mail.com senders to a gmail.com client.
+  in `api.ts`, mirrored in `launchevent.js`). Free-mail domains
+  (`FREE_MAIL_DOMAINS`) are never evidence of a client; an exact contact match
+  at such an address still is. No match → log nothing. A substring fallback
+  once logged mail.com senders to a gmail.com client.
 - **Create-on-send is ONE write.** `POST /api/Ticket` with the email fields
   creates the ticket AND its initial action; appending the same note again
   afterwards double-logs it. Timer/charge rate ride on the ticket payload.
