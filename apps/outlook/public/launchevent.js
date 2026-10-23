@@ -399,7 +399,7 @@
     var ids = [];
     for (var i = 0; i < (users || []).length; i++) {
       var u = users[i];
-      if (!u || u.inactive || !u.emailaddress) continue;
+      if (!u || !u.emailaddress) continue;
       if (domainOf(u.emailaddress) !== d) continue;
       var cid = Number(u.client_id);
       if (!cid) continue;
@@ -423,6 +423,11 @@
   }
 
   // ---------- Auto-lookup ----------
+
+  // /Users search suffix: contacts AND prospects in one call (confirmed on a
+  // live tenant — a plain `search=` returned the contact only). No inactive
+  // filter: an exact email match is a match. Mirrors USER_SEARCH_PARAMS.
+  var USER_SEARCH_SUFFIX = "&pageinate=false&onlyusers=false&onlyprospects=false";
 
   // Resolve To: recipients to a single open Halo ticket, or null when there
   // are zero or multiple matches (ambiguous — don't auto-log). Per recipient:
@@ -453,7 +458,7 @@
         var domain = domainOf(email);
 
         // 1. Exact contact by email.
-        return getJson(cfg.haloBaseUrl + "/api/Users?search=" + encodeURIComponent(email) + "&pageinate=false")
+        return getJson(cfg.haloBaseUrl + "/api/Users?search=" + encodeURIComponent(email) + USER_SEARCH_SUFFIX)
           .then(function (json) {
             var user = exactUserByEmail(unwrapList(json, "users"), email);
             if (user && user.id) return openTickets("user_id=" + user.id);
@@ -464,7 +469,7 @@
             }
 
             // 2a. Client via other contacts on the same domain (exact, unique).
-            return getJson(cfg.haloBaseUrl + "/api/Users?search=" + encodeURIComponent("@" + domain) + "&pageinate=false")
+            return getJson(cfg.haloBaseUrl + "/api/Users?search=" + encodeURIComponent("@" + domain) + USER_SEARCH_SUFFIX)
               .then(function (json2) {
                 var cid = clientIdFromUsers(unwrapList(json2, "users"), domain);
                 if (cid) return cid;

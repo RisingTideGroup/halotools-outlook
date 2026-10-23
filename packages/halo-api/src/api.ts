@@ -273,8 +273,14 @@ async function call<T>(
 
 // ---------- Read paths ----------
 
+// /Users search parameters. `onlyusers=false&onlyprospects=false` returns
+// contacts AND prospects in one call (confirmed against a live tenant:
+// a plain `search=` returned the contact only); no `includeinactive` filter —
+// an exact email match is a match whether or not the contact is archived.
+const USER_SEARCH_PARAMS = { pageinate: "false", onlyusers: "false", onlyprospects: "false" } as const;
+
 export async function findUserByEmail(email: string): Promise<HaloUser | undefined> {
-  const q = new URLSearchParams({ search: email, includeinactive: "false" });
+  const q = new URLSearchParams({ search: email, ...USER_SEARCH_PARAMS });
   const res = await call<{ users: HaloUser[] } | HaloUser[]>(`/Users?${q}`);
   const arr = Array.isArray(res) ? res : res.users;
   // Exact address only. Halo's `search` is a contains-match, so the first
@@ -286,7 +292,8 @@ export async function findUserByEmail(email: string): Promise<HaloUser | undefin
 export async function searchUsers(query: string, limit = 25): Promise<HaloUser[]> {
   const q = new URLSearchParams({
     search: query,
-    includeinactive: "false",
+    onlyusers: "false",
+    onlyprospects: "false",
     count: String(limit),
   });
   const res = await call<{ users: HaloUser[] } | HaloUser[]>(`/Users?${q}`);
@@ -355,7 +362,7 @@ export function clientIdFromUsers(users: HaloUser[], domain: string): number | u
   if (!d) return undefined;
   const ids = new Set<number>();
   for (const u of users) {
-    if (!u || u.inactive || !u.emailaddress) continue;
+    if (!u || !u.emailaddress) continue;
     const at = u.emailaddress.lastIndexOf("@");
     if (at < 0 || u.emailaddress.slice(at + 1).toLowerCase().trim() !== d) continue;
     if (u.client_id) ids.add(u.client_id);
@@ -367,7 +374,7 @@ export async function findClientByDomain(domain: string): Promise<HaloClient | u
   const d = domain.toLowerCase().trim();
   if (!d || isFreeMailDomain(d)) return undefined;
   // 1. Other contacts on this domain, all under one client.
-  const uq = new URLSearchParams({ search: `@${d}`, includeinactive: "false", pageinate: "false" });
+  const uq = new URLSearchParams({ search: `@${d}`, ...USER_SEARCH_PARAMS });
   const ures = await call<{ users: HaloUser[] } | HaloUser[]>(`/Users?${uq}`);
   const users = Array.isArray(ures) ? ures : ures.users ?? [];
   const cid = clientIdFromUsers(users, d);
