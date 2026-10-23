@@ -38,8 +38,7 @@ import {
   searchTickets,
   listTicketTypes,
   ticketTypesForAgentCreate,
-  getClientCache,
-  intakeMailboxAddresses,
+  getIntakeMailboxAddresses,
   type HaloUser,
   type HaloClient,
   type HaloTicket,
@@ -152,7 +151,7 @@ export function LogOnSendCard() {
         // Skip auto-staging when a Halo intake mailbox is among the recipients:
         // Halo's native email intake will log this reply itself, so auto-staging
         // (which appends via API on send) would double-post it.
-        const intake = new Set(intakeMailboxAddresses(await getClientCache()));
+        const intake = new Set(await getIntakeMailboxAddresses());
         if (intake.size > 0 && to.some((e) => intake.has(e.trim().toLowerCase()))) return;
 
         const resolved = await Promise.all(

@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Text, Spinner } from "@fluentui/react-components";
 import { ConfigScreen } from "../components/ConfigScreen";
 import { AuthScreen } from "../components/AuthScreen";
-import { getConfig, isAuthenticated, getClientCache } from "@iusehalo/halo-api";
+import { getConfig, isAuthenticated, warmClientCacheForCompose } from "@iusehalo/halo-api";
 import { useComposeStyles } from "./styles";
 import { TimerChip } from "./TimerChip";
 import { LogOnSendCard } from "./LogOnSendCard";
@@ -22,9 +22,10 @@ export function ComposeApp() {
   const refreshPhase = useCallback(async () => {
     if (!getConfig()) { setPhase("needs-config"); return; }
     if (!isAuthenticated()) { setPhase("needs-auth"); return; }
-    // Warm ClientCache before rendering the ready UI so synchronous reads like
-    // getChargeRates() find data already in the cache when sections mount.
-    try { await getClientCache(); } catch { /* non-fatal; charge rates degrade to No Charge */ }
+    // Warm the compact ClientCache slice before rendering so synchronous
+    // reads like getChargeRates() find data when sections mount. Only falls
+    // back to the full ~3 MB /ClientCache when the slice is missing or stale.
+    await warmClientCacheForCompose();
     setPhase("ready");
   }, []);
 

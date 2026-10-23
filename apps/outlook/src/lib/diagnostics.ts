@@ -1,21 +1,30 @@
 // Cross-runtime diagnostic log.
 //
-// All Outlook runtimes in this add-in are served from the same origin
-// (tools.iusehalo.com) so they share window.localStorage. We deliberately use
-// localStorage instead of Office.context.roamingSettings here because the
-// roamingSettings bag is loaded ONCE when each runtime starts and never
-// auto-refreshes — meaning the task pane reads its own stale in-memory copy
-// and can't see writes that the launch-event runtime made after the task pane
-// opened. localStorage is synchronous, immediate, and visible across runtimes
-// at the same origin.
+// Every runtime of this add-in appends entries; the task pane's Settings →
+// Diagnostics panel shows them. Where an entry lives depends on the runtime
+// that wrote it:
+//   - task pane / compose (browser runtimes): window.localStorage, shared by
+//     every browser runtime at the same origin, synchronous, visible live.
+//   - the on-send handler (public/launchevent.js): in Outlook on the web and
+//     new Outlook it is a browser runtime too and writes localStorage. In
+//     CLASSIC Outlook on Windows it is a JavaScript-only runtime with NO
+//     localStorage, so it persists its run to OfficeRuntime.storage (where the
+//     runtime has it) and to a bounded mirror in Office.context.roamingSettings
+//     (`halo.diagLogOnSend.v1`) before completing the send event.
+// getEvents() merges localStorage with the roamingSettings mirror; the
+// async getEventsAsync() additionally reads OfficeRuntime.storage. Note that
+// a task pane loads roamingSettings once at start, so a mirror written by a
+// later send shows up after the pane is reopened (OfficeRuntime.storage, when
+// readable from the pane, shows it live).
 //
-// The launch-event runtime has a parallel ES5 implementation in
-// public/launchevent.js — they MUST agree on the storage key and entry shape.
+// launchevent.js has a parallel ES5 implementation — they MUST agree on the
+// storage keys and entry shape.
 
 import {
   getCachedClientCache,
   getConfig,
   setRequestTracer,
+  storage,
   type RequestTrace,
 } from "@iusehalo/halo-api";
 import { getDefaults } from "./defaults";
@@ -36,21 +45,84 @@ export interface LogEntry {
 }
 
 export const DIAG_LOG_KEY = "halo.diagLog.v1";
+export const DIAG_MIRROR_KEY = "halo.diagLogOnSend.v1";
+export const ON_SEND_ENTRY_KEY = "halo.onSendEntry.v1";
 const MAX_ENTRIES = 200;
 const MAX_MESSAGE_LEN = 500;
 // localStorage has a 5 MB cap per origin — we're nowhere near that, but the
 // log isn't worth scaling without bound. Cap at ~64 KB.
 const MAX_BYTES = 64_000;
 
-function read(): LogEntry[] {
+function asEntries(raw: unknown): LogEntry[] {
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(raw) ? (raw as LogEntry[]).filter((e) => e && typeof e.ts === "string") : [];
+}
+
+function readLocal(): LogEntry[] {
   try {
-    const raw = window.localStorage.getItem(DIAG_LOG_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    return asEntries(window.localStorage.getItem(DIAG_LOG_KEY));
   } catch {
     return [];
   }
+}
+
+/** The on-send runtime's roamingSettings mirror (classic Outlook path). */
+function readMirror(): LogEntry[] {
+  try {
+    return asEntries(storage().get(DIAG_MIRROR_KEY));
+  } catch {
+    return [];
+  }
+}
+
+type OfficeRuntimeStorageLike = {
+  getItem(key: string): Promise<string | null>;
+  getItems(keys: string[]): Promise<Record<string, string | null>>;
+};
+
+function officeStorage(): OfficeRuntimeStorageLike | undefined {
+  try {
+    const g = globalThis as unknown as { OfficeRuntime?: { storage?: OfficeRuntimeStorageLike } };
+    const s = g.OfficeRuntime?.storage;
+    return s && typeof s.getItems === "function" ? s : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readOfficeStorage(): Promise<{ entries: LogEntry[]; enteredAt?: string }> {
+  const s = officeStorage();
+  if (!s) return { entries: [] };
+  try {
+    const items = await Promise.race([
+      s.getItems([DIAG_LOG_KEY, ON_SEND_ENTRY_KEY]),
+      new Promise<Record<string, string | null>>((resolve) => setTimeout(() => resolve({}), 800)),
+    ]);
+    return { entries: asEntries(items[DIAG_LOG_KEY]), enteredAt: items[ON_SEND_ENTRY_KEY] ?? undefined };
+  } catch {
+    return { entries: [] };
+  }
+}
+
+function merge(...lists: LogEntry[][]): LogEntry[] {
+  const seen = new Set<string>();
+  const out: LogEntry[] = [];
+  for (const list of lists) {
+    for (const e of list) {
+      const k = `${e.ts}|${e.source}|${e.message}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(e);
+    }
+  }
+  out.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  return out.length > MAX_ENTRIES ? out.slice(-MAX_ENTRIES) : out;
 }
 
 function write(entries: LogEntry[]): void {
@@ -83,19 +155,55 @@ export function logEvent(
       message: message.length > MAX_MESSAGE_LEN ? message.slice(0, MAX_MESSAGE_LEN) + "…" : message,
     };
     if (data) entry.data = data;
-    write(trim([...read(), entry]));
+    write(trim([...readLocal(), entry]));
   } catch {
     // Logging must never throw into caller logic.
   }
 }
 
+/** Synchronous view: this runtime's localStorage log + the on-send mirror. */
 export function getEvents(): LogEntry[] {
-  return read();
+  return merge(readLocal(), readMirror());
+}
+
+/** Everything getEvents() sees plus OfficeRuntime.storage (classic Outlook
+ *  on-send runs), when the host lets this runtime read it. */
+export async function getEventsAsync(): Promise<LogEntry[]> {
+  const office = await readOfficeStorage();
+  return merge(readLocal(), readMirror(), office.entries);
+}
+
+/** When the on-send handler last started (ISO), from whichever store it
+ *  could reach: localStorage (browser runtimes), roamingSettings or
+ *  OfficeRuntime.storage (classic Outlook). */
+export async function getOnSendLastEntered(): Promise<string | undefined> {
+  const candidates: string[] = [];
+  try {
+    const v = window.localStorage.getItem(ON_SEND_ENTRY_KEY);
+    if (v) candidates.push(v);
+  } catch {
+    /* ignore */
+  }
+  try {
+    const v = storage().get<string>(ON_SEND_ENTRY_KEY);
+    if (typeof v === "string" && v) candidates.push(v);
+  } catch {
+    /* ignore */
+  }
+  const office = await readOfficeStorage();
+  if (office.enteredAt) candidates.push(office.enteredAt);
+  if (!candidates.length) return undefined;
+  return candidates.sort()[candidates.length - 1];
 }
 
 export function clearEvents(): void {
   try {
     window.localStorage.removeItem(DIAG_LOG_KEY);
+  } catch {
+    /* swallow */
+  }
+  try {
+    void storage().remove(DIAG_MIRROR_KEY).catch(() => undefined);
   } catch {
     /* swallow */
   }
@@ -135,7 +243,7 @@ function officeFacts(): Record<string, unknown> {
   try {
     const d = Office.context?.diagnostics;
     const req = Office.context?.requirements;
-    const sets = ["1.8", "1.10", "1.13", "1.14"].filter((v) => {
+    const sets = ["1.8", "1.10", "1.13", "1.14", "1.15"].filter((v) => {
       try {
         return req?.isSetSupported("Mailbox", v);
       } catch {
@@ -154,7 +262,7 @@ function officeFacts(): Record<string, unknown> {
 }
 
 /** Plain-text support report: environment, tenant/agent, recorded context, recent log. */
-export function buildDiagnosticsReport(): string {
+export function buildDiagnosticsReport(events: LogEntry[] = getEvents()): string {
   const cfg = getConfig();
   const agent = getCachedClientCache()?.agent;
   let installedMv: string | null = null;
@@ -176,7 +284,7 @@ export function buildDiagnosticsReport(): string {
     ...Object.entries(context).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`),
     "",
     "recent log (oldest first):",
-    ...read()
+    ...events
       .slice(-80)
       .map((e) => `  ${e.ts} [${e.level}] [${e.source}] ${e.message}${e.data?.error ? ` — ${String(e.data.error)}` : ""}`),
   ];
@@ -184,8 +292,8 @@ export function buildDiagnosticsReport(): string {
 }
 
 /** Trigger a browser download of the current log as JSON. */
-export function downloadEvents(): void {
-  const blob = new Blob([JSON.stringify(read(), null, 2)], { type: "application/json" });
+export function downloadEvents(events: LogEntry[] = getEvents()): void {
+  const blob = new Blob([JSON.stringify(events, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

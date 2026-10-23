@@ -25,6 +25,8 @@ import type { HaloTicketType } from "@iusehalo/halo-api";
 import { MANIFEST_VERSION } from "../setup/version";
 import {
   getEvents,
+  getEventsAsync,
+  getOnSendLastEntered,
   clearEvents,
   downloadEvents,
   type LogEntry,
@@ -136,6 +138,7 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [events, setEvents] = useState<LogEntry[]>(() => getEvents());
+  const [onSendEntered, setOnSendEntered] = useState<string | undefined>();
   const [copyStatus, setCopyStatus] = useState<string | undefined>();
   const [mcpCopyStatus, setMcpCopyStatus] = useState<string | undefined>();
   const mcpUrl =
@@ -156,20 +159,33 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
   // (notably the launch-event handler firing on Send) appear live without the
   // user having to click Refresh. Cheap — read is a JSON.parse off a small
   // localStorage key.
+  // The async read also merges OfficeRuntime.storage (classic Outlook's
+  // on-send runtime, when the host lets the pane read it) and the on-send
+  // entry marker from every store.
   useEffect(() => {
-    const tick = () => {
-      const next = getEvents();
+    let cancelled = false;
+    const tick = async () => {
+      const [next, entered] = await Promise.all([getEventsAsync(), getOnSendLastEntered()]);
+      if (cancelled) return;
+      setOnSendEntered(entered);
       setEvents((prev) =>
         prev.length === next.length && prev[prev.length - 1]?.ts === next[next.length - 1]?.ts
           ? prev
           : next,
       );
     };
-    const handle = window.setInterval(tick, 1000);
-    return () => window.clearInterval(handle);
+    void tick();
+    const handle = window.setInterval(() => void tick(), 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(handle);
+    };
   }, []);
 
-  const refreshEvents = () => setEvents(getEvents());
+  const refreshEvents = () => {
+    void getEventsAsync().then(setEvents);
+    void getOnSendLastEntered().then(setOnSendEntered);
+  };
   const handleCopyEvents = async () => {
     try {
       await navigator.clipboard.writeText(JSON.stringify(events, null, 2));
@@ -195,7 +211,7 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
   };
   const handleCopyReport = async () => {
     try {
-      await navigator.clipboard.writeText(buildDiagnosticsReport());
+      await navigator.clipboard.writeText(buildDiagnosticsReport(events));
       setReportCopyStatus("Report copied — paste it into your support message");
     } catch {
       setReportCopyStatus("Copy failed — use Download below instead");
@@ -409,25 +425,18 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
               {reportCopyStatus}
             </Text>
           )}
-          {/* Raw on-send entry tracer. Written by launchevent.js directly via
-              localStorage.setItem as the FIRST statement of the handler, before
-              any closure-captured helper is touched. If this shows a timestamp
-              but the diagnostic log doesn't have a "handler entered" entry, the
-              shared logEvent path is broken in the on-send runtime context. If
-              it shows "—" after a send attempt, the handler genuinely never
-              ran — narrowing the issue to Office.js dispatch, not our code. */}
+          {/* Raw on-send entry tracer. Written by launchevent.js as the FIRST
+              statement of the handler (localStorage in browser runtimes; the
+              roamingSettings / OfficeRuntime.storage mirror in classic Outlook,
+              persisted when the run ends). If this shows a timestamp but the
+              log has no "handler entered" entry, the logging path is broken in
+              the on-send runtime. If it shows "—" after a send attempt, the
+              handler genuinely never ran — the problem is Outlook's dispatch
+              or script download, not our code. In classic Outlook, reopen this
+              pane after sending: roamingSettings is loaded once per pane. */}
           <Text block className={styles.meta} style={{ marginTop: 4 }}>
             On-send handler last entered:{" "}
-            <code>
-              {(() => {
-                try {
-                  const ts = window.localStorage.getItem("halo.onSendEntry.v1");
-                  return ts ? new Date(ts).toLocaleTimeString() : "—";
-                } catch {
-                  return "—";
-                }
-              })()}
-            </code>
+            <code>{onSendEntered ? new Date(onSendEntered).toLocaleString() : "—"}</code>
           </Text>
           {events.length > 0 && (
             <div className={styles.diagList}>
@@ -465,7 +474,7 @@ export function SettingsScreen({ onClose, onSignOut, onReconfigure }: Props) {
             <Button
               appearance="subtle"
               size="small"
-              onClick={downloadEvents}
+              onClick={() => downloadEvents(events)}
               disabled={events.length === 0}
             >
               Download

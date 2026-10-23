@@ -78,6 +78,36 @@ Email-to-ticket threading uses RFC 5322 headers — no Halo custom fields, no ad
   2. Action `outcome` strings are tenant-configurable (`"Email Received"` is the assumed default).
   Halo also reports partial failures on a 200 via `_warning` on the returned record — always surface it.
   If something breaks at runtime, try the alternates before assuming a deeper bug.
+- **The on-send handler runs in TWO runtimes; classic Outlook's has no
+  localStorage.** `apps/outlook/public/launchevent.js` is loaded as a plain
+  script by classic Outlook on Windows into a JavaScript-only runtime (no
+  `window`, no DOM/`DOMParser`, no `localStorage`/cookies, no imports, no
+  relative fetch URLs; Microsoft: "Runtimes in Office Add-ins"); Outlook on
+  the web / new Outlook load `launchevent.html` in a browser runtime. So:
+  anything the task pane prepares for the handler (agent/control/mailbox
+  snapshots) goes through the halo-api storage adapter = roamingSettings
+  (`writeSnapshot` in `api.ts`; the handler reads it fresh every run), and the
+  handler's diagnostics are persisted to a bounded roamingSettings mirror +
+  `OfficeRuntime.storage` before `event.completed()` (`diagnostics.ts` merges
+  them). Never add a `window.localStorage` read to the handler path. Keep the
+  file ES2016-safe. Classic caches the script as `bundle.js` under
+  `%LOCALAPPDATA%\Microsoft\Office\16.0\Wef\...\Javascript\` and refreshes it on
+  Outlook restart; `/.well-known/microsoft-officeaddins-allowed.json` must list
+  the script URL or cross-origin fetch is refused (nginx.conf emits it).
+- **Domain → client is exact and unique, never "first search result".**
+  Halo's `/Client?search=` and `/Users?search=` are contains-matches. The only
+  accepted evidence that a domain belongs to a client is (1) every contact on
+  that exact domain sharing one `client_id`, else (2) exactly one client record
+  with that exact domain configured (`findClientByDomain` / `pickClientByDomain`
+  in `api.ts`, mirrored in `launchevent.js`). No match → log nothing. A
+  substring fallback once logged mail.com senders to a gmail.com client.
+- **Create-on-send is ONE write.** `POST /api/Ticket` with the email fields
+  creates the ticket AND its initial action; appending the same note again
+  afterwards double-logs it. Timer/charge rate ride on the ticket payload.
+- **Never complete the send event with a Halo write in flight.** The
+  handler's 4 s safety covers only the lookup phase; once a POST starts the
+  budget is 25 s and the event completes after the write (and marker clear)
+  finishes. Ending the runtime mid-write is what produced half-logged tickets.
 - **Office.js loads from MS CDN**, not from npm. The `<script>` tag in `index.html` and `auth/callback.html` pulls it. `@types/office-js` provides the TS types.
 - **Office Dialog API for OAuth.** `displayDialogAsync` requires HTTPS even for localhost dev, and the initial URL must be on the add-in's own origin. We wrap third-party authorize URLs in a same-origin `/outlook/auth/start.html` bounce page.
 - **Dialog cross-domain redirects → `validDomains`.** Once the OAuth dialog opens, every redirect it follows must stay within domains listed in `validDomains`. If a tenant's Halo uses Azure AD / Google / Okta SSO, the authorize endpoint redirects through `login.microsoftonline.com` etc. — those need to be in `validDomains` or Outlook kills the dialog with the generic "this add-in could not be started" error. Template lists Microsoft + Google by default; admins on Okta / Auth0 / custom SAML need to either add their SSO domain to the manifest or sign in to Halo directly in a separate tab first so the authorize endpoint short-circuits without an SSO bounce.

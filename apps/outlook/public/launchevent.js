@@ -10,83 +10,427 @@
 // - We have ~5 minutes to call event.completed() or the send is cancelled.
 // - We always allow the send to proceed; Halo append failure is non-fatal.
 //
-// Diagnostics: every stage appends to a localStorage log ("halo.diagLog.v1")
-// which the task pane's Settings → Diagnostics panel reads and polls. We use
-// localStorage (not roamingSettings) because roamingSettings is loaded once
-// per runtime and never refreshed — so the task pane couldn't see entries
-// the launch-event runtime wrote after the task pane opened. localStorage
-// is synchronous and shared across all same-origin runtimes.
-// Stays in lock-step with apps/outlook/src/lib/diagnostics.ts (same key,
-// same entry shape).
+// TWO RUNTIMES, ONE FILE. Outlook on the web / new Outlook on Windows load
+// launchevent.html (a browser runtime: DOM, window, localStorage). Classic
+// Outlook on Windows loads THIS FILE directly into a JavaScript-only runtime:
+// no window, no DOM, no localStorage, no cookies, no DOMParser (Microsoft:
+// "Runtimes in Office Add-ins"). Everything here must work in both, so:
+//   - inputs the task pane prepares for us (agent/control/mailbox snapshots)
+//     are read from Office.context.roamingSettings — the one store both
+//     runtimes share and that a fresh on-send runtime loads at start;
+//   - the diagnostics log is kept in memory for the run and persisted before
+//     event.completed(): to localStorage when it exists, to
+//     OfficeRuntime.storage when it exists, and always to a bounded
+//     roamingSettings mirror the task pane reads back (see
+//     apps/outlook/src/lib/diagnostics.ts — same keys, same entry shape);
+//   - no imports, no async/await, no relative fetch URLs, no DOM APIs.
 
 (function () {
   var TOKENS_KEY = "halo.tokens.v1";
   var CONFIG_KEY = "halo.tenantConfig.v1";
   var TICKET_PROP = "haloLogTicketId";
   // Stage props written by the compose pane. PENDING_CREATE_PROP is JSON
-  // {summary, ticketTypeId} — when present, we POST /api/Ticket first,
-  // then append the action to the new ticket. TIMER + CHARGE_RATE feed
-  // timetaken (decimal hours) and chargerate on the action.
+  // {summary, ticketTypeId} — when present, we POST /api/Ticket carrying the
+  // email as the ticket's initial action (ONE write — no follow-up append).
+  // TIMER + CHARGE_RATE feed timetaken (decimal hours) and chargerate.
   var PENDING_CREATE_PROP = "haloLogPendingCreate";
   var TIMER_TIME_PROP = "haloComposeTimeSeconds";
   var CHARGE_RATE_PROP = "haloComposeChargeRateId";
   var DIAG_LOG_KEY = "halo.diagLog.v1";
+  // Bounded mirror of the on-send log in roamingSettings (the task pane merges
+  // it into its diagnostics view). Small on purpose: roamingSettings has a
+  // ~32 KB cap shared with tokens + config.
+  var DIAG_MIRROR_KEY = "halo.diagLogOnSend.v1";
+  var ON_SEND_ENTRY_KEY = "halo.onSendEntry.v1";
   var DEFAULTS_KEY = "halo.defaults.v1";
+  var AGENT_SNAPSHOT_KEY = "halo.agentSnapshot.v1";
   var CONTROL_SNAPSHOT_KEY = "halo.controlSnapshot.v1";
   var MAILBOX_SNAPSHOT_KEY = "halo.mailboxSnapshot.v1";
   // Shorter per-request budget for the auto-lookup path so that two sequential
   // calls (user search → ticket list) still finish well inside SAFETY_MS.
   var AUTO_LOOKUP_FETCH_MS = 1500;
   var MAX_ENTRIES = 200;
+  var MIRROR_ENTRIES = 40;
+  var MIRROR_BYTES = 8000;
   var MAX_MESSAGE_LEN = 500;
   var MAX_BYTES = 64000;
 
-  // Outer safety: must fire BEFORE Outlook's own "taking longer than expected"
-  // prompt — which the office-js issue tracker confirms appears at 5 seconds
-  // on Outlook on the web (issue #3180). Anything ≥5s means the user sees
-  // Outlook's generic dialog instead of our diagnostic errorMessage.
+  // Budgets. The LOOKUP phase (custom props, body/subject reads, auto-lookup)
+  // is bounded by SAFETY_MS: if it hasn't produced a target by then we let the
+  // send go without logging — nothing has been written, so nothing is left
+  // half-done. Once a WRITE to Halo starts the budget switches to
+  // WRITE_BUDGET_MS and the event is never completed with a write in flight:
+  // ending the runtime mid-POST is what leaves a created ticket without its
+  // marker cleared (double log on re-send) or an action without its ticket.
+  // Outlook's own "taking longer than expected" progress dialog may appear
+  // after ~5 s on the web; that is a progress prompt, not a failure, and the
+  // hard limit is 300 s. Writes normally finish in 1–2 s.
   var SAFETY_MS = 4000;
-  // Per-fetch budget — token refresh and Action POST. AbortController turns a
-  // hung CORS preflight into a real catchable error. Kept under SAFETY_MS so
-  // a network failure surfaces through our .catch path, not the outer safety.
+  var WRITE_BUDGET_MS = 25000;
+  // Per-fetch budgets. Writes get more room than lookups; AbortController
+  // (when available) turns a hung CORS preflight into a catchable error.
   var FETCH_TIMEOUT_MS = 3000;
+  var WRITE_FETCH_TIMEOUT_MS = 8000;
+  var TOKEN_FETCH_TIMEOUT_MS = 5000;
+  // How long finish() waits for the diagnostics mirror to persist before
+  // completing the event anyway.
+  var PERSIST_WAIT_MS = 1500;
+
+  // ---------- Environment probes ----------
+
+  function hasLocalStorage() {
+    try {
+      return typeof window !== "undefined" && !!window.localStorage &&
+        typeof window.localStorage.getItem === "function";
+    } catch (e) { return false; }
+  }
+
+  function officeStorage() {
+    try {
+      if (typeof OfficeRuntime !== "undefined" && OfficeRuntime.storage &&
+          typeof OfficeRuntime.storage.setItem === "function") {
+        return OfficeRuntime.storage;
+      }
+    } catch (e) { /* not available in this runtime */ }
+    return null;
+  }
 
   function getRoaming() {
     try { return Office.context.roamingSettings; } catch (e) { return null; }
   }
 
-  function getTokens() {
-    var rs = getRoaming();
-    return rs ? rs.get(TOKENS_KEY) : undefined;
-  }
-
-  function getConfig() {
-    var rs = getRoaming();
-    return rs ? rs.get(CONFIG_KEY) : undefined;
-  }
-
-  function getDefaults() {
+  // roamingSettings values may be stored as objects (the halo-api adapter
+  // stores objects as-is) or as JSON strings (older writers). Accept both.
+  function roamingGet(key) {
     try {
       var rs = getRoaming();
-      return (rs && rs.get(DEFAULTS_KEY)) || {};
-    } catch (e) { return {}; }
+      if (!rs) return undefined;
+      var v = rs.get(key);
+      if (typeof v === "string") {
+        try { return JSON.parse(v); } catch (e) { return v; }
+      }
+      return v;
+    } catch (e) { return undefined; }
   }
+
+  function localGet(key) {
+    if (!hasLocalStorage()) return undefined;
+    try {
+      var raw = window.localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : undefined;
+    } catch (e) { return undefined; }
+  }
+
+  // Snapshot reads: roamingSettings first (written by the task pane through
+  // the halo-api storage adapter; readable in BOTH runtimes), localStorage
+  // as a fallback for browser runtimes paired with an older task pane build.
+  function readSnapshot(key, fallback) {
+    var v = roamingGet(key);
+    if (v === undefined || v === null) v = localGet(key);
+    return (v === undefined || v === null) ? fallback : v;
+  }
+
+  function getTokens() { return roamingGet(TOKENS_KEY); }
+  function getConfig() { return roamingGet(CONFIG_KEY); }
+  function getDefaults() { return readSnapshot(DEFAULTS_KEY, {}) || {}; }
+  function getAgentSnapshot() { return readSnapshot(AGENT_SNAPSHOT_KEY, {}) || {}; }
+  function getControlSnapshot() { return readSnapshot(CONTROL_SNAPSHOT_KEY, {}) || {}; }
+  function getMailboxSnapshot() {
+    var arr = readSnapshot(MAILBOX_SNAPSHOT_KEY, []);
+    return Object.prototype.toString.call(arr) === "[object Array]" ? arr : [];
+  }
+
+  // ---------- Diagnostics ----------
+  //
+  // Entries accumulate in memory for this run. In a browser runtime they are
+  // also appended synchronously to the shared localStorage log (visible live
+  // in the task pane). persistDiagnostics() — awaited by finish() — writes the
+  // run's entries to OfficeRuntime.storage (when the runtime has it) and to
+  // the bounded roamingSettings mirror, so classic Outlook's JavaScript-only
+  // runtime (no localStorage) still leaves a trail the task pane can show.
+
+  var runEntries = [];
+  var persistStarted = false;
+
+  function truncate(message) {
+    if (typeof message !== "string") message = String(message);
+    return message.length > MAX_MESSAGE_LEN ? message.slice(0, MAX_MESSAGE_LEN) + "…" : message;
+  }
+
+  function trimEntries(arr, maxEntries, maxBytes) {
+    if (arr.length > maxEntries) arr = arr.slice(-maxEntries);
+    while (arr.length > 1 && JSON.stringify(arr).length > maxBytes) arr = arr.slice(1);
+    return arr;
+  }
+
+  function appendLocal(entry) {
+    if (!hasLocalStorage()) return;
+    try {
+      var raw = window.localStorage.getItem(DIAG_LOG_KEY);
+      var arr = raw ? JSON.parse(raw) : [];
+      if (Object.prototype.toString.call(arr) !== "[object Array]") arr = [];
+      arr.push(entry);
+      window.localStorage.setItem(DIAG_LOG_KEY, JSON.stringify(trimEntries(arr, MAX_ENTRIES, MAX_BYTES)));
+    } catch (e) { /* quota / private mode — never throw into the handler */ }
+  }
+
+  function logEvent(level, message, data) {
+    var entry = { ts: new Date().toISOString(), level: level, source: "on-send", message: truncate(message) };
+    if (data) entry.data = data;
+    runEntries.push(entry);
+    appendLocal(entry);
+    try { console.log("[halo-on-send]", level, message, data || ""); } catch (e) {}
+  }
+
+  // Persist this run's entries where the task pane can find them. Resolves
+  // when done or after PERSIST_WAIT_MS, never rejects.
+  function persistDiagnostics(enteredAt) {
+    if (persistStarted) return Promise.resolve();
+    persistStarted = true;
+    var entries = trimEntries(runEntries.slice(), MIRROR_ENTRIES, MIRROR_BYTES);
+    var jobs = [];
+
+    var ost = officeStorage();
+    if (ost) {
+      jobs.push(new Promise(function (resolve) {
+        try {
+          ost.getItem(DIAG_LOG_KEY).then(function (raw) {
+            var arr = [];
+            try { arr = raw ? JSON.parse(raw) : []; } catch (e) { arr = []; }
+            if (Object.prototype.toString.call(arr) !== "[object Array]") arr = [];
+            arr = trimEntries(arr.concat(runEntries), MAX_ENTRIES, MAX_BYTES);
+            var items = {};
+            items[DIAG_LOG_KEY] = JSON.stringify(arr);
+            if (enteredAt) items[ON_SEND_ENTRY_KEY] = enteredAt;
+            return ost.setItems(items);
+          }).then(function () { resolve(); }, function () { resolve(); });
+        } catch (e) { resolve(); }
+      }));
+    }
+
+    var rs = getRoaming();
+    if (rs) {
+      jobs.push(new Promise(function (resolve) {
+        try {
+          rs.set(DIAG_MIRROR_KEY, entries);
+          if (enteredAt) rs.set(ON_SEND_ENTRY_KEY, enteredAt);
+          rs.saveAsync(function () { resolve(); });
+        } catch (e) { resolve(); }
+      }));
+    }
+
+    if (!jobs.length) return Promise.resolve();
+    return new Promise(function (resolve) {
+      var done = false;
+      var timer = setTimeout(function () { if (!done) { done = true; resolve(); } }, PERSIST_WAIT_MS);
+      Promise.all(jobs).then(function () {
+        if (!done) { done = true; clearTimeout(timer); resolve(); }
+      }, function () {
+        if (!done) { done = true; clearTimeout(timer); resolve(); }
+      });
+    });
+  }
+
+  // Module-load breadcrumb. In a browser runtime this lands in localStorage
+  // immediately; in classic Outlook it is carried in memory until the handler
+  // runs and persists the run (there is no storage to write to before that).
+  logEvent("info", "launchevent.js module loaded", {
+    localStorage: hasLocalStorage(), officeRuntimeStorage: !!officeStorage(),
+  });
+
+  // Signal to Office.js that the add-in has finished its load sequence. In
+  // browser runtimes, without this Office.js stays in a partial-init state and
+  // the dispatcher throws "Office.js has not fully loaded" when Outlook fires
+  // messageSending. Microsoft's smart-alerts-onmessagesend sample calls
+  // Office.onReady() at the top of launchevent.js for exactly this reason.
+  // (Classic Outlook never runs onReady callbacks for event handlers; the
+  // call is harmless there.)
+  if (typeof Office !== "undefined" && typeof Office.onReady === "function") {
+    try {
+      Office.onReady();
+      logEvent("info", "Office.onReady() called");
+    } catch (e) {
+      logEvent("error", "Office.onReady() threw: " + (e && e.message ? e.message : String(e)));
+    }
+  } else {
+    logEvent("error", "Office or Office.onReady unavailable at module load");
+  }
+
+  // ---------- Fetch helpers ----------
+
+  // Wrap fetch with an AbortController-driven timeout. Rejects with a tagged
+  // error if the request runs longer than ms — covers hung CORS preflights.
+  function fetchWithTimeout(url, init, ms) {
+    var ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+    var initWithSignal = {};
+    var k;
+    for (k in (init || {})) if (Object.prototype.hasOwnProperty.call(init, k)) initWithSignal[k] = init[k];
+    if (ctrl) initWithSignal.signal = ctrl.signal;
+    var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, ms);
+    return fetch(url, initWithSignal).then(
+      function (r) { clearTimeout(timer); return r; },
+      function (e) {
+        clearTimeout(timer);
+        var msg = (e && e.name === "AbortError")
+          ? ("Halo request timed out after " + ms + "ms (network/CORS)")
+          : ("fetch failed: " + (e && e.message ? e.message : String(e)));
+        throw new Error(msg);
+      }
+    );
+  }
+
+  // application/x-www-form-urlencoded body without URLSearchParams (not
+  // guaranteed in the JavaScript-only runtime).
+  function formEncode(obj) {
+    var parts = [];
+    var k;
+    for (k in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, k) && obj[k] != null) {
+        parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(String(obj[k])));
+      }
+    }
+    return parts.join("&");
+  }
+
+  function getAccessToken() {
+    var tokens = getTokens();
+    var cfg = getConfig();
+    if (!tokens || !cfg) return Promise.reject(new Error("Not authenticated (no tokens/config in roamingSettings)"));
+    if (Date.now() < tokens.expiresAt - 60000) return Promise.resolve(tokens.accessToken);
+
+    logEvent("info", "refreshing access token");
+    return fetchWithTimeout(cfg.haloBaseUrl + "/auth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: formEncode({
+        grant_type: "refresh_token",
+        refresh_token: tokens.refreshToken,
+        client_id: cfg.clientId,
+      }),
+    }, TOKEN_FETCH_TIMEOUT_MS)
+      .then(function (r) {
+        if (!r.ok) throw new Error("Token refresh failed " + r.status);
+        return r.json();
+      })
+      .then(function (json) {
+        var fresh = {
+          accessToken: json.access_token,
+          refreshToken: json.refresh_token || tokens.refreshToken,
+          expiresAt: Date.now() + json.expires_in * 1000,
+          scope: json.scope,
+        };
+        var rs = getRoaming();
+        if (rs) {
+          rs.set(TOKENS_KEY, fresh);
+          rs.saveAsync(function () {});
+        }
+        return fresh.accessToken;
+      });
+  }
+
+  // ---------- Pure helpers (also exported for tests, see bottom) ----------
 
   function domainOf(email) {
-    var at = email.lastIndexOf("@");
-    return at >= 0 ? email.slice(at + 1).toLowerCase() : "";
+    var at = String(email || "").lastIndexOf("@");
+    return at >= 0 ? String(email).slice(at + 1).toLowerCase().trim() : "";
   }
 
+  // Email domains configured on a Halo client record, if any. Halo exposes
+  // the client's domain under different names across versions/endpoints and
+  // the value may hold several domains separated by , ; or whitespace. Every
+  // candidate field is read; the match below is EXACT equality — never a
+  // substring test (mail.com must not match gmail.com).
+  var CLIENT_DOMAIN_FIELDS = ["emaildomain", "client_email_address_domain", "emaildomains", "todomain"];
+
+  function clientDomains(client) {
+    var out = [];
+    if (!client) return out;
+    for (var i = 0; i < CLIENT_DOMAIN_FIELDS.length; i++) {
+      var raw = client[CLIENT_DOMAIN_FIELDS[i]];
+      if (typeof raw !== "string" || !raw) continue;
+      var parts = raw.toLowerCase().split(/[\s,;]+/);
+      for (var j = 0; j < parts.length; j++) {
+        var d = parts[j].replace(/^@/, "").trim();
+        if (d && out.indexOf(d) < 0) out.push(d);
+      }
+    }
+    return out;
+  }
+
+  // The ONE client whose configured domains contain `domain` exactly, or null
+  // when none or several do. Never falls back to the first search result.
+  function matchClientByDomain(clients, domain) {
+    var d = String(domain || "").toLowerCase().trim();
+    if (!d) return null;
+    var found = null;
+    var count = 0;
+    for (var i = 0; i < (clients || []).length; i++) {
+      var c = clients[i];
+      if (!c || c.inactive) continue;
+      if (clientDomains(c).indexOf(d) >= 0) {
+        count++;
+        if (count === 1) found = c;
+      }
+    }
+    return count === 1 ? found : null;
+  }
+
+  // The ONE client_id shared by every Halo contact whose email domain is
+  // exactly `domain`, or null when there are no such contacts or they belong
+  // to several clients. This is the primary domain → client signal: it relies
+  // only on contact email addresses, which Halo always returns.
+  function clientIdFromUsers(users, domain) {
+    var d = String(domain || "").toLowerCase().trim();
+    if (!d) return null;
+    var ids = [];
+    for (var i = 0; i < (users || []).length; i++) {
+      var u = users[i];
+      if (!u || u.inactive || !u.emailaddress) continue;
+      if (domainOf(u.emailaddress) !== d) continue;
+      var cid = Number(u.client_id);
+      if (!cid) continue;
+      if (ids.indexOf(cid) < 0) ids.push(cid);
+    }
+    return ids.length === 1 ? ids[0] : null;
+  }
+
+  function exactUserByEmail(users, email) {
+    var e = String(email || "").toLowerCase().trim();
+    for (var i = 0; i < (users || []).length; i++) {
+      var u = users[i];
+      if (u && u.emailaddress && String(u.emailaddress).toLowerCase().trim() === e) return u;
+    }
+    return null;
+  }
+
+  function unwrapList(json, key) {
+    if (Object.prototype.toString.call(json) === "[object Array]") return json;
+    return (json && json[key]) || [];
+  }
+
+  // ---------- Auto-lookup ----------
+
   // Resolve To: recipients to a single open Halo ticket, or null when there
-  // are zero or multiple matches (ambiguous — don't auto-log).
-  // Strategy: search for a Halo user by email, fall back to client by domain,
-  // then list open tickets for the found entity. Fan out in parallel across
-  // recipients; dedupe results. Returns Promise<number|null>.
+  // are zero or multiple matches (ambiguous — don't auto-log). Per recipient:
+  // exact contact by email → that contact's open tickets; otherwise the ONE
+  // client the recipient's domain belongs to (via other contacts on that
+  // domain, else an exact domain configured on a client record) → that
+  // client's open tickets. Anything ambiguous yields nothing: logging an
+  // email to the wrong client's ticket is the failure we must never risk.
   function autoFindTicketForRecipients(toEmails) {
     if (!toEmails || toEmails.length === 0) return Promise.resolve(null);
     return getAccessToken().then(function (token) {
       var cfg = getConfig();
       var hdrs = { "Authorization": "Bearer " + token, "Accept": "application/json" };
+
+      function getJson(url) {
+        return fetchWithTimeout(url, { headers: hdrs }, AUTO_LOOKUP_FETCH_MS)
+          .then(function (r) { return r.ok ? r.json() : null; });
+      }
+      function openTickets(qs) {
+        return getJson(cfg.haloBaseUrl + "/api/Tickets?" + qs + "&open_only=true&pageinate=false&includedetails=true&domain=all")
+          .then(function (json) { return unwrapList(json, "tickets"); });
+      }
 
       // Cap at 3 recipients to stay within the time budget.
       var limited = toEmails.slice(0, 3);
@@ -94,73 +438,33 @@
       return Promise.all(limited.map(function (email) {
         var domain = domainOf(email);
 
-        // 1. User lookup by email.
-        return fetchWithTimeout(
-          cfg.haloBaseUrl + "/api/Users?search=" + encodeURIComponent(email) + "&pageinate=false",
-          { headers: hdrs },
-          AUTO_LOOKUP_FETCH_MS
-        ).then(function (r) {
-          return r.ok ? r.json() : [];
-        }).then(function (json) {
-          var users = Array.isArray(json) ? json : ((json && json.users) || []);
-          var user = null;
-          for (var i = 0; i < users.length; i++) {
-            if (users[i].emailaddress &&
-                users[i].emailaddress.toLowerCase() === email.toLowerCase()) {
-              user = users[i];
-              break;
-            }
-          }
+        // 1. Exact contact by email.
+        return getJson(cfg.haloBaseUrl + "/api/Users?search=" + encodeURIComponent(email) + "&pageinate=false")
+          .then(function (json) {
+            var user = exactUserByEmail(unwrapList(json, "users"), email);
+            if (user && user.id) return openTickets("user_id=" + user.id);
+            if (!domain) return [];
 
-          // 2a. User found → query open tickets by user_id.
-          if (user && user.id) {
-            return fetchWithTimeout(
-              cfg.haloBaseUrl + "/api/Tickets?user_id=" + user.id +
-                "&open_only=true&pageinate=false&includedetails=true&domain=all",
-              { headers: hdrs },
-              AUTO_LOOKUP_FETCH_MS
-            ).then(function (r) {
-              return r.ok ? r.json() : [];
-            }).then(function (json) {
-              return Array.isArray(json) ? json : ((json && json.tickets) || []);
-            });
-          }
-
-          // 2b. No user → client search by domain.
-          if (!domain) return [];
-          return fetchWithTimeout(
-            cfg.haloBaseUrl + "/api/Client?search=" + encodeURIComponent(domain) +
-              "&pageinate=false",
-            { headers: hdrs },
-            AUTO_LOOKUP_FETCH_MS
-          ).then(function (r) {
-            return r.ok ? r.json() : [];
-          }).then(function (json) {
-            var clients = Array.isArray(json) ? json : ((json && json.clients) || []);
-            // Prefer a client whose emaildomain matches; fall back to first result.
-            var client = null;
-            for (var i = 0; i < clients.length; i++) {
-              if (clients[i].emaildomain &&
-                  domain.indexOf(clients[i].emaildomain.toLowerCase()) >= 0) {
-                client = clients[i];
-                break;
-              }
-            }
-            if (!client && clients.length > 0) client = clients[0];
-            if (!client) return [];
-
-            return fetchWithTimeout(
-              cfg.haloBaseUrl + "/api/Tickets?client_id=" + client.id +
-                "&open_only=true&pageinate=false&includedetails=true&domain=all",
-              { headers: hdrs },
-              AUTO_LOOKUP_FETCH_MS
-            ).then(function (r) {
-              return r.ok ? r.json() : [];
-            }).then(function (json) {
-              return Array.isArray(json) ? json : ((json && json.tickets) || []);
-            });
-          });
-        }).catch(function () { return []; });
+            // 2a. Client via other contacts on the same domain (exact, unique).
+            return getJson(cfg.haloBaseUrl + "/api/Users?search=" + encodeURIComponent("@" + domain) + "&pageinate=false")
+              .then(function (json2) {
+                var cid = clientIdFromUsers(unwrapList(json2, "users"), domain);
+                if (cid) return cid;
+                // 2b. Client record with that exact domain configured (unique).
+                return getJson(cfg.haloBaseUrl + "/api/Client?search=" + encodeURIComponent(domain) + "&pageinate=false")
+                  .then(function (json3) {
+                    var client = matchClientByDomain(unwrapList(json3, "clients"), domain);
+                    return client ? client.id : null;
+                  });
+              })
+              .then(function (clientId) {
+                if (!clientId) {
+                  logEvent("info", "auto-lookup: no unique client for domain", { domain: domain });
+                  return [];
+                }
+                return openTickets("client_id=" + clientId);
+              });
+          }).catch(function () { return []; });
       }));
     }).then(function (ticketArrays) {
       var seen = {};
@@ -183,117 +487,7 @@
     });
   }
 
-  // Append a diagnostic entry to the shared cross-runtime log. Synchronous —
-  // no fire-and-forget races, so even an entry written immediately before
-  // event.completed() is durable.
-  function logEvent(level, message, data) {
-    try {
-      var raw = window.localStorage.getItem(DIAG_LOG_KEY);
-      var arr = raw ? JSON.parse(raw) : [];
-      if (!Array.isArray(arr)) arr = [];
-      var entry = {
-        ts: new Date().toISOString(),
-        level: level,
-        source: "on-send",
-        message: message && message.length > MAX_MESSAGE_LEN
-          ? message.slice(0, MAX_MESSAGE_LEN) + "…"
-          : message,
-      };
-      if (data) entry.data = data;
-      arr.push(entry);
-      if (arr.length > MAX_ENTRIES) arr = arr.slice(-MAX_ENTRIES);
-      while (arr.length > 1 && JSON.stringify(arr).length > MAX_BYTES) {
-        arr = arr.slice(1);
-      }
-      window.localStorage.setItem(DIAG_LOG_KEY, JSON.stringify(arr));
-    } catch (e) {
-      // Logging must never throw into the handler path.
-    }
-    // Mirror to console for the dev-tools window if it happens to be open.
-    try { console.log("[halo-on-send]", level, message, data || ""); } catch (e) {}
-  }
-
-  // Module-load breadcrumb. If the diagnostics panel never shows this entry
-  // after a send attempt, the launch-event runtime itself didn't load — that
-  // narrows the problem to manifest registration / Outlook activation rules
-  // rather than anything inside the handler.
-  logEvent("info", "launchevent.js module loaded");
-
-  // Signal to Office.js that the add-in has finished its load sequence.
-  // Without this, Office.js stays in a partial-init state and the iframe's
-  // own dispatcher throws "Office.js has not fully loaded" when Outlook fires
-  // the messageSending event — meaning our (correctly-registered) handler is
-  // never invoked and the Smart Alerts progress dialog hangs forever.
-  // Microsoft's smart-alerts-onmessagesend sample calls Office.onReady() at
-  // the top of launchevent.js for exactly this reason.
-  // Calling with no callback is sufficient — it's the signal that flips the
-  // internal isReady gate, not the awaiting that matters.
-  if (typeof Office !== "undefined" && typeof Office.onReady === "function") {
-    try {
-      Office.onReady();
-      logEvent("info", "Office.onReady() called");
-    } catch (e) {
-      logEvent("error", "Office.onReady() threw: " + (e && e.message ? e.message : String(e)));
-    }
-  } else {
-    logEvent("error", "Office or Office.onReady unavailable at module load");
-  }
-
-  // Wrap fetch with an AbortController-driven timeout. Rejects with a tagged
-  // error if the request runs longer than ms — covers hung CORS preflights.
-  function fetchWithTimeout(url, init, ms) {
-    var ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
-    var initWithSignal = Object.assign({}, init || {});
-    if (ctrl) initWithSignal.signal = ctrl.signal;
-    var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, ms);
-    return fetch(url, initWithSignal).then(
-      function (r) { clearTimeout(timer); return r; },
-      function (e) {
-        clearTimeout(timer);
-        var msg = (e && e.name === "AbortError")
-          ? ("Halo request timed out after " + ms + "ms (network/CORS)")
-          : ("fetch failed: " + (e && e.message ? e.message : String(e)));
-        throw new Error(msg);
-      }
-    );
-  }
-
-  function getAccessToken() {
-    var tokens = getTokens();
-    var cfg = getConfig();
-    if (!tokens || !cfg) return Promise.reject(new Error("Not authenticated (no tokens/config in roamingSettings)"));
-    if (Date.now() < tokens.expiresAt - 60000) return Promise.resolve(tokens.accessToken);
-
-    logEvent("info", "refreshing access token");
-    var body = new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: tokens.refreshToken,
-      client_id: cfg.clientId,
-    });
-    return fetchWithTimeout(cfg.haloBaseUrl + "/auth/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body,
-    }, FETCH_TIMEOUT_MS)
-      .then(function (r) {
-        if (!r.ok) throw new Error("Token refresh failed " + r.status);
-        return r.json();
-      })
-      .then(function (json) {
-        var fresh = {
-          accessToken: json.access_token,
-          refreshToken: json.refresh_token || tokens.refreshToken,
-          expiresAt: Date.now() + json.expires_in * 1000,
-          scope: json.scope,
-        };
-        var rs = getRoaming();
-        if (rs) {
-          rs.set(TOKENS_KEY, fresh);
-          rs.saveAsync(function () {});
-        }
-        return fresh.accessToken;
-      });
-  }
+  // ---------- Office.js item reads ----------
 
   function loadCustomProps() {
     return new Promise(function (resolve, reject) {
@@ -341,27 +535,8 @@
     });
   }
 
-  // Read the control snapshot the task pane wrote after loading /api/Control.
-  // Synchronous, never throws — falls through to {} when not yet written.
-  function getControlSnapshot() {
-    try {
-      var raw = window.localStorage.getItem(CONTROL_SNAPSHOT_KEY);
-      return raw ? JSON.parse(raw) : {};
-    } catch (e) { return {}; }
-  }
-
-  // Inbound Halo intake mailbox addresses (lowercased) the task pane stashed
-  // from ClientCache. Returns [] when unavailable. Used to avoid double-logging:
-  // if a reply goes to one of these, Halo's native intake will log it itself.
-  function getMailboxSnapshot() {
-    try {
-      var raw = window.localStorage.getItem(MAILBOX_SNAPSHOT_KEY);
-      var arr = raw ? JSON.parse(raw) : [];
-      return Object.prototype.toString.call(arr) === "[object Array]" ? arr : [];
-    } catch (e) { return []; }
-  }
-
-  // True when any recipient address is a Halo intake mailbox.
+  // True when any recipient address is a Halo intake mailbox (then Halo's
+  // native intake logs the reply itself — appending here would double-post).
   function recipientsHitHaloMailbox(toList, ccList) {
     var intake = getMailboxSnapshot();
     if (!intake.length) return false;
@@ -374,10 +549,9 @@
 
   // Try to extract a Halo ticket ID from an email subject using the configured
   // email start/end tags (e.g. "[" and "]" wrapping the ticket number).
-  // Reads from the control snapshot — returns a number or null.
-  function extractTicketIdFromSubject(subject) {
+  function extractTicketIdFromSubject(subject, snap) {
     if (!subject) return null;
-    var snap = getControlSnapshot();
+    snap = snap || getControlSnapshot();
     var start = snap.email_start_tag;
     var end = snap.email_end_tag;
     if (!start || !end) return null;
@@ -387,18 +561,7 @@
     return m ? Number(m[1]) : null;
   }
 
-  // Read the agent snapshot the task pane wrote after its ClientCache load.
-  // Synchronous, never throws — falls through to {} when the task pane has
-  // never opened or ClientCache hasn't resolved yet. Used for agent_id
-  // attribution and signature stripping on outbound mail.
-  function getAgentSnapshot() {
-    try {
-      var raw = window.localStorage.getItem("halo.agentSnapshot.v1");
-      return raw ? JSON.parse(raw) : {};
-    } catch (e) {
-      return {};
-    }
-  }
+  // ---------- Body shaping ----------
 
   // Strip a known signature from an HTML body via exact substring match.
   // Falls through to the original body when sig is empty or not present
@@ -410,51 +573,6 @@
     return html.slice(0, i) + html.slice(i + sig.length);
   }
 
-  // Strip the quoted/forwarded portion from an Outlook HTML reply body so
-  // only the agent's new text is logged to Halo. Handles the three most
-  // common quoting patterns:
-  //   • Outlook desktop/OWA: <div id="divRplyFwdMsg"> (+ preceding <hr>)
-  //   • Generic / iOS Mail:  <blockquote> wrapping the quoted thread
-  //   • Gmail:               <div class="gmail_quote">
-  // Falls back to the original html on any error — never blocks the send.
-  function stripQuotedContent(html) {
-    if (!html) return html;
-    try {
-      var parser = new DOMParser();
-      var doc = parser.parseFromString(html, "text/html");
-      var body = doc.body;
-
-      // Outlook reply/forward separator.
-      var rplyDiv = doc.getElementById("divRplyFwdMsg");
-      if (rplyDiv && rplyDiv.parentNode) {
-        var children = Array.from(rplyDiv.parentNode.childNodes);
-        var idx = children.indexOf(rplyDiv);
-        // Pull in a leading <hr> if present so we don't leave a dangling rule.
-        var start = (idx > 0 && children[idx - 1].nodeName === "HR") ? idx - 1 : idx;
-        children.slice(start).forEach(function (n) {
-          if (n.parentNode) n.parentNode.removeChild(n);
-        });
-      }
-
-      // Blockquote-style quoting (iOS Mail, many web clients).
-      Array.from(body.querySelectorAll("blockquote")).forEach(function (el) {
-        if (el.parentNode) el.parentNode.removeChild(el);
-      });
-
-      // Gmail quote wrapper.
-      Array.from(body.querySelectorAll("div.gmail_quote")).forEach(function (el) {
-        if (el.parentNode) el.parentNode.removeChild(el);
-      });
-
-      return body.innerHTML.trim();
-    } catch (e) {
-      return html;
-    }
-  }
-
-  // Minimal HTML → plain text for emailbody field. Same approach as the
-  // task pane's htmlToText helper but inline in ES5 for the launchevent
-  // runtime.
   // Mirrors sanitizeOutlookHtml in apps/outlook/src/lib/html.ts — see the
   // doc comment there for what each pass strips and why. Duplicated here
   // because the launch-event runtime is vanilla JS and can't import the
@@ -481,8 +599,7 @@
 
   // Mirrors extractTopReply in apps/outlook/src/lib/html.ts — keep in sync.
   // Returns only the topmost portion of an email body (above the first quoted-
-  // reply separator). The separator itself is dropped; trailing empty
-  // paragraphs / orphan opening tags from a mid-block cut are trimmed.
+  // reply separator). Regex only: the JavaScript-only runtime has no DOMParser.
   function extractTopReply(html) {
     if (!html) return "";
     var separators = [
@@ -624,8 +741,6 @@
 
   // Defensive wrappers: any failure returns the body untouched so the send
   // is never blocked by the footer.
-  // If the body still carries its </body> wrapper the footer goes inside it,
-  // not after </html> where a document-mode renderer could drop it.
   function appendEnvelopeHtml(bodyHtml, ctx) {
     try {
       var body = bodyHtml || "";
@@ -655,106 +770,138 @@
     };
   }
 
+  // ---------- Halo writes ----------
+
+  function senderIdentity() {
+    var out = { email: "", name: "", mailentryid: "" };
+    try {
+      out.email = Office.context.mailbox.userProfile.emailAddress || "";
+      out.name = Office.context.mailbox.userProfile.displayName || "";
+    } catch (e) { /* fall through with blanks */ }
+    try {
+      // On compose, item.itemId is populated once the draft has been saved
+      // server-side; Outlook saves before firing messageSending, so it is
+      // normally available. If not, the field is omitted and Halo treats it
+      // like native intake without an EntryId.
+      out.mailentryid = Office.context.mailbox.item.itemId || "";
+    } catch (e) { /* swallow */ }
+    return out;
+  }
+
+  // The email as a Halo action body. `note`/`note_html` carry only the agent's
+  // new text (above the first quoted-reply separator, signature stripped) plus
+  // the envelope footer; `emailbody*` keep the full body for parity with
+  // native intake. Shared by the create and append paths so both produce the
+  // same action.
+  function emailActionFields(data, agent, who) {
+    var cleanedBody = sanitizeOutlookHtml(data.body || "");
+    var topHtml = stripSignature(extractTopReply(cleanedBody), agent.signature);
+    var envelope = outboundEnvelope(data, who.name, who.email);
+    var noteHtml = appendEnvelopeHtml(topHtml, envelope);
+    var notePlain = appendEnvelopeText(htmlToText(topHtml), envelope);
+    var fields = {
+      outcome_id: 0,
+      // Outbound by construction (on-send fires while the agent is sending).
+      _isuserupdate: false,
+      // Halo's note (plaintext) + note_html (HTML) convention. Both required.
+      note: notePlain,
+      note_html: noteHtml,
+      emailfrom: who.name || who.email,
+      emailfromname: who.name,
+      emailfromaddress: who.email,
+      // Outbound: emailto is the recipient (the customer).
+      emailto: (data.to || []).join("; "),
+      emailcc: (data.cc || []).join("; "),
+      // Canonical Halo subject — replaces legacy emailsubject.
+      emailsubjectnew: data.subject,
+      emailimportance: getItemImportance(),
+      dateemailed: formatHaloDate(new Date()),
+      // Action-author triplet — agent attribution on outbound (who_type=1).
+      who: agent.name || "",
+      who_agentid: agent.id || -1,
+      who_type: 1,
+      mailentryid: who.mailentryid || undefined,
+      // Direction + delivered-status guard matches Halo's native intake.
+      emaildirection: "O",
+      email_status: 2,
+      emailbody_html: cleanedBody,
+      emailbody: htmlToText(cleanedBody),
+      // Stamp from_address_override with the agent's actual send-from
+      // address; from_mailbox_id: -2 signals "use overridden from address".
+      from_address_override: who.email,
+      from_mailbox_id: -2,
+      // Per-agent sales mailbox setup id, resolved by the task pane and
+      // stamped into the agent snapshot. Undefined → Halo tenant defaults.
+      sales_mailbox_override_id: agent.salesMailboxId || undefined,
+      // Time tracking from the compose timer: raw seconds (capped at 30 min
+      // by the UI) → decimal hours. Omitted when 0 so empty entries don't
+      // pollute Halo's time reports.
+      timetaken: data.timeSeconds > 0 ? Math.max(data.timeSeconds, 60) / 3600 : undefined,
+      chargerate: data.chargeRateId > 0 ? data.chargeRateId : undefined,
+    };
+    return { fields: fields, noteHtml: noteHtml, notePlain: notePlain };
+  }
+
+  function postJson(url, token, payload) {
+    return fetchWithTimeout(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + token,
+      },
+      body: JSON.stringify(payload),
+    }, WRITE_FETCH_TIMEOUT_MS).then(function (r) {
+      if (!r.ok) {
+        return r.text().then(function (t) {
+          throw new Error("Halo " + r.status + ": " + t.slice(0, 200));
+        });
+      }
+      return r.json();
+    });
+  }
+
   /**
-   * Create a ticket from the compose draft + email metadata, return its id.
-   * Used by the on-send create-then-append path when the compose pane
-   * staged a haloLogPendingCreate payload instead of a ticket id.
-   *
-   * Stamps the same email metadata as native intake (emaildirection: "O",
-   * email_status: 2, emailbody_html, mailentryid, etc.) so the resulting
-   * ticket looks identical to one Halo's own intake would have created.
+   * Create a ticket from the compose draft, carrying the email as the ticket's
+   * initial action — the same metadata native intake stamps (emaildirection
+   * "O", email_status 2, emailbody_html, mailentryid…) so the result looks
+   * identical to one Halo's own intake would have created. ONE write: the
+   * ticket POST already produces the action, so nothing is appended afterwards
+   * (appending the same note again is what logged new tickets twice).
    * Validation flags (_novalidate, _forcereassign) bypass required-custom-
-   * field prompts.
+   * field prompts. Returns the new ticket id.
    */
   function createTicketFromPending(pending, data) {
     return getAccessToken().then(function (token) {
       var cfg = getConfig();
       var agent = getAgentSnapshot();
-      var senderEmail = "";
-      var senderName = "";
-      var mailentryid = "";
-      try {
-        senderEmail = Office.context.mailbox.userProfile.emailAddress || "";
-        senderName = Office.context.mailbox.userProfile.displayName || "";
-      } catch (e) { /* swallow */ }
-      try { mailentryid = Office.context.mailbox.item.itemId || ""; } catch (e) { /* swallow */ }
-
-      // Sanitize once and reuse — details + emailbody_html both want the
-      // cleaned HTML, htmlToText runs over the cleaned version too.
-      var cleanedBody = sanitizeOutlookHtml(data.body || "");
-      // Native-intake convention: details (= note for the auto-created action)
-      // gets only the topmost reply; emailbody_html below keeps the full body
-      // including the quoted thread.
-      // Envelope footer (From/To/Cc/Subject) trails the body — see
-      // appendEnvelopeHtml. Same block the task pane appends.
-      var envelope = outboundEnvelope(data, senderName, senderEmail);
-      var topHtml = extractTopReply(cleanedBody);
-      var detailsHtml = appendEnvelopeHtml(topHtml, envelope);
-      var detailsPlain = appendEnvelopeText(htmlToText(topHtml), envelope);
-
-      var payload = [{
+      var who = senderIdentity();
+      var action = emailActionFields(data, agent, who);
+      var payload = {
         summary: pending.summary,
-        details: detailsHtml,
+        // `details` is the ticket body; the initial action takes note/note_html.
+        details: action.noteHtml,
         tickettype_id: pending.ticketTypeId,
-        emailfrom: senderName || senderEmail,
-        emailfromname: senderName,
-        emailfromaddress: senderEmail,
-        // On-send is always outbound: emailto is the recipient (customer).
-        emailto: (data.to || []).join("; "),
-        emailcc: (data.cc || []).join("; "),
-        // Canonical Halo subject — replaces legacy emailsubject.
-        emailsubjectnew: data.subject,
-        emailimportance: getItemImportance(),
-        dateemailed: formatHaloDate(new Date()),
-        outcome_id: 0,
-        // Outbound by construction (on-send fires while the agent is sending).
-        _isuserupdate: false,
-        // Halo's note (plaintext) + note_html (HTML) convention. Both required.
-        note: detailsPlain,
-        note_html: detailsHtml,
-        // Action-author triplet — agent attribution on outbound.
-        who: agent.name || "",
-        who_agentid: agent.id || -1,
-        who_type: 1,
-        mailentryid: mailentryid || undefined,
-        emaildirection: "O",
-        email_status: 2,
-        emailbody_html: cleanedBody,
-        emailbody: htmlToText(cleanedBody),
-        from_address_override: senderEmail,
-        from_mailbox_id: -2,
-        sales_mailbox_override_id: agent.salesMailboxId || undefined,
         agent_id: agent.id || undefined,
         _novalidate: true,
         _forcereassign: true,
-      }];
+      };
+      var k;
+      for (k in action.fields) if (Object.prototype.hasOwnProperty.call(action.fields, k)) payload[k] = action.fields[k];
       logEvent("info", "POST /api/Ticket", {
         summary: pending.summary,
         ticketTypeId: pending.ticketTypeId || null,
+        timeSeconds: data.timeSeconds || 0,
       });
-      return fetchWithTimeout(cfg.haloBaseUrl + "/api/Ticket", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": "Bearer " + token,
-        },
-        body: JSON.stringify(payload),
-      }, FETCH_TIMEOUT_MS).then(function (r) {
-        if (!r.ok) {
-          return r.text().then(function (t) {
-            throw new Error("Halo /Ticket " + r.status + ": " + t.slice(0, 200));
-          });
-        }
-        return r.json();
-      }).then(function (json) {
+      return postJson(cfg.haloBaseUrl + "/api/Ticket", token, [payload]).then(function (json) {
         // Halo's create response shape varies: single object, array of one,
         // or { tickets: [...] }. Pull the id from whichever form arrives.
-        var entity = Array.isArray(json) ? json[0]
+        var entity = Object.prototype.toString.call(json) === "[object Array]" ? json[0]
           : (json && json.tickets && json.tickets[0]) ? json.tickets[0]
           : json;
         if (!entity || typeof entity.id !== "number") {
           throw new Error("Halo /Ticket created OK but response had no id");
         }
+        if (entity._warning) logEvent("warn", "Halo /Ticket warning: " + truncate(String(entity._warning)));
         return entity.id;
       });
     });
@@ -764,148 +911,92 @@
     return getAccessToken().then(function (token) {
       var cfg = getConfig();
       var agent = getAgentSnapshot();
-      var senderEmail = "";
-      var senderName = "";
-      var mailentryid = "";
-      try {
-        senderEmail = Office.context.mailbox.userProfile.emailAddress || "";
-        senderName = Office.context.mailbox.userProfile.displayName || "";
-      } catch (e) {
-        // fall through with blanks
-      }
-      try {
-        // On compose, item.itemId is populated once the draft has been saved
-        // server-side. For sends Outlook saves the item before firing the
-        // messageSending event, so itemId should be available here. If it's
-        // not (older Outlook builds, race), the payload omits the field and
-        // Halo treats it the same as native intake without an EntryId.
-        mailentryid = Office.context.mailbox.item.itemId || "";
-      } catch (e) {
-        /* swallow */
-      }
-      // On-send is always outbound. Note gets only the topmost new content
-      // (above the first quoted-reply separator) with the agent's saved Halo
-      // signature additionally stripped. emailbody_html below keeps the full
-      // body for parity with native intake.
-      // Sanitize first so all downstream patterns see the cleaned HTML.
-      var cleanedBody = sanitizeOutlookHtml(data.body || "");
-      var topHtml = stripSignature(extractTopReply(cleanedBody), agent.signature);
-      // Envelope footer (From/To/Cc/Subject) trails the body — see
-      // appendEnvelopeHtml. Same block the task pane appends.
-      var envelope = outboundEnvelope(data, senderName, senderEmail);
-      var noteHtml = appendEnvelopeHtml(topHtml, envelope);
-      var notePlain = appendEnvelopeText(htmlToText(topHtml), envelope);
-      var payload = [{
+      var who = senderIdentity();
+      var action = emailActionFields(data, agent, who);
+      var payload = {
         ticket_id: Number(ticketId),
         outcome: "Outgoing Email",
-        outcome_id: 0,
-        // Outbound by construction.
-        _isuserupdate: false,
-        // Halo's note (plaintext) + note_html (HTML) convention. Both required.
-        note: notePlain,
-        note_html: noteHtml,
         hiddenfromuser: false,
         actionhide: 0,
-        emailfrom: senderName || senderEmail,
-        emailfromname: senderName,
-        emailfromaddress: senderEmail,
-        // Outbound: emailto is the recipient (the customer).
-        emailto: (data.to || []).join("; "),
-        emailcc: (data.cc || []).join("; "),
-        // Canonical Halo subject — replaces legacy emailsubject.
-        emailsubjectnew: data.subject,
-        emailimportance: getItemImportance(),
-        dateemailed: formatHaloDate(new Date()),
-        // Agent attribution — use the cached Halo agent id when available,
-        // 0 as a marker for "Halo, attribute to API caller" otherwise.
+        // Agent attribution — the cached Halo agent id when available, 0 as
+        // the marker for "Halo, attribute to API caller" otherwise.
         agent_id: agent.id || 0,
-        // Action-author triplet — agent on outbound (who_type=1).
-        who: agent.name || "",
-        who_agentid: agent.id || -1,
-        who_type: 1,
-        mailentryid: mailentryid || undefined,
-        // Direction + delivered-status guard matches Halo's native intake.
-        emaildirection: "O",
-        email_status: 2,
-        // Full original body in both formats so the action mirrors what
-        // native intake produces.
-        emailbody_html: cleanedBody,
-        emailbody: htmlToText(cleanedBody),
-        // For outbound mail: stamp from_address_override with the agent's
-        // actual send-from address. from_mailbox_id: -2 signals "use
-        // overridden from address".
-        from_address_override: senderEmail,
-        from_mailbox_id: -2,
-        // Per-agent sales mailbox setup id, resolved by the task pane at app
-        // load via /api/SalesMailbox and stamped into the snapshot. Undefined
-        // when the agent has no sales mailbox configured — Halo falls back
-        // to tenant defaults.
-        sales_mailbox_override_id: agent.salesMailboxId || undefined,
-        // Time tracking from the compose timer. data.timeSeconds is the
-        // raw second count (capped at 30 min by the UI); Halo expects
-        // decimal hours on time_taken. Omit both fields when 0 so we
-        // don't pollute Halo's time reports with empty entries.
-        timetaken: data.timeSeconds > 0 ? Math.max(data.timeSeconds, 60) / 3600 : undefined,
-        chargerate: data.chargeRateId > 0 ? data.chargeRateId : undefined,
-      }];
+      };
+      var k;
+      for (k in action.fields) if (Object.prototype.hasOwnProperty.call(action.fields, k)) payload[k] = action.fields[k];
       logEvent("info", "POST /api/Actions", {
         ticketId: ticketId,
         bodyLen: (data.body || "").length,
         timeSeconds: data.timeSeconds || 0,
         chargeRateId: data.chargeRateId || 0,
         toCount: (data.to || []).length,
+        agentId: agent.id || 0,
       });
-      return fetchWithTimeout(cfg.haloBaseUrl + "/api/Actions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": "Bearer " + token,
-        },
-        body: JSON.stringify(payload),
-      }, FETCH_TIMEOUT_MS).then(function (r) {
-        if (!r.ok) {
-          return r.text().then(function (t) { throw new Error("Halo " + r.status + ": " + t.slice(0, 200)); });
-        }
-        return r.json();
+      return postJson(cfg.haloBaseUrl + "/api/Actions", token, [payload]).then(function (json) {
+        var entity = Object.prototype.toString.call(json) === "[object Array]" ? json[0]
+          : (json && json.actions && json.actions[0]) ? json.actions[0]
+          : json;
+        if (entity && entity._warning) logEvent("warn", "Halo /Actions warning: " + truncate(String(entity._warning)));
+        return json;
       });
     });
   }
 
+  // ---------- The handler ----------
+
   function onMessageSendHandler(event) {
-    // Absolute-first tracer: write a raw localStorage key the moment the
-    // handler is entered, BEFORE any closure-captured helper is touched.
-    // If diagnostics shows "handler entered" via logEvent but this key is
-    // missing, the issue is between dispatch and our entry. If this key
-    // is set but "handler entered" never logs, logEvent itself is broken
-    // in the dispatch context.
-    try {
-      window.localStorage.setItem("halo.onSendEntry.v1", new Date().toISOString());
-    } catch (e) { /* swallow */ }
+    var enteredAt = new Date().toISOString();
+    // Absolute-first tracer (browser runtimes): written before any helper is
+    // touched. In classic Outlook the same timestamp is persisted with the
+    // run's diagnostics instead.
+    if (hasLocalStorage()) {
+      try { window.localStorage.setItem(ON_SEND_ENTRY_KEY, enteredAt); } catch (e) { /* swallow */ }
+    }
 
     var startedAt = Date.now();
     var completed = false;
     var stage = "init";
+    var safety = null;
+    var writing = false;
 
-    logEvent("info", "handler entered");
+    logEvent("info", "handler entered", {
+      platform: (function () { try { return Office.context.platform; } catch (e) { return null; } })(),
+      agentSnapshot: !!getAgentSnapshot().id,
+      controlSnapshot: !!getControlSnapshot().email_start_tag,
+      intakeMailboxes: getMailboxSnapshot().length,
+    });
 
     var finish = function (errorMessage) {
       if (completed) return;
       completed = true;
+      if (safety) clearTimeout(safety);
       var opts = { allowEvent: true };
       if (errorMessage) opts.errorMessage = errorMessage;
       logEvent(errorMessage ? "error" : "info",
         errorMessage ? ("finished with error in '" + stage + "': " + errorMessage)
                      : ("finished ok in '" + stage + "'"),
         { stage: stage, durationMs: Date.now() - startedAt });
-      // logEvent writes synchronously to localStorage, so the entry above is
-      // durable before event.completed() terminates the runtime.
-      try { event.completed(opts); } catch (e) {}
+      // Persist the run's diagnostics BEFORE completing: code after
+      // event.completed() isn't guaranteed to run.
+      persistDiagnostics(enteredAt).then(function () {
+        try { event.completed(opts); } catch (e) {}
+      });
     };
 
-    // Outer safety. If we get here, something below didn't propagate.
-    var safety = setTimeout(function () {
-      finish("HaloPSA log-on-send hung in stage \"" + stage + "\" — email sent anyway.");
-    }, SAFETY_MS);
+    // Lookup-phase safety: nothing has been written yet, so letting the send
+    // go is harmless. Replaced by the write budget once a write begins.
+    var armSafety = function (ms, label) {
+      if (safety) clearTimeout(safety);
+      safety = setTimeout(function () {
+        finish("HaloPSA log-on-send " + label + " in stage \"" + stage + "\" — email sent anyway.");
+      }, ms);
+    };
+    var beginWrite = function () {
+      if (writing) return;
+      writing = true;
+      armSafety(WRITE_BUDGET_MS, "took too long");
+    };
+    armSafety(SAFETY_MS, "hung");
 
     stage = "loadCustomProps";
     logEvent("info", "stage → loadCustomProps");
@@ -933,10 +1024,24 @@
         chargeRateId: chargeRateId,
       });
 
+      var clearMarkers = function () {
+        stage = "clearMarker";
+        logEvent("info", "stage → clearMarker");
+        // Clear every staged prop so re-sending the same draft doesn't
+        // double-log. Includes timer + charge rate so a fresh draft (next
+        // reply from this thread) starts from zero.
+        return new Promise(function (resolve) {
+          cp.set(TICKET_PROP, null);
+          cp.set(PENDING_CREATE_PROP, null);
+          cp.set(TIMER_TIME_PROP, null);
+          cp.set(CHARGE_RATE_PROP, null);
+          cp.saveAsync(function () { resolve(); });
+        });
+      };
+
       if (!stagedTicketId && !pending) {
         var defaults = getDefaults();
         if (!defaults.autoLogRepliesToTickets) {
-          clearTimeout(safety);
           finish();
           return;
         }
@@ -958,9 +1063,9 @@
               });
             });
         }).then(function (result) {
+          if (completed) return;
           if (!result.foundId) {
             logEvent("info", "auto-lookup: no match, skipping");
-            clearTimeout(safety);
             finish();
             return;
           }
@@ -975,6 +1080,7 @@
             toPromise,
             readRecipientsField(Office.context.mailbox.item.cc),
           ]).then(function (parts) {
+            if (completed) return null;
             // If a Halo intake mailbox is among the recipients, native intake
             // will log this reply itself — appending here too would double-post.
             if (recipientsHitHaloMailbox(parts[2], parts[3])) {
@@ -991,13 +1097,12 @@
             };
             stage = "appendToHalo";
             logEvent("info", "stage → appendToHalo (auto)", { ticketId: result.foundId });
+            beginWrite();
             return appendToHalo(result.foundId, data);
           }).then(function () {
-            clearTimeout(safety);
             finish();
           });
         }).catch(function (err) {
-          clearTimeout(safety);
           finish("HaloPSA auto-import failed: " +
             (err && err.message ? err.message : String(err)) + ". Email sent anyway.");
         });
@@ -1012,6 +1117,7 @@
         readRecipientsField(Office.context.mailbox.item.to),
         readRecipientsField(Office.context.mailbox.item.cc),
       ]).then(function (parts) {
+        if (completed) return;
         var data = {
           body: parts[0],
           subject: parts[1],
@@ -1020,38 +1126,26 @@
           timeSeconds: timeSeconds,
           chargeRateId: chargeRateId,
         };
-        // Create-then-append path: pending payload wins over a staged
-        // ticketId (the more recent intent). Post the ticket first, then
-        // append the action to the new ticket id.
+        // Create path: the pending payload wins over a staged ticketId (the
+        // more recent intent). The ticket POST carries the email as the
+        // initial action — nothing is appended afterwards.
         if (pending) {
           stage = "createTicket";
           logEvent("info", "stage → createTicket", { summary: pending.summary });
+          beginWrite();
           return createTicketFromPending(pending, data).then(function (newId) {
-            stage = "appendToHalo";
-            logEvent("info", "stage → appendToHalo (newly created)", { ticketId: newId });
-            return appendToHalo(newId, data);
+            logEvent("info", "ticket created", { ticketId: newId });
           });
         }
         stage = "appendToHalo";
         logEvent("info", "stage → appendToHalo");
+        beginWrite();
         return appendToHalo(stagedTicketId, data);
       }).then(function () {
-        stage = "clearMarker";
-        logEvent("info", "stage → clearMarker");
-        // Clear every staged prop so re-sending the same draft doesn't
-        // double-log. Includes timer + charge rate so a fresh draft
-        // (next reply from this thread) starts from zero.
-        cp.set(TICKET_PROP, null);
-        cp.set(PENDING_CREATE_PROP, null);
-        cp.set(TIMER_TIME_PROP, null);
-        cp.set(CHARGE_RATE_PROP, null);
-        cp.saveAsync(function () {
-          clearTimeout(safety);
-          finish();
-        });
+        if (completed) return;
+        return clearMarkers().then(function () { finish(); });
       });
     }).catch(function (err) {
-      clearTimeout(safety);
       var msg = err && err.message ? err.message : String(err);
       finish("HaloPSA log-on-send failed in \"" + stage + "\": " + msg + ". Email sent anyway.");
     });
@@ -1059,19 +1153,16 @@
 
   // Register at module load — NOT inside Office.onReady. Microsoft's reference
   // implementations (smart-alerts-walkthrough sample) call associate at top
-  // level so the handler is wired before Outlook dispatches the event. Doing
-  // it inside Office.onReady introduces a callback delay during which a
-  // racing dispatch finds no handler and silently drops the event.
-  // Office.actions is part of office.js and becomes available as soon as the
-  // script tag finishes — earlier than Office.onReady fires.
+  // level so the handler is wired before Outlook dispatches the event, and in
+  // classic Outlook onReady callbacks never run for event handlers at all.
   //
-  // Also expose the handler at window scope. Office.js's dispatch path
-  // is documented to look up the action via the associate map, but some
-  // older / mobile / new-Outlook builds also fall back to a global lookup
-  // by name. The IIFE hides the function from that path; this re-exposes
-  // it without giving up the closure for our helpers.
+  // Also expose the handler at global scope: some builds fall back to a
+  // global lookup by name. The IIFE hides the function from that path; this
+  // re-exposes it without giving up the closure for our helpers.
   if (typeof window !== "undefined") {
     window.onMessageSendHandler = onMessageSendHandler;
+  } else if (typeof globalThis !== "undefined") {
+    try { globalThis.onMessageSendHandler = onMessageSendHandler; } catch (e) {}
   }
   if (typeof Office !== "undefined" && Office.actions && typeof Office.actions.associate === "function") {
     Office.actions.associate("onMessageSendHandler", onMessageSendHandler);
@@ -1089,5 +1180,15 @@
         }
       });
     }
+  }
+
+  // Pure helpers for unit tests (Node). Never reached in Outlook.
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      domainOf: domainOf, clientDomains: clientDomains, matchClientByDomain: matchClientByDomain,
+      clientIdFromUsers: clientIdFromUsers, exactUserByEmail: exactUserByEmail,
+      extractTicketIdFromSubject: extractTicketIdFromSubject, extractTopReply: extractTopReply,
+      formEncode: formEncode, trimEntries: trimEntries, htmlToText: htmlToText,
+    };
   }
 })();
