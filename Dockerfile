@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # Build stage — build @iusehalo/halo-api once, then both Vite apps + the MCP server off it.
-FROM node:20-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /app
 
 # Workspace skeleton first so `npm ci` resolves cross-workspace deps without
@@ -23,7 +23,7 @@ RUN npm run build:outlook && npm run build:teams && npm run build:mcp
 # MCP production deps (omit dev) for the runtime stage. We do a second
 # workspace-aware install with --omit=dev so the runtime image carries only
 # what's needed to run apps/mcp.
-FROM node:20-alpine AS mcp-runtime-deps
+FROM node:26-alpine AS mcp-runtime-deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
 COPY packages/halo-api/package.json packages/halo-api/package.json
@@ -38,7 +38,7 @@ RUN npm ci --omit=dev --ignore-scripts || npm install --omit=dev --ignore-script
 #
 # nginx is PID 1; node runs as a backgrounded child. If node dies, the static
 # surfaces keep serving (degraded — AI agents will fail until restart).
-FROM node:20-alpine AS runtime
+FROM node:26-alpine AS runtime
 RUN apk add --no-cache nginx tini && mkdir -p /run/nginx
 WORKDIR /app
 
