@@ -12,15 +12,15 @@
     "validate-manifest": "npx office-addin-manifest validate public/manifest.json"
   },
   "dependencies": {
-    "@fluentui/react-components": "^9.54.0",
-    "@fluentui/react-icons": "^2.0.245",
+    "@fluentui/react-components": "^9.74.11",
+    "@fluentui/react-icons": "^2.0.344",
     "@iusehalo/halo-api": "*",
     "fflate": "^0.8.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@types/office-js": "^1.0.430",
+    "@types/office-js": "^1.0.614",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^6.1.2",
