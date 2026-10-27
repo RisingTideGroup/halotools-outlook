@@ -63,6 +63,20 @@
         color: var(--ink-3);
       }
 
+      .notice {
+        max-width: 1032px;
+        margin: 8px auto 0;
+        padding: 12px 16px;
+        border: 1px solid #f0c36d;
+        border-left: 4px solid #d9822b;
+        border-radius: 8px;
+        background: #fff8e6;
+        color: var(--ink);
+        font-size: 14px;
+      }
+      .notice strong { display: block; margin-bottom: 2px; }
+      .notice a { text-decoration: underline; }
+
       .hero {
         max-width: 1080px;
         margin: 32px auto 48px;
@@ -290,6 +304,16 @@
         <a href="https://risingtidegroup.net" target="_blank" rel="noopener noreferrer">Rising Tide</a>
       </span>
     </header>
+
+    <div class="notice" role="status">
+      <strong>Known issue with Outlook Classic</strong>
+      There's a current bug
+      <a href="https://github.com/OfficeDev/office-js/issues/7024" target="_blank" rel="noopener noreferrer">opened with Microsoft</a>
+      where the plugin may interfere with sending email. You'll see an annoying
+      prompt saying the plugin can't be contacted. Click <b>Send Anyway</b> and the
+      email goes out, but it will NOT log to Halo. All other functions of the
+      plugin continue to work.
+    </div>
 
     <div class="hero">
       <div class="lead">

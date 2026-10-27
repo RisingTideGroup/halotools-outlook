@@ -432,6 +432,23 @@ export function SetupApp() {
   return (
     <div className={styles.page}>
       <BrandHeader />
+      <MessageBar intent="warning" layout="multiline" style={{ width: "min(680px, 100%)", marginBottom: 16 }}>
+        <MessageBarBody>
+          <MessageBarTitle>Known issue with Outlook Classic</MessageBarTitle>
+          There's a current bug{" "}
+          <a
+            href="https://github.com/OfficeDev/office-js/issues/7024"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            opened with Microsoft
+          </a>{" "}
+          where the plugin may interfere with sending email. You'll see an
+          annoying prompt saying the plugin can't be contacted. Click{" "}
+          <b>Send Anyway</b> and the email goes out, but it will NOT log to
+          Halo. All other functions of the plugin continue to work.
+        </MessageBarBody>
+      </MessageBar>
       <Card className={styles.card}>
         {step === "choose" && (
           <>
