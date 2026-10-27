@@ -443,11 +443,10 @@ export function SetupApp() {
           >
             opened with Microsoft
           </a>{" "}
-          where the plugin may interfere with sending the email with an annoying
-          prompt indicating the plugin cannot be contacted. Clicking{" "}
-          <b>Send Anyway</b> will allow you to send the email anyways, but the
-          email will NOT log to Halo. All other functions of the plugin continue
-          to work.
+          where the plugin may interfere with sending email. You'll see an
+          annoying prompt saying the plugin can't be contacted. Click{" "}
+          <b>Send Anyway</b> and the email goes out, but it will NOT log to
+          Halo. All other functions of the plugin continue to work.
         </MessageBarBody>
       </MessageBar>
       <Card className={styles.card}>
