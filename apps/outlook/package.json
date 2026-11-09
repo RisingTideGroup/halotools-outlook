@@ -12,20 +12,20 @@
     "validate-manifest": "npx office-addin-manifest validate public/manifest.json"
   },
   "dependencies": {
-    "@fluentui/react-components": "^9.54.0",
-    "@fluentui/react-icons": "^2.0.245",
+    "@fluentui/react-components": "^9.75.1",
+    "@fluentui/react-icons": "^2.0.345",
     "@iusehalo/halo-api": "*",
     "fflate": "^0.8.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@types/office-js": "^1.0.430",
+    "@types/office-js": "^1.0.616",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
-    "@vitejs/plugin-react": "^6.1.2",
+    "@vitejs/plugin-react": "^6.2.1",
     "office-addin-manifest": "^3.0.1",
     "typescript": "^5.5.3",
-    "vite": "^8.3.5"
+    "vite": "^8.3.6"
   }
 }
